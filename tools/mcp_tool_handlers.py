@@ -1,5 +1,6 @@
 """Registry-facing sync handlers for MCP tools and utility tools (resources/prompts), plus the per-call recovery
-ladder: trust gating, circuit breaker, auth (401) refresh, session-expired reconnect and dead-stdio respawn retry."""
+ladder: trust gating, circuit breaker, auth (401) refresh, session-expired reconnect, stale
+keep-alive reconnect and dead-stdio respawn retry."""
 
 import logging
 import asyncio
@@ -18,7 +19,7 @@ from tools.mcp_tool_content import (
     _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block,
     _render_mcp_dropped_block_notice, _render_mcp_resource_block, _strip_reserved_meta_keys,
     _truncate_mcp_text_result)
-from tools.mcp_tool_errors import _is_auth_error, _is_session_expired_error
+from tools.mcp_tool_errors import _is_auth_error, _is_session_expired_error, _is_stale_connection_error
 
 logger = logging.getLogger("tools.mcp_tool")
 _MISSING = object()
@@ -185,6 +186,32 @@ def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retr
                        "falling through to error response.", server_name)
         return None
     return _retry_once(server_name, retry_call, op_description, "session reconnect")
+
+
+def _handle_stale_connection_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
+    """Rebuild the transport and retry once on a stale-connection failure.
+
+    Mirrors :func:`_handle_session_expired_and_retry`: signal the server task's reconnect event so
+    the dead transport is torn down and a fresh ``streamablehttp_client`` + ``ClientSession`` pair
+    is built, wait for the new session to report ready, then re-run the operation exactly once.
+    A CDN / load-balancer idle kill is transient — the server itself is healthy — so surfacing
+    ``MCPError: Connection closed`` to the model without a retry turns an invisible,
+    self-healing blip into a visible tool failure (#90166).
+
+    None means this is not a stale-connection error, there is no server record / running loop to
+    recover through, or the retry also failed; the caller falls through to its generic error path.
+    """
+    srv = (_lookup_reconnectable_server(server_name, require_loop=True)
+           if _is_stale_connection_error(exc) else None)
+    if srv is None:
+        return None
+    logger.info("MCP server '%s': %s failed with stale-connection error (%s); signalling transport "
+                "reconnect and retrying once.", server_name, op_description, exc)
+    if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=15):
+        logger.warning("MCP server '%s': reconnect did not ready within 15s after stale-connection "
+                       "error; falling through to error response.", server_name)
+        return None
+    return _retry_once(server_name, retry_call, op_description, "stale-connection reconnect")
 
 
 class _StdioChildExited(RuntimeError):
@@ -488,16 +515,23 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
-            (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
+            (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry,
+             _handle_session_expired_and_retry, _handle_stale_connection_and_retry),
             _on_failure, record_outcome=True)
     return _handler
 
 
-def _make_utility_handler(op: str, log_label: str, rpc, render, required: Optional[str] = None):
+def _make_utility_handler(op: str, log_label: str, rpc, render, required: Optional[str] = None,
+                          stale_retry: bool = False):
     """``(server_name, tool_timeout) -> sync handler`` for one utility tool: ``rpc(session, args,
     server_name)`` awaited under ``_rpc_lock``, ``render(result, server_name)`` -> JSON-able
-    payload, ``required`` validated before any transport work."""
+    payload, ``required`` validated before any transport work.  ``stale_retry`` adds the stale
+    keep-alive recovery handler (#90166) so the read-only resources/* operations also recover
+    from an idle CDN / proxy connection kill."""
     def _factory(server_name: str, tool_timeout: float):
+        recoverers = (_handle_auth_error_and_retry, _handle_session_expired_and_retry)
+        if stale_retry:
+            recoverers += (_handle_stale_connection_and_retry,)
         def _handler(args: dict, **kwargs) -> str:
             from tools import mcp_tool_discovery as _discovery  # lazy: import cycle
             server = _discovery._get_connected_server_for_call(server_name)
@@ -511,8 +545,7 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
                     result = await rpc(server.session, args, server_name)
                 return json.dumps(render(result, server_name), ensure_ascii=False)
             return _dispatch(
-                server_name, server, op, _call, tool_timeout,
-                (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
+                server_name, server, op, _call, tool_timeout, recoverers,
                 lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc))
         return _handler
     return _factory
@@ -576,10 +609,12 @@ def _render_get_prompt(result, server_name: str) -> dict:
 
 _make_list_resources_handler = _make_utility_handler(
     "resources/list", "list_resources",
-    lambda session, args, sn: _core._paginate_full_list(session.list_resources, "resources", sn), _render_resource_list)
+    lambda session, args, sn: _core._paginate_full_list(session.list_resources, "resources", sn),
+    _render_resource_list, stale_retry=True)
 _make_read_resource_handler = _make_utility_handler(
     "resources/read", "read_resource",
-    lambda session, args, sn: session.read_resource(args["uri"]), _render_read_resource, required="uri")
+    lambda session, args, sn: session.read_resource(args["uri"]), _render_read_resource,
+    required="uri", stale_retry=True)
 _make_list_prompts_handler = _make_utility_handler(
     "prompts/list", "list_prompts",
     lambda session, args, sn: _core._paginate_full_list(session.list_prompts, "prompts", sn), _render_prompt_list)
