@@ -348,7 +348,7 @@ _STALE_CONNECTION_MARKERS: tuple = (
 )
 
 
-def _is_stale_connection_error(exc: BaseException) -> bool:
+def _is_stale_connection_error(exc: BaseException, *, allow_message_markers: bool = True) -> bool:
     """True if ``exc`` is a stale/dead-connection transport failure: the remote closed the
     underlying keep-alive connection out from under us — the failure a CDN / load balancer /
     proxy idle kill surfaces as ``MCPError: Connection closed`` or ``RemoteProtocolError: Server
@@ -358,6 +358,13 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
     GC (``Invalid or expired session``) plus AnyIO stream closures.  Both are transient transport
     conditions that a rebuild-and-retry-once recovers from; neither is a credential or config
     problem.
+
+    ``allow_message_markers`` gates the substring matching on exception messages.  Marker phrases
+    like ``"connection reset"`` / ``"connection closed"`` also show up in *application-level*
+    failures, and retrying ``tools/call`` after a partial execution can duplicate real side
+    effects; ``tools/call`` passes ``allow_message_markers=False`` so only exact transport
+    exception type names trigger a retry (read-only ``resources/*`` handlers keep marker
+    matching).  See #91460 review.
 
     Same bounded, identity-visited traversal as :func:`_is_session_expired_error` so arbitrarily
     deep ExceptionGroup / ``__cause__`` graphs terminate promptly.
@@ -379,9 +386,10 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
             return False
         if type(current).__name__ in _STALE_CONNECTION_TYPE_NAMES:
             return True
-        msg = str(current).lower()
-        if msg and any(marker in msg for marker in _STALE_CONNECTION_MARKERS):
-            return True
+        if allow_message_markers:
+            msg = str(current).lower()
+            if msg and any(marker in msg for marker in _STALE_CONNECTION_MARKERS):
+                return True
 
         stack.extend(getattr(current, "exceptions", ()))
         stack.append(getattr(current, "__cause__", None))

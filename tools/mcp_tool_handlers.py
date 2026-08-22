@@ -9,6 +9,7 @@ import inspect
 import json
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.registry import tool_error
@@ -94,17 +95,15 @@ def _acquire_call_server(server_name: str, tool_timeout: float):
     return None, not_connected
 
 
-def _result_is_error(result) -> bool:
-    """True only for a JSON payload carrying an ``error`` key (non-JSON = success)."""
-    try:
-        return "error" in json.loads(result)
-    except (json.JSONDecodeError, TypeError):
-        return False
-
-
 def _record_call_outcome(server_name: str, result) -> Any:
-    """Breaker bookkeeping: an error payload from the tool itself still counts as a strike."""
-    (_core._bump_server_error if _result_is_error(result) else _core._reset_server_error)(server_name)
+    """Breaker bookkeeping: an error payload from the tool itself still counts as a strike; an
+    unparseable payload is neither a strike nor evidence of health, so the counter is left
+    untouched — only a parsed payload without an ``error`` key closes the breaker (#91460 review)."""
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return result
+    (_core._bump_server_error if "error" in parsed else _core._reset_server_error)(server_name)
     return result
 
 
@@ -127,25 +126,84 @@ def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     return srv if ok else None
 
 
+class _RetryBudgetExhausted(Exception):
+    """Recovery retry skipped because the invocation's retry budget is spent."""
+
+
+class _RetryBudget:
+    """Per-invocation retry budget shared across the recovery handlers.
+
+    A single user call chains several recovery handlers (OAuth, session expiry, stale keep-alive
+    connection).  Each handler wants to reconnect and re-run the operation once; without a shared
+    budget their retries stack, so one user call can execute a non-idempotent tool two or three
+    times — each partial execution carrying real side effects (#91460 review).  Every recovery
+    retry consumes one unit of the shared budget; once spent, further retry attempts raise
+    :class:`_RetryBudgetExhausted` and the handler falls through to the caller's generic error
+    path instead of re-running the operation.
+    """
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, limit: int = 1) -> None:
+        self.remaining = limit
+
+    def consume(self) -> None:
+        if self.remaining <= 0:
+            raise _RetryBudgetExhausted("per-invocation retry budget already spent")
+        self.remaining -= 1
+
+
 def _retry_once(server_name: str, retry_call, op_description: str, what: str):
-    """Re-run ``retry_call`` after a recovery step. Returns the result (closing the breaker)
-    when it is not an error payload; None when the retry raised or errored (caller falls through)."""
+    """Re-run ``retry_call`` after a recovery step. Returns the result (closing the breaker) when
+    it is a parsed payload without an ``error`` key; an unparseable payload is returned as-is
+    WITHOUT closing the breaker — it is not evidence of health (#91460 review). None when the
+    retry raised, the shared retry budget was spent, or the payload carries an error; the caller
+    falls through."""
     try:
         result = retry_call()
+    except _RetryBudgetExhausted:
+        logger.info("MCP %s/%s recovery retry skipped: per-invocation retry budget already spent.",
+                    server_name, op_description)
+        return None
     except Exception as retry_exc:
         logger.warning("MCP %s/%s retry after %s failed: %s", server_name, op_description, what, retry_exc)
         return None
-    if _result_is_error(result):
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("MCP server '%s': %s retry after %s returned an unparseable payload; returning "
+                       "it without resetting the circuit breaker.", server_name, op_description, what)
+        return result
+    if "error" in parsed:
         return None
     _core._reset_server_error(server_name)
     return result
 
 
-def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
+def _bounded_reconnect_timeout(deadline: Optional[float]) -> float:
+    """Reconnect-wait timeout capped at the caller's remaining deadline budget (min 15s, floored
+    at 0.0 once the deadline has passed) so a slow reconnect cannot stretch a short tool call past
+    its own timeout (#91460 review)."""
+    if deadline is None:
+        return 15.0
+    return min(15.0, max(0.0, deadline - time.monotonic()))
+
+
+def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str, *,
+                                 deadline: Optional[float] = None,
+                                 retry_budget: Optional["_RetryBudget"] = None):
     """OAuth recovery + one retry; None when *exc* is not an auth error. ``handle_401`` decides
     viability; if viable, signal a reconnect (fresh credentials), wait ready, retry once. Any
-    failure returns the structured ``needs_reauth`` error so the model stops refreshing."""
+    failure returns the structured ``needs_reauth`` error so the model stops refreshing.
+
+    ``deadline`` caps the reconnect wait at the caller's remaining budget; a spent
+    ``retry_budget`` skips the whole recovery so stacked recoverers cannot re-run the operation
+    several times (#91460 review)."""
     if not _is_auth_error(exc):
+        return None
+    if retry_budget is not None and retry_budget.remaining <= 0:
+        logger.info("MCP %s/%s recovery skipped: per-invocation retry budget already spent.",
+                    server_name, op_description)
         return None
     from tools.mcp_oauth_manager import get_manager
     try:
@@ -158,7 +216,8 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
         # Recovery + reconnect is independent evidence of viability: close the breaker here, not only on
         # retry success (else a failing retry pins it open forever).
         if srv is not None and _loop._signal_reconnect_and_wait(
-                server_name, srv, op_description=f"{op_description} after OAuth recovery", timeout=15):
+                server_name, srv, op_description=f"{op_description} after OAuth recovery",
+                timeout=_bounded_reconnect_timeout(deadline)):
             _core._reset_server_error(server_name)
         result = _retry_once(server_name, retry_call, op_description, "auth recovery")
         if result is not None:
@@ -166,7 +225,9 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
     return _strike(server_name, _NEEDS_REAUTH_MSG.format(s=server_name), needs_reauth=True, server=server_name)
 
 
-def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
+def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str, *,
+                                      deadline: Optional[float] = None,
+                                      retry_budget: Optional["_RetryBudget"] = None):
     """Transport reconnect + one retry on session expiry; None to fall through. Skips
     ``handle_401``: the token is valid, only the server-side session is stale.
 
@@ -175,20 +236,31 @@ def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retr
     ``_reconnect_event`` causes the server task's lifecycle loop to tear down the current
     ``streamablehttp_client`` + ``ClientSession`` and rebuild them, reusing the existing OAuth provider
     instance. See #13383.
+
+    ``deadline`` caps the reconnect wait at the caller's remaining budget; a spent
+    ``retry_budget`` skips the whole recovery (#91460 review).
     """
     srv = _lookup_reconnectable_server(server_name, require_loop=True) if _is_session_expired_error(exc) else None
     if srv is None:
         return None
+    if retry_budget is not None and retry_budget.remaining <= 0:
+        logger.info("MCP %s/%s recovery skipped: per-invocation retry budget already spent.",
+                    server_name, op_description)
+        return None
     logger.info("MCP server '%s': %s failed with session-expired error (%s); signalling transport reconnect "
                 "and retrying once.", server_name, op_description, exc)
-    if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=15):
-        logger.warning("MCP server '%s': reconnect did not ready within 15s after session-expired error; "
-                       "falling through to error response.", server_name)
+    reconnect_timeout = _bounded_reconnect_timeout(deadline)
+    if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=reconnect_timeout):
+        logger.warning("MCP server '%s': reconnect did not ready within %.1fs after session-expired error; "
+                       "falling through to error response.", server_name, reconnect_timeout)
         return None
     return _retry_once(server_name, retry_call, op_description, "session reconnect")
 
 
-def _handle_stale_connection_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
+def _handle_stale_connection_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str, *,
+                                       allow_message_markers: bool = True,
+                                       deadline: Optional[float] = None,
+                                       retry_budget: Optional["_RetryBudget"] = None):
     """Rebuild the transport and retry once on a stale-connection failure.
 
     Mirrors :func:`_handle_session_expired_and_retry`: signal the server task's reconnect event so
@@ -198,18 +270,35 @@ def _handle_stale_connection_and_retry(server_name: str, exc: BaseException, ret
     ``MCPError: Connection closed`` to the model without a retry turns an invisible,
     self-healing blip into a visible tool failure (#90166).
 
+    ``allow_message_markers`` gates the substring matching on exception messages.  Marker phrases
+    like ``"connection reset"`` / ``"connection closed"`` also show up in *application-level*
+    failures (a tool whose own backend died mid-execution, surfaced as a JSON-RPC error containing
+    those words), and retrying ``tools/call`` after a partial execution can duplicate real side
+    effects; the ``tools/call`` recoverer passes ``allow_message_markers=False`` so only exact
+    transport exception type names trigger a retry, while the read-only ``resources/*`` handlers
+    keep marker matching (#91460 review).
+
+    ``deadline`` caps the reconnect wait at the caller's remaining budget; a spent
+    ``retry_budget`` skips the whole recovery (#91460 review).
+
     None means this is not a stale-connection error, there is no server record / running loop to
-    recover through, or the retry also failed; the caller falls through to its generic error path.
+    recover through, the retry budget is spent, or the retry also failed; the caller falls through
+    to its generic error path.
     """
     srv = (_lookup_reconnectable_server(server_name, require_loop=True)
-           if _is_stale_connection_error(exc) else None)
+           if _is_stale_connection_error(exc, allow_message_markers=allow_message_markers) else None)
     if srv is None:
+        return None
+    if retry_budget is not None and retry_budget.remaining <= 0:
+        logger.info("MCP %s/%s recovery skipped: per-invocation retry budget already spent.",
+                    server_name, op_description)
         return None
     logger.info("MCP server '%s': %s failed with stale-connection error (%s); signalling transport "
                 "reconnect and retrying once.", server_name, op_description, exc)
-    if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=15):
-        logger.warning("MCP server '%s': reconnect did not ready within 15s after stale-connection "
-                       "error; falling through to error response.", server_name)
+    reconnect_timeout = _bounded_reconnect_timeout(deadline)
+    if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=reconnect_timeout):
+        logger.warning("MCP server '%s': reconnect did not ready within %.1fs after stale-connection "
+                       "error; falling through to error response.", server_name, reconnect_timeout)
         return None
     return _retry_once(server_name, retry_call, op_description, "stale-connection reconnect")
 
@@ -222,7 +311,9 @@ class _StdioChildExited(RuntimeError):
         self.in_flight = in_flight
 
 
-def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str):
+def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str, *,
+                                          deadline: Optional[float] = None,
+                                          retry_budget: Optional["_RetryBudget"] = None):
     """Respawn a dead stdio child; retry once only when it was dead before dispatch.
 
     A mid-call exit is ambiguous: the server may have applied a side effect before its
@@ -235,6 +326,10 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
     ``_reconnect_event`` (one signal, same as before) and waits for the server task to publish a fresh
     session. Spawn frequency stays governed entirely by ``run()``'s rapid-drop budget, which parks a
     transport that keeps dropping without proving healthy (#62212).
+
+    ``deadline``/``retry_budget`` complete the recoverer contract: the respawn wait has its own
+    bound (``_core._STDIO_RESPAWN_WAIT_SEC``), and the one pre-dispatch replay consumes the shared
+    retry budget like any other recovery retry.
     """
     if not isinstance(exc, _StdioChildExited):
         return None
@@ -280,14 +375,27 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
 def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
               on_final_failure: Callable[[BaseException], None], record_outcome: bool = False) -> str:
     """Mark the call started on *server* (doubles may lack ``mark_tool_call``), run coroutine function *call*
-    on the MCP loop and, on failure, walk ``recoverers`` (``(server_name, exc, retry_call, op) -> Optional[str]``,
-    None = not its kind; order matters). Unrecovered exceptions go through ``on_final_failure`` and become the
-    generic call-failed error. ``record_outcome`` applies breaker bookkeeping to the FIRST attempt only."""
+    on the MCP loop and, on failure, walk ``recoverers`` (``(server_name, exc, retry_call, op, *,
+    deadline, retry_budget) -> Optional[str]``, None = not its kind; order matters). Unrecovered exceptions
+    go through ``on_final_failure`` and become the generic call-failed error. ``record_outcome`` applies
+    breaker bookkeeping to the FIRST attempt only.
+
+    One shared per-invocation :class:`_RetryBudget` and deadline are created here: every recovery handler
+    wants to reconnect and re-run the operation once, and the budget caps the TOTAL for this single user
+    call, so a non-idempotent tool is never re-run several times by stacked recoverers (#91460 review).
+    The first attempt is free; each recovery retry consumes one unit."""
     if callable(getattr(server, "mark_tool_call", None)):
         server.mark_tool_call()
 
+    retry_budget = _RetryBudget(limit=1)
+    deadline = None if tool_timeout is None else time.monotonic() + tool_timeout
+
     def call_once():
         return _loop._run_on_mcp_loop(call, timeout=tool_timeout)
+
+    def call_with_retry_budget():
+        retry_budget.consume()
+        return call_once()
 
     try:
         result = call_once()
@@ -296,7 +404,8 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
         return tool_error("MCP call interrupted: user sent a new message")
     except Exception as exc:
         for recover in recoverers:
-            recovered = recover(server_name, exc, call_once, op)
+            recovered = recover(server_name, exc, call_with_retry_budget, op,
+                                deadline=deadline, retry_budget=retry_budget)
             if recovered is not None:
                 return recovered
         on_final_failure(exc)
@@ -516,7 +625,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
             (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry,
-             _handle_session_expired_and_retry, _handle_stale_connection_and_retry),
+             _handle_session_expired_and_retry,
+             # tools/call: type-name evidence only — marker phrases also occur in app-level errors,
+             # and replaying a partially executed tool duplicates side effects (#91460 review).
+             partial(_handle_stale_connection_and_retry, allow_message_markers=False)),
             _on_failure, record_outcome=True)
     return _handler
 
