@@ -178,6 +178,9 @@ export interface Translations {
       back: string
       openLogs: string
       repairHint: string
+      ipcBridgeTitle: string
+      ipcBridgeDescription: string
+      ipcBridgeHint: string
       remoteSignInHint: (signInLabel: string) => string
       signOutAndSignIn: string
       remoteFailureHint: string
