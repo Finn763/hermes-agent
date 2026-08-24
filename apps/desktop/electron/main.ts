@@ -199,9 +199,9 @@ import {
   resolveGatewayFileBackend,
   writeBufferToFile
 } from './gateway-file-download'
+import { probeGatewayRpc, rpcProbeBootError } from './gateway-rpc-probe'
 import { startGatewaysAfterUpdateAbort, stopGatewayBeforeUpdate } from './gateway-stop-before-update'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
-import { probeGatewayRpc, rpcProbeBootError } from './gateway-rpc-probe'
 import { registerGitIpc } from './git-ipc'
 import { clearStaleGitLocks } from './gitlock'
 import { readAndConsumeHandoffResult } from './handoff-result'
