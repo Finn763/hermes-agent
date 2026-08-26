@@ -8548,6 +8548,7 @@ class AIAgent:
         durable_turn_lease = None
         durable_turn_lease_stop = None
         durable_turn_lease_thread = None
+        durable_turn_liveness_thread = None
         durable_turn_lease_activity_lock = threading.Lock()
         durable_turn_lease_turn_active = False
         durable_turn_lease_interrupt_message = None
@@ -8759,22 +8760,102 @@ class AIAgent:
                     getattr(self, "_session_turn_lease_refresh_interval", 60.0)
                 )
 
-                def _refresh_durable_turn_lease() -> None:
-                    def _interrupt_turn(message: str) -> None:
-                        nonlocal durable_turn_lease_interrupt_message
-                        with durable_turn_lease_activity_lock:
-                            if (
-                                durable_turn_lease_stop.is_set()
-                                or not durable_turn_lease_turn_active
-                            ):
-                                return
-                            durable_turn_lease_interrupt_message = message
-                            try:
-                                self.interrupt(message, hard_cancel=True)
-                            except Exception:
-                                self._interrupt_requested = True
-                                self._interrupt_message = message
+                # ── Turn liveness watchdog (#95548) ─────────────────────
+                # The durable lease refresher keeps the lease alive for as
+                # long as the turn runs, so lease renewal is NOT evidence of
+                # progress. A turn that stalls silently (observed #95548: no
+                # tool execution, no API call, no persisted message for 9+
+                # minutes after a slow model response + desktop WS
+                # disconnect) would otherwise renew its lease forever, look
+                # "active", and never be force-aborted. This watchdog keys
+                # off the agent's activity clock (``_last_activity_ts``, the
+                # #72039 single progress source: stamped by API waits,
+                # stream tokens, tool heartbeats and tool completions — but
+                # never by lease renewal). When a turn shows no observable
+                # progress for the configured idle bound it logs the stall
+                # loudly, force-interrupts the turn (surfacing it as an
+                # interrupted turn the UI can retry), and stops lease
+                # renewal so the durable lease lapses and stale-turn
+                # cleanup can reclaim the session even if the hard
+                # interrupt cannot unwind the wedge.
+                _liveness_timeout_raw = float(
+                    os.environ.get("HERMES_TURN_LIVENESS_WATCHDOG_S", "600.0") or 0
+                )
+                _liveness_timeout = (
+                    _liveness_timeout_raw if _liveness_timeout_raw > 0 else None
+                )
+                _liveness_poll = float(
+                    os.environ.get("HERMES_TURN_LIVENESS_WATCHDOG_POLL_S", "15.0")
+                    or 15.0
+                )
 
+                def _interrupt_turn(message: str) -> None:
+                    nonlocal durable_turn_lease_interrupt_message
+                    with durable_turn_lease_activity_lock:
+                        if (
+                            durable_turn_lease_stop.is_set()
+                            or not durable_turn_lease_turn_active
+                        ):
+                            return
+                        durable_turn_lease_interrupt_message = message
+                        try:
+                            self.interrupt(message, hard_cancel=True)
+                        except Exception:
+                            self._interrupt_requested = True
+                            self._interrupt_message = message
+
+                def _watch_turn_liveness() -> None:
+                    nonlocal durable_turn_lease_turn_active
+                    while not durable_turn_lease_stop.wait(
+                        max(0.01, _liveness_poll)
+                    ):
+                        with durable_turn_lease_activity_lock:
+                            if not durable_turn_lease_turn_active:
+                                return
+                            idle_seconds = time.time() - getattr(
+                                self, "_last_activity_ts", time.time()
+                            )
+                            if idle_seconds < _liveness_timeout:
+                                continue
+                        # Surface the stall, then force-abort. The lock is
+                        # released before acting so _interrupt_turn (which
+                        # re-acquires it) cannot deadlock.
+                        last_desc = getattr(self, "_last_activity_desc", None)
+                        logger.error(
+                            "Turn liveness watchdog fired for session %s: "
+                            "no progress for %.1fs (last activity: %r). "
+                            "Force-aborting the turn and stopping lease "
+                            "renewal (#95548).",
+                            getattr(self, "session_id", None) or session_id,
+                            idle_seconds,
+                            last_desc,
+                        )
+                        try:
+                            self._emit_warning(
+                                "⚠️ This turn stopped making progress "
+                                f"({int(idle_seconds)}s without activity); "
+                                "aborting it so the session can recover."
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to emit turn liveness warning",
+                                exc_info=True,
+                            )
+                        _interrupt_turn(
+                            f"Turn made no progress for {int(idle_seconds)}s; "
+                            "aborting to release the session."
+                        )
+                        # Stop renewing the durable lease: a wedge the hard
+                        # interrupt cannot unwind must not keep the lease
+                        # alive forever (the issue's "lease keeps renewing"
+                        # masking). The TTL expiry then lets stale-turn
+                        # cleanup reclaim the row.
+                        with durable_turn_lease_activity_lock:
+                            durable_turn_lease_stop.set()
+                            durable_turn_lease_turn_active = False
+                        return
+
+                def _refresh_durable_turn_lease() -> None:
                     while not durable_turn_lease_stop.wait(_lease_refresh_interval):
                         try:
                             if not _turn_db.refresh_session_turn_lease(
@@ -8815,6 +8896,12 @@ class AIAgent:
                     name="session-turn-lease-refresh",
                     daemon=True,
                 )
+                if _liveness_timeout is not None:
+                    durable_turn_liveness_thread = threading.Thread(
+                        target=_watch_turn_liveness,
+                        name="turn-liveness-watchdog",
+                        daemon=True,
+                    )
 
 
             relay_lease = relay_runtime.SESSION_COORDINATOR.acquire_conversation(
@@ -8863,6 +8950,8 @@ class AIAgent:
                         with durable_turn_lease_activity_lock:
                             durable_turn_lease_turn_active = True
                         durable_turn_lease_thread.start()
+                        if durable_turn_liveness_thread is not None:
+                            durable_turn_liveness_thread.start()
                     result = run_conversation(
                         self,
                         user_message,
@@ -8930,11 +9019,15 @@ class AIAgent:
                         )
                 finally:
                     _stop_durable_turn_lease_refresher()
-                    if (
-                        durable_turn_lease_thread is not None
-                        and durable_turn_lease_thread.is_alive()
+                    for _durable_thread in (
+                        durable_turn_lease_thread,
+                        durable_turn_liveness_thread,
                     ):
-                        durable_turn_lease_thread.join(timeout=1.0)
+                        if (
+                            _durable_thread is not None
+                            and _durable_thread.is_alive()
+                        ):
+                            _durable_thread.join(timeout=1.0)
                     # Clear any interrupt the refresher may have fired between
                     # the inner stop and this join. Must run AFTER join so a
                     # late interrupt does not survive into the next turn.
