@@ -88,10 +88,16 @@ def _agent_with_db(db, *, session_id="stalled-session", platform="desktop"):
     agent._active_children_lock = threading.Lock()
     agent._active_children = set()
     agent.quiet_mode = True
-    # Fresh activity clock: the watchdog must measure idle time from turn
-    # start, exactly like a real cached agent entering a new turn.
-    agent._last_activity_ts = time.time()
-    agent._last_activity_desc = "starting new turn (test)"
+    # A real cached agent entering a new turn holds the activity clock
+    # from its PREVIOUS turn: `_reset_activity_labels_after_turn` keeps
+    # `_last_activity_ts` across turns by design, so an agent that sat
+    # idle longer than the watchdog bound (user walked away, came back,
+    # sent a message) enters with a STALE clock. `AIAgent.run_conversation`
+    # stamps the clock at turn entry (#95663 review), so the watchdog
+    # measures idle from THIS turn's start — mirror that reality: stale
+    # entry clock, fresh measurement after the wrapper's turn-entry stamp.
+    agent._last_activity_ts = time.time() - 1000.0
+    agent._last_activity_desc = "previous turn (idle)"
     agent._session_turn_lease_refresh_interval = 60.0
     return agent
 

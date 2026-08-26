@@ -8949,6 +8949,16 @@ class AIAgent:
                     if durable_turn_lease_thread is not None:
                         with durable_turn_lease_activity_lock:
                             durable_turn_lease_turn_active = True
+                        # Stamp the activity clock at turn entry (#95663
+                        # review): a real agent keeps ``_last_activity_ts``
+                        # across turns (idle time between turns is normal —
+                        # ``_reset_activity_labels_after_turn`` preserves
+                        # it by design), so without this stamp the liveness
+                        # watchdog would measure idle from the PREVIOUS
+                        # turn and force-abort a just-started turn on its
+                        # first poll whenever the agent had been idle longer
+                        # than the watchdog bound.
+                        self._touch_activity("starting new turn")
                         durable_turn_lease_thread.start()
                         if durable_turn_liveness_thread is not None:
                             durable_turn_liveness_thread.start()
