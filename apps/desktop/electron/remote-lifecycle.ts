@@ -30,6 +30,7 @@ import crypto from 'node:crypto'
 import { READY_IN_MERGED_OUTPUT_RE } from './backend-ready'
 import { parseRemoteProfileListing } from './connection-registry'
 import { assertBootstrapNotSuperseded, withRemoteTimeout } from './ssh-connection'
+import { detectRemotePlatform, listWindowsRemoteProfiles } from './windows-remote-lifecycle'
 
 const LOCKFILE_SCHEMA_VERSION = 2
 // Bumped when the desktop<->dashboard reuse contract changes in a way that makes
@@ -389,6 +390,23 @@ async function listRemoteHermesProfiles(ssh) {
   return parseRemoteProfileListing(listing)
 }
 
+// Platform-aware roster inventory. SSH connect accepts Linux, macOS, and
+// native Windows remotes, but listRemoteHermesProfiles above is POSIX-only:
+// its home check rejects drive-letter HERMES_HOME values
+// (%LOCALAPPDATA%\hermes), so Windows hosts logged "Unsafe remote Hermes
+// home." and every named profile vanished from the roster. Route by platform —
+// the same detection connect uses — so Windows answers through the canonical
+// remote runtime helper while POSIX path safety is unchanged.
+async function listSshRemoteHermesProfiles(ssh, explicitHermesPath = '') {
+  const platform = await detectRemotePlatform(ssh, explicitHermesPath)
+
+  if (platform.os === 'Windows') {
+    return listWindowsRemoteProfiles(ssh, explicitHermesPath)
+  }
+
+  return listRemoteHermesProfiles(ssh)
+}
+
 async function readRemoteInstallId(ssh) {
   // The stable backend identity the roster collapses on (`hermes_cli/install_identity.py`:
   // `<install root>/install_id`, opaque hex). Read from the INSTALL root, so an ssh connection
@@ -418,7 +436,6 @@ async function readRemoteInstallId(ssh) {
 
   // Same shape check the minting side guarantees; anything else is not an identity.
   return /^[0-9a-f]{32}$/.test(id) ? id : undefined
-}
 
 function assertSafeRemoteHome(home) {
   const value = String(home || '').trim()
@@ -1759,6 +1776,7 @@ export {
   isForwardBindCollision,
   isLockfileSkew,
   listRemoteHermesProfiles,
+  listSshRemoteHermesProfiles,
   locateHermes,
   LOCKFILE_SCHEMA_VERSION,
   lockfilePath,
