@@ -436,6 +436,7 @@ async function readRemoteInstallId(ssh) {
 
   // Same shape check the minting side guarantees; anything else is not an identity.
   return /^[0-9a-f]{32}$/.test(id) ? id : undefined
+}
 
 function assertSafeRemoteHome(home) {
   const value = String(home || '').trim()

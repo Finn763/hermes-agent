@@ -755,9 +755,7 @@ async function connectWindowsRemote(deps) {
 async function listWindowsRemoteProfiles(ssh, explicitHermesPath = '') {
   const runtime = await probeWindowsRemote(ssh, explicitHermesPath)
   const result = await helper(ssh, runtime, 'list-profiles')
-  const names = Array.isArray(result?.profiles)
-    ? result.profiles.filter(name => typeof name === 'string')
-    : []
+  const names = Array.isArray(result?.profiles) ? result.profiles.filter(name => typeof name === 'string') : []
 
   // Reuse the POSIX roster sanitizer so both platforms apply identical name
   // rules: `default` first, rollback snapshots/junk dropped, sorted.

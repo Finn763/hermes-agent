@@ -318,13 +318,16 @@ test('listRemoteHermesProfiles rejects a hostile HERMES_HOME', async () => {
 test('listSshRemoteHermesProfiles keeps the POSIX listing on Linux/macOS remotes', async () => {
   const ssh = fakeSsh([
     [/uname/, 'Linux\nx86_64\n'],
-    [/HERMES_HOME/, '/Users/z\.hermes\n'],
+    [/HERMES_HOME/, '/Users/z/.hermes\n'],
     [/ls -1/, 'bob\ndixie\n']
   ])
 
   assert.deepEqual(await listSshRemoteHermesProfiles(ssh), ['default', 'bob', 'dixie'])
   // POSIX path safety is untouched: the shell home check still gates the ls.
-  assert.equal(ssh.calls.some(cmd => cmd.includes('Unsafe')), false)
+  assert.equal(
+    ssh.calls.some(cmd => cmd.includes('Unsafe')),
+    false
+  )
 })
 
 test('listRemoteHermesProfiles still rejects a hostile POSIX HERMES_HOME through the dispatcher', async () => {
@@ -370,9 +373,15 @@ test('listSshRemoteHermesProfiles routes native Windows hosts through the runtim
 
   assert.deepEqual(await listSshRemoteHermesProfiles(ssh), ['default', 'gaming', 'work'])
   // The Windows branch never runs the POSIX echo/ls inventory...
-  assert.equal(ssh.calls.some(cmd => cmd.includes('HERMES_HOME') || cmd.includes('ls -1')), false)
+  assert.equal(
+    ssh.calls.some(cmd => cmd.includes('HERMES_HOME') || cmd.includes('ls -1')),
+    false
+  )
   // ...and never spawns a remote dashboard for inventory.
-  assert.equal(ssh.calls.some(cmd => cmd.includes('serve')), false)
+  assert.equal(
+    ssh.calls.some(cmd => cmd.includes('serve')),
+    false
+  )
 })
 
 test('locateHermes prefers the explicit profile path when executable', async () => {

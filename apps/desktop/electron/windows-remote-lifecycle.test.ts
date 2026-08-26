@@ -409,7 +409,7 @@ test('managed update drain rechecks Windows PID/create-time ownership before exa
     operations.some(operation => operation.includes("'remove-lock'")),
     false
   )
-
+})
 test('listWindowsRemoteProfiles inventories named profiles via the canonical runtime helper', async () => {
   const probe = JSON.stringify({
     os: 'Windows',
@@ -441,7 +441,10 @@ test('listWindowsRemoteProfiles inventories named profiles via the canonical run
   // only ever emits lowercase ids.)
   const helperScript = Buffer.from(calls[1].split(' ').pop()!, 'base64').toString('utf16le')
   assert.match(helperScript, /-m' 'hermes_cli\.windows_ssh_runtime' 'list-profiles'/)
-  assert.equal(calls.some(cmd => cmd.includes('--isolated')), false)
+  assert.equal(
+    calls.some(cmd => cmd.includes('--isolated')),
+    false
+  )
 })
 test('listWindowsRemoteProfiles surfaces a malformed helper answer as a failure', async () => {
   const probe = JSON.stringify({
