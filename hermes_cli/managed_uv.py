@@ -138,9 +138,10 @@ def _report_runtime_repair_failure(repair: RuntimeRepairResult) -> None:
     if repair.backup_venv is None:
         print("  ℹ Managed Python runtime was not replaced; "
               f"the existing venv is unchanged ({repair.detail}).")
-        print("    Sessions stay protected meanwhile: Hermes keeps databases "
-              "out of WAL mode on this SQLite build. The next `hermes update` "
-              "will retry.")
+        print("    New databases stay out of WAL mode on this SQLite build "
+              "meanwhile; databases already in WAL keep WAL (a live journal-mode "
+              "downgrade would discard other connections' uncheckpointed commits). "
+              "The next `hermes update` will retry.")
         return
     print(f"  ✗ Managed Python runtime cutover needs manual recovery: {repair.detail}")
     print(f"    Previous venv: {repair.backup_venv}")
@@ -814,6 +815,42 @@ def _default_live_venv(root: Path) -> Path:
     return fallback if use_fallback else primary
 
 
+def _managed_runtime_provisioned(project_root: Path) -> bool:
+    """True when the checkout holds at least one provisioned managed Python generation."""
+    try:
+        return any(managed_python_install_dir(project_root).glob("generation-*"))
+    except OSError:
+        return False
+
+
+def _runtime_cutover_drift(root: Path, info: SQLiteRuntimeInfo) -> str:
+    """Why the live venv is not backed by the managed runtime, or ``""`` when it is.
+
+    A held cutover leaves the venv interpreter rooted in the managed store, so ``sys.base_prefix``
+    (reported by the probe) lands under ``.hermes-runtime/python``. Any other base prefix while the
+    store holds a provisioned generation means the venv was moved off it — typically the update's
+    own plain ``uv sync`` re-pointing ``venv/bin/python`` at the uv-managed Python, which carries a
+    different SQLite build than the one Hermes provisioned (issue #95169).
+
+    Looking at ``venv/bin/python`` cannot show this: a re-pointed interpreter is indistinguishable
+    from a healthy install, only its runtime identity differs. Checkouts that never provisioned a
+    generation are exempt (there is nothing to have drifted off).
+    """
+    store = managed_python_install_dir(root)
+    if not _managed_runtime_provisioned(root):
+        return ""
+    try:
+        base = Path(info.base_prefix).resolve()
+        store_resolved = store.resolve()
+    except OSError:
+        return ""
+    if base == store_resolved or store_resolved in base.parents:
+        return ""
+    return (
+        f"it runs on {base} (SQLite {info.sqlite_version_string}), not the provisioned managed "
+        f"runtime under {store}")
+
+
 def _sweep_stale_runtime_backups(
     live: Path, *, root: Path, keep: Path | None = None, min_age_seconds: float = 3600.0) -> None:
     """Remove leftover ``venv.stale.runtime-*`` backups next to *live*. Best-effort: never raises.
@@ -868,8 +905,8 @@ def _repair_windows_preflight(
             "that lives outside this venv, e.g.:",
             f"      cd {root}",
             "      <system Python> -m hermes_cli.main update",
-            "    Sessions stay protected meanwhile: Hermes keeps databases "
-            "out of WAL mode on this SQLite build."):
+            "    New databases stay out of WAL mode on this SQLite build "
+            "meanwhile; databases already in WAL keep WAL."):
             print(line)
         return _result("skipped", current, self_detail)
     return None
@@ -945,13 +982,24 @@ def repair_vulnerable_runtime(
     current = probe_sqlite_runtime(live_python)
     if current is None:
         return RuntimeRepairResult("skipped", f"could not probe live interpreter {live_python}")
+    # A venv still backed by the uv-managed Python probes fine and looks healthy on disk, but it
+    # links a different SQLite build than the provisioned generation — the present-but-not-cut-over
+    # case the missing-interpreter guard cannot see (issue #95169).
+    drift = _runtime_cutover_drift(root, current)
+    if drift:
+        print("  ⚠ Hermes venv is not running the provisioned managed Python runtime:")
+        print(f"    {drift}.")
+        print("    venv/bin/python is unchanged by that move, so the install stays silent while "
+              "opening state.db with a different SQLite build than Hermes provisioned "
+              "(issue #95169). `hermes update` re-provisions and cuts back over.")
     if not current.wal_reset_vulnerable:
         # Already fixed: any venv.stale.runtime-* markers next to the live venv are leftovers
         # from a past repair and will never be rolled back to. Sweep them so they don't leak
         # ~1 GB each forever. Age-gated to avoid racing an in-flight repair in a sibling process.
         # See #73109.
         _sweep_stale_runtime_backups(live, root=root)
-        return _result("safe", current, sqlite_after=current.sqlite_version_string)
+        return _result("drifted" if drift else "safe", current, drift,
+                       sqlite_after=current.sqlite_version_string)
     deferred = _repair_windows_preflight(root, live, current)
     if deferred is not None:
         return deferred

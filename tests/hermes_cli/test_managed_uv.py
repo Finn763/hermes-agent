@@ -440,6 +440,61 @@ class TestManagedPythonStore:
         assert base_env["PYTHONHOME"] == "/poison/home"
 
 
+class TestRuntimeCutoverDrift:
+    """Issue #95169: a venv re-pointed at the uv-managed Python is *present but not cut over*.
+
+    The interpreter file itself looks healthy, so a missing-interpreter guard never fires; only
+    the probe's ``base_prefix`` tells the re-pointed install apart from a healthy one.
+    """
+
+    def _repair(self, tmp_path, monkeypatch, *, provisioned, base_prefix):
+        from dataclasses import replace
+
+        from hermes_cli import managed_uv
+
+        windows = sys.platform == "win32"
+        root, live, _sentinel = _make_runtime_install(tmp_path, windows=windows)
+        python = live / ("Scripts" if windows else "bin") / (
+            "python.exe" if windows else "python")
+        store = root / ".hermes-runtime" / "python"
+        if provisioned:
+            (store / "generation-1-2-abcd").mkdir(parents=True)
+        # 3.53.1 is a fixed build: the drift must be reported on identity alone, not vulnerability.
+        current = replace(
+            _runtime_info(python, (3, 53, 1)), base_prefix=base_prefix)
+        monkeypatch.setattr(
+            managed_uv, "probe_sqlite_runtime", lambda *args, **kwargs: current)
+        return managed_uv.repair_vulnerable_runtime("uv", project_root=root), store
+
+    def test_repointed_venv_with_provisioned_generation_reports_drift(
+            self, tmp_path, monkeypatch, capsys):
+        uv_python_prefix = tmp_path / "uv" / "python" / "cpython-3.11.15-none"
+        result, _store = self._repair(
+            tmp_path, monkeypatch, provisioned=True, base_prefix=uv_python_prefix)
+
+        assert result.status == "drifted"
+        assert "cpython-3.11.15-none" in result.detail
+        out = capsys.readouterr().out
+        assert "not running the provisioned managed Python runtime" in out
+
+    def test_cutover_holding_is_safe(self, tmp_path, monkeypatch):
+        store = tmp_path / "checkout" / ".hermes-runtime" / "python"
+        result, _store = self._repair(
+            tmp_path, monkeypatch, provisioned=True,
+            base_prefix=store / "generation-1-2-abcd" / "cpython-3.11.15-linux-x86_64-none")
+
+        assert result.status == "safe"
+        assert result.detail == ""
+
+    def test_no_provisioned_generation_is_not_drift(self, tmp_path, monkeypatch):
+        """Nothing was ever provisioned, so an unmanaged interpreter is the normal layout."""
+        result, _store = self._repair(
+            tmp_path, monkeypatch, provisioned=False,
+            base_prefix=tmp_path / "uv" / "python" / "cpython-3.11.15-none")
+
+        assert result.status == "safe"
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="POSIX-only: fixtures build the bin/ (not Scripts/) venv layout")
 class TestRuntimeRepair:
