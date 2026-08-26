@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { ClientSessionState } from '@/app/types'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $sessionStates, $sessionTiles, releaseSessionTranscript } from '@/store/session-states'
+import {
+  $sessionStates,
+  $sessionTiles,
+  reconcileBusyStatesOnReconnect,
+  releaseSessionTranscript
+} from '@/store/session-states'
 
 import { SessionStateCache } from './session-state-cache'
 
@@ -236,6 +241,184 @@ describe('SessionStateCache', () => {
       expect(cache.has('pending')).toBe(true)
       expect(cache.has('draft')).toBe(true)
       expect(cache.has('referenced')).toBe(true)
+    })
+  })
+
+  describe('orphaned runtimeId eviction (post-reconcile authority)', () => {
+    function busy(storedSessionId: string, text = storedSessionId): ClientSessionState {
+      return { ...settled(storedSessionId, text), busy: true }
+    }
+
+    it('evicts a busy entry once its runtimeId has no $sessionStates row — no window, no pressure', () => {
+      let nowMs = 0
+      const evicted: string[] = []
+
+      const cache = new SessionStateCache(
+        {
+          isReferenced: () => false,
+          // Production wiring: membership is read from the authoritative atom.
+          isPublishedRuntimeId: runtimeId => runtimeId in $sessionStates.get(),
+          onEvict: runtimeId => evicted.push(runtimeId)
+        },
+        // No count/byte pressure and zero elapsed time: only the membership
+        // criterion can drive this eviction.
+        {
+          maxBytes: Number.POSITIVE_INFINITY,
+          maxCount: Number.POSITIVE_INFINITY,
+          stalledMs: 10_000,
+          now: () => nowMs
+        }
+      )
+
+      // Two mid-turn sessions committed busy into both layers, as
+      // updateSessionState does (cache copy + published atom row).
+      for (const id of ['dead', 'live']) {
+        const state = busy(`stored-${id}`)
+
+        $sessionStates.set({ ...$sessionStates.get(), [`runtime-${id}`]: state })
+        cache.set(`runtime-${id}`, state)
+      }
+
+      // Reconnect: reconcile heals the atom's stale flags in place (its
+      // documented contract — a live turn re-asserts busy on its next event).
+      reconcileBusyStatesOnReconnect()
+
+      // The respawned backend retires the dead runtime id (reclaim/reap);
+      // the atom is post-reconcile authority: only live runtimes remain.
+      $sessionStates.set({ 'runtime-live': $sessionStates.get()['runtime-live'] })
+      // The live turn re-asserts busy under its still-published id.
+      cache.set('runtime-live', { ...settled('stored-live'), busy: true })
+
+      cache.prune()
+
+      expect(cache.has('runtime-live')).toBe(true)
+      expect(cache.has('runtime-dead')).toBe(false)
+      expect(evicted).toEqual(['runtime-dead'])
+    })
+
+    it.each([
+      [
+        'is referenced by a live surface',
+        (): ClientSessionState => busy('stored-dead'),
+        (runtimeId: string) => runtimeId === 'runtime-dead'
+      ],
+      ['waits on the user', (): ClientSessionState => ({ ...busy('stored-dead'), needsInput: true }), () => false],
+      [
+        'holds an in-flight message',
+        (): ClientSessionState => {
+          const pendingTurn = busy('stored-dead')
+
+          pendingTurn.messages = [{ id: 'pending-assistant', role: 'assistant', parts: [], pending: true }]
+
+          return pendingTurn
+        },
+        () => false
+      ]
+    ])('never orphans an unpublished entry that %s', (_label, makeState, isReferenced) => {
+      const evicted: string[] = []
+
+      const cache = new SessionStateCache(
+        {
+          isReferenced,
+          isPublishedRuntimeId: () => false,
+          onEvict: runtimeId => evicted.push(runtimeId)
+        },
+        { maxBytes: Number.POSITIVE_INFINITY, maxCount: Number.POSITIVE_INFINITY }
+      )
+
+      const state = makeState()
+
+      cache.set('runtime-dead', state)
+      cache.prune()
+
+      // The orphan criterion yields to the standing protection matrix.
+      expect(cache.get('runtime-dead')).toBe(state)
+      expect(evicted).toEqual([])
+    })
+
+    it('leaves unsaved drafts alone even when their runtime never published', () => {
+      const evicted: string[] = []
+
+      const cache = new SessionStateCache(
+        {
+          isReferenced: () => false,
+          isPublishedRuntimeId: () => false,
+          onEvict: runtimeId => evicted.push(runtimeId)
+        },
+        { maxBytes: Number.POSITIVE_INFINITY, maxCount: Number.POSITIVE_INFINITY }
+      )
+
+      const draft = { ...createClientSessionState(null), messages: transcript('draft'), busy: true }
+
+      cache.set('runtime-draft', draft)
+      cache.prune()
+
+      // Persisted sessions only: no storedSessionId, no orphan eviction.
+      expect(cache.get('runtime-draft')).toBe(draft)
+      expect(evicted).toEqual([])
+    })
+
+    it('does not touch a live turn riding out a reconnect blip', () => {
+      let nowMs = 0
+      const evicted: string[] = []
+
+      const cache = new SessionStateCache(
+        {
+          isReferenced: () => false,
+          isPublishedRuntimeId: runtimeId => runtimeId in $sessionStates.get(),
+          onEvict: runtimeId => evicted.push(runtimeId)
+        },
+        { stalledMs: 10_000, now: () => nowMs }
+      )
+
+      const liveTurn = busy('stored-live')
+
+      $sessionStates.set({ 'runtime-live': liveTurn })
+      cache.set('runtime-live', liveTurn)
+
+      // Reconcile clears busy on the atom row, but the ROW stays published —
+      // membership, not flags, decides orphaning, so the blip cannot evict.
+      reconcileBusyStatesOnReconnect()
+      cache.prune()
+      expect(cache.has('runtime-live')).toBe(true)
+
+      // The turn re-asserts busy under the same still-published id.
+      nowMs += 500
+      cache.set('runtime-live', busy('stored-live'))
+      cache.prune()
+
+      expect(cache.has('runtime-live')).toBe(true)
+      expect(evicted).toEqual([])
+    })
+
+    it('evicts orphans immediately while published-but-silent entries wait out the stall window', () => {
+      let nowMs = 0
+      const evicted: string[] = []
+
+      const cache = new SessionStateCache(
+        {
+          isReferenced: () => false,
+          isPublishedRuntimeId: runtimeId => runtimeId in $sessionStates.get(),
+          onEvict: runtimeId => evicted.push(runtimeId)
+        },
+        { maxBytes: Number.POSITIVE_INFINITY, maxCount: Number.POSITIVE_INFINITY, stalledMs: 10_000, now: () => nowMs }
+      )
+
+      cache.set('runtime-orphan', busy('stored-orphan'))
+      cache.set('runtime-quiet', busy('stored-quiet'))
+      // The quiet runtime is still published (e.g. reconcile skipped its
+      // scope): only the time window can retire it, never the orphan rule.
+      $sessionStates.set({ 'runtime-quiet': busy('stored-quiet') })
+
+      cache.prune()
+      expect(cache.has('runtime-orphan')).toBe(false)
+      expect(cache.has('runtime-quiet')).toBe(true)
+
+      nowMs += 10_001
+      cache.prune()
+
+      expect(cache.has('runtime-quiet')).toBe(false)
+      expect([...evicted].sort()).toEqual(['runtime-orphan', 'runtime-quiet'])
     })
   })
 })

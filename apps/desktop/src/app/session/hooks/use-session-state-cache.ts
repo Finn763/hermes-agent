@@ -20,7 +20,7 @@ import {
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
-import { $sessionTiles, publishSessionState, releaseSessionTranscript } from '@/store/session-states'
+import { $sessionStates, $sessionTiles, publishSessionState, releaseSessionTranscript } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../types'
 import { SessionStateCache } from '../session-state-cache'
@@ -88,6 +88,10 @@ export function useSessionStateCache({
 
   if (sessionStateByRuntimeIdRef.current === null) {
     sessionStateByRuntimeIdRef.current = new SessionStateCache({
+      // Post-reconcile authority (#95276): the atom tells the cache which
+      // runtime ids are still published, so busy copies of retired ids can be
+      // evicted deterministically instead of surviving on the stall window.
+      isPublishedRuntimeId: runtimeId => runtimeId in $sessionStates.get(),
       isReferenced: (runtimeId, state) =>
         runtimeId === activeSessionIdRef.current ||
         state.storedSessionId === selectedStoredSessionIdRef.current ||

@@ -10,7 +10,10 @@ export const DEFAULT_WARM_SESSION_TRANSCRIPT_BYTES = 32 * 1024 * 1024
  * pinning its transcript outside both LRU bounds. Chosen far beyond the
  * five-minute session watchdog so legitimate quiet stretches (long tool runs
  * stream no events) never trip it, while still bounding how long a dead turn
- * can hold memory.
+ * can hold memory. This window is the SECONDARY guard of the pair: it covers
+ * states whose runtime is still published (so #evictOrphans cannot see them)
+ * but that no event will ever reach — leftovers reconcile skipped by scope,
+ * or turns that died before any reconnect ran.
  */
 export const DEFAULT_STALLED_SESSION_MS = 30 * 60 * 1000
 
@@ -25,6 +28,15 @@ interface SessionStateCacheLimits {
 
 interface SessionStateCacheCallbacks {
   isReferenced: (runtimeId: string, state: ClientSessionState) => boolean
+  /**
+   * Whether the runtime id still owns a row in the authoritative
+   * `$sessionStates` atom. Reconnect reconcile heals that atom in place, and
+   * backend respawns/reclaims retire dead ids' rows outright — but this cache
+   * is a second map keyed by runtime id that only live events update, so a
+   * busy copy whose id has no row can never receive its terminal settle.
+   * Optional: when absent, orphan eviction is disabled.
+   */
+  isPublishedRuntimeId?: (runtimeId: string) => boolean
   onEvict: (runtimeId: string, state: ClientSessionState) => void
 }
 
@@ -101,6 +113,7 @@ export class SessionStateCache extends Map<string, ClientSessionState> {
   }
 
   prune(): void {
+    this.#evictOrphans()
     this.#evictStalled()
 
     const candidates: Array<{ bytes: number; runtimeId: string; state: ClientSessionState; touched: number }> = []
@@ -176,18 +189,70 @@ export class SessionStateCache extends Map<string, ClientSessionState> {
     }
   }
 
-  #isStalled(runtimeId: string, state: ClientSessionState): boolean {
-    const mutatedAt = this.#mutations.get(runtimeId)
+  /**
+   * Deterministic half of the mid-turn eviction pair (#95276): after a
+   * reconnect reconcile, `$sessionStates` is the post-reconcile authority. A
+   * busy/awaiting copy keyed by a runtime id that no longer appears there
+   * belongs to a respawned or reaped runtime — no event can ever reach it, so
+   * it fails #isWarmSettled forever and the stall window would be its only
+   * bound. Unlike that window this sweep has no threshold to tune and cannot
+   * hit a live turn, whose runtime always keeps its atom row by construction
+   * (a turn riding out a socket blip re-asserts busy under the same,
+   * still-present id). It yields to every standing protection: persisted
+   * sessions only, no drafts or in-flight messages, waits that are on the
+   * user rather than on a dead turn, and live references win.
+   */
+  #evictOrphans(): void {
+    const orphans: Array<{ runtimeId: string; state: ClientSessionState }> = []
 
+    for (const [runtimeId, state] of this.entries()) {
+      if (this.#isOrphaned(runtimeId, state)) {
+        orphans.push({ runtimeId, state })
+      }
+    }
+
+    for (const candidate of orphans) {
+      // References and membership can change between detection and eviction.
+      const current = super.get(candidate.runtimeId)
+
+      if (current !== candidate.state || !this.#isOrphaned(candidate.runtimeId, current)) {
+        continue
+      }
+
+      super.delete(candidate.runtimeId)
+      this.#recency.delete(candidate.runtimeId)
+      this.#mutations.delete(candidate.runtimeId)
+      this.#callbacks.onEvict(candidate.runtimeId, candidate.state)
+    }
+  }
+
+  #isOrphaned(runtimeId: string, state: ClientSessionState): boolean {
+    const isPublished = this.#callbacks.isPublishedRuntimeId
+
+    return typeof isPublished === 'function' && this.#isUnreachableMidTurn(runtimeId, state) && !isPublished(runtimeId)
+  }
+
+  /** Protection matrix shared by both mid-turn sweeps (#95276): persisted
+   *  sessions only, waits that belong to a dead turn rather than to the user
+   *  or to an unfinished draft, and never a live reference. */
+  #isUnreachableMidTurn(runtimeId: string, state: ClientSessionState): boolean {
     return (
       Boolean(state.storedSessionId) &&
       (state.busy || state.awaitingResponse) &&
       // A blocking prompt is waiting on a human, not on a dead turn.
       !state.needsInput &&
       !hasDraftOrInFlightMessage(state) &&
-      mutatedAt !== undefined &&
-      this.#now() - mutatedAt >= this.#stalledMs &&
       !this.#callbacks.isReferenced(runtimeId, state)
+    )
+  }
+
+  #isStalled(runtimeId: string, state: ClientSessionState): boolean {
+    const mutatedAt = this.#mutations.get(runtimeId)
+
+    return (
+      this.#isUnreachableMidTurn(runtimeId, state) &&
+      mutatedAt !== undefined &&
+      this.#now() - mutatedAt >= this.#stalledMs
     )
   }
 
