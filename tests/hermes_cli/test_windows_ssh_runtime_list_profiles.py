@@ -3,7 +3,7 @@
 Desktop SSH roster inventory asks a native Windows host which Hermes profiles
 it would serve via `python -m hermes_cli.windows_ssh_runtime list-profiles`.
 The operation must stay spawn-free and answer from the canonical profile
-registry (`default` plus every valid named profile directory).
+registry (`default` plus every live, valid named profile directory).
 """
 
 import json
@@ -13,12 +13,20 @@ import pytest
 from hermes_cli import windows_ssh_runtime
 
 
+def _make_profile(profiles_dir, name):
+    """A named profile is a dir PLUS an identity marker (see hermes_constants)."""
+    profile_dir = profiles_dir / name
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text("model: default\n", encoding="utf-8")
+    return profile_dir
+
+
 def _make_install(root, profiles=()):
     """Lay out a Hermes install under *root*: profiles dir + junk entries."""
     profiles_dir = root / "profiles"
     profiles_dir.mkdir(parents=True)
     for name in profiles:
-        (profiles_dir / name).mkdir()
+        _make_profile(profiles_dir, name)
     return root
 
 
@@ -36,10 +44,23 @@ def test_list_profiles_invents_default_plus_valid_named_dirs(tmp_path, monkeypat
     )
     # A plain file must not be mistaken for a profile.
     (home / "profiles" / "notes.txt").write_text("not a profile")
+    # A dir with no identity marker is not a profile either (cron/log ghosts).
+    (home / "profiles" / "ghost").mkdir()
 
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     assert windows_ssh_runtime.dispatch(["list-profiles"]) == {"profiles": ["default", "coder-2", "work"]}
+
+
+def test_list_profiles_skips_tombstoned_profiles(tmp_path, monkeypatch):
+    home = _make_install(tmp_path / "hermes-home", ["live", "gone"])
+    tombstones = home / "profiles" / ".deleted"
+    tombstones.mkdir()
+    (tombstones / "gone").write_text("")
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    assert windows_ssh_runtime.dispatch(["list-profiles"]) == {"profiles": ["default", "live"]}
 
 
 def test_list_profiles_anchors_profile_mode_hermes_home_to_the_root(tmp_path, monkeypatch):
