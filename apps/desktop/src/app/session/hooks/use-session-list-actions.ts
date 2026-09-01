@@ -95,9 +95,20 @@ function dropTombstoned(sessions: SessionInfo[]): SessionInfo[] {
     return sessions
   }
 
+  // Never hide the currently viewed session behind a stale tombstone —
+  // the user is looking at this chat, and the backend still lists it
+  // (delete hasn't committed or the tombstone is stale). Hiding it
+  // makes the active session vanish from the sidebar while its tile
+  // is open.
+  const active = $selectedStoredSessionId.get()
+
   const tombstoned = (session: SessionInfo): boolean => tombstoneRowIds(session).some(id => tombstones.has(id))
 
-  const kept = sessions.filter(session => !tombstoned(session))
+  const kept = sessions.filter(
+    session =>
+      (active && (session.id === active || (session._lineage_root_id && session._lineage_root_id === active))) ||
+      !tombstoned(session)
+  )
 
   return kept.length === sessions.length ? sessions : kept
 }
