@@ -153,7 +153,6 @@ import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
   excludeProjectSessions,
-  liveSessionProjectId,
   orderProjectsByIds,
   overlayLiveLanes,
   overlayLivePreviews,
@@ -162,6 +161,8 @@ import {
   ProjectMenu,
   projectTreeCwd,
   reconcileEnteredProjectSessions,
+  sanitizeProjectFilter,
+  sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
@@ -498,6 +499,14 @@ export function ChatSidebar({
   // project lanes narrow by the same rule. A project lane holds rows the loaded
   // page may not, so it has to be answerable per session rather than by
   // membership in the filtered set.
+  // The project filter is sanitized against the live tree: persisted ids go
+  // stale across updates/deletes and must be inert, never a blank sidebar
+  // (#97762). Detached rows file under the Home bucket id (same rule as the
+  // overview overlay), so filtering to Home keeps Home's rows.
+  const effectiveProjectFilter = useMemo(
+    () => sanitizeProjectFilter(projectFilter, projectTree),
+    [projectFilter, projectTree]
+  )
   const sessionMatchesFilters = useCallback(
     (session: SessionInfo) => {
       if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
@@ -520,14 +529,14 @@ export function ChatSidebar({
 
       // Same membership the sidebar groups and colors by, so a filtered row
       // lands in the lane the user picked it from.
-      return !projectFilter.length || projectFilter.includes(liveSessionProjectId(session, projects) ?? '')
+      return sessionMatchesProjectFilter(session, effectiveProjectFilter, projects)
     },
-    [statusFilter, projectFilter, profileFilter, showAllProfiles, prFilter, pullRequests, projects, dotStates]
+    [statusFilter, effectiveProjectFilter, profileFilter, showAllProfiles, prFilter, pullRequests, projects, dotStates]
   )
 
   const filtersNarrow =
     statusFilter.length > 0 ||
-    projectFilter.length > 0 ||
+    effectiveProjectFilter.length > 0 ||
     prFilter.length > 0 ||
     (showAllProfiles && profileFilter.length > 0)
 
@@ -906,7 +915,7 @@ export function ChatSidebar({
       filterVisibleProjects(projectTree, dismissedAutoProjects)
         // A filtered-out project drops its whole lane, header included — hiding
         // only its rows would leave a row of empty folders behind.
-        .filter(project => !projectFilter.length || projectFilter.includes(project.id))
+        .filter(project => !effectiveProjectFilter.length || effectiveProjectFilter.includes(project.id))
         .map(project =>
           excludeProjectSessions(
             {
@@ -931,7 +940,7 @@ export function ChatSidebar({
     dismissedAutoProjects,
     orderRepos,
     activeProjectId,
-    projectFilter,
+    effectiveProjectFilter,
     projectOrderIds,
     isHiddenFromProjects,
     s
