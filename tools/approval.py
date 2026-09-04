@@ -3152,11 +3152,13 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
     command = (command or "").strip()
     if not command:
         return False
-    if _has_allowlist_shell_operator(command):
-        return False
-
     with _lock:
         patterns = tuple(_permanent_approved)
+    # Gate globs (not exact matches) on compoundness: a hand-written glob
+    # like ``podman *`` must not span shell operators, but an exact entry is
+    # the precise command text the user approved via "always", so it cannot
+    # over-match and matches regardless (#102443).
+    compound = _has_allowlist_shell_operator(command)
 
     for pattern in patterns:
         if not isinstance(pattern, str):
@@ -3166,6 +3168,8 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
             continue
         if command == pattern:
             return True
+        if compound:
+            continue
         if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(command, pattern):
             return True
     return False
@@ -5185,7 +5189,11 @@ def check_all_command_guards(command: str, env_type: str,
                         approve_session(session_key, key)
                     elif transport_choice == "always":
                         approve_session(session_key, key)
-                        approve_permanent(key)
+                        # Permanent scope stores the exact command text, not the
+                        # detector's description: the allowlist matcher indexes
+                        # command text, so a description string could never
+                        # match (#102443). Tirith keys stay session-only above.
+                        approve_permanent(command)
                         save_permanent_allowlist(_permanent_approved)
             _reset_denials(session_key)
             return {
@@ -5299,7 +5307,8 @@ def check_all_command_guards(command: str, env_type: str,
                         approve_session(session_key, key)
                     elif choice == "always":
                         approve_session(session_key, key)
-                        approve_permanent(key)
+                        # See above: persist the command text, not the description (#102443).
+                        approve_permanent(command)
                         save_permanent_allowlist(_permanent_approved)
 
             # A human approval (including an ESCALATE-then-approve or a
@@ -5428,7 +5437,7 @@ def check_all_command_guards(command: str, env_type: str,
             elif choice == "always":
                 # dangerous patterns: permanent allowed
                 approve_session(session_key, key)
-                approve_permanent(key)
+                approve_permanent(command)
                 save_permanent_allowlist(_permanent_approved)
 
     # A human approval resets the consecutive-denial tally.
