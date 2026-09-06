@@ -3,6 +3,7 @@ const patch = vi.fn(() => Promise.resolve({ ok: true }))
 vi.mock('@/hermes', () => ({ setApiRequestProfile: () => {}, setSessionPinnedRemote: (...a: unknown[]) => (patch as (...x: unknown[]) => unknown)(...a) }))
 import { $pinnedSessionIds } from '@/store/layout'
 import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
+
 import { resetSessionPinMirror, watchSessionPins } from './session-pin-sync'
 ;(globalThis as { window?: unknown }).window ??= {}
 ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop ??= {}
