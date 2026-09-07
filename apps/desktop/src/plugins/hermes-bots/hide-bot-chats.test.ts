@@ -55,7 +55,9 @@ vi.mock('./canonical-chat', () => ({ PROFILE_SESSION_LIST_LIMIT: 200 }))
 vi.mock('./data', () => ({
   $lastRoster: { get: () => lastRoster.value },
   isActiveRosterBot: (bot: RosterRow, active: { connectionId?: string; name?: string } | null) => {
-    if (!active) return false
+    if (!active) {
+      return false
+    }
     const activeName = String(active.name || 'default').trim() || 'default'
     const activeId = String(active?.connectionId || '').trim()
     const botId = String((bot as RosterRow)?.connectionId || '').trim()
@@ -63,7 +65,9 @@ vi.mock('./data', () => ({
     if ((bot as RosterRow)?.remoteSource) {
       return Boolean(activeId) && activeId === botId && botName === activeName
     }
-    if (activeId && activeId !== 'local' && botId && activeId !== botId) return false
+    if (activeId && activeId !== 'local' && botId && activeId !== botId) {
+      return false
+    }
     return botName === activeName
   }
 }))
