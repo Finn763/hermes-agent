@@ -152,10 +152,6 @@ export function ZoneEditor() {
     }
   }, [])
 
-  if (!open) {
-    return null
-  }
-
   const zoneAt = (x: number, y: number) =>
     zones.find(z => x >= z.left && x < z.right && y >= z.top && y < z.bottom) ?? null
 
@@ -204,6 +200,10 @@ export function ZoneEditor() {
     setSplitPreview(null)
   }, [])
   useEffect(() => () => splitPreviewCoalesceRef.current?.finish(), [])
+
+  if (!open) {
+    return null
+  }
 
   const onCanvasPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || (e.target as HTMLElement).dataset.resizer !== undefined) {
