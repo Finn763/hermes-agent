@@ -11,6 +11,7 @@ interface MessagesBelowOptions {
   isAtBottom: boolean
   paneVisible: boolean
   rows: ReactNode
+  sessionId?: string | null
   sessionKey: string | null | undefined
 }
 
@@ -52,6 +53,7 @@ export function useMessagesBelow({
   isAtBottom,
   paneVisible,
   rows,
+  sessionId = null,
   sessionKey
 }: MessagesBelowOptions) {
   useEffect(() => {
@@ -60,7 +62,7 @@ export function useMessagesBelow({
     }
 
     if (isAtBottom) {
-      publishThreadMessagesBelow(0, { paneVisible })
+      publishThreadMessagesBelow(0, { paneVisible }, sessionId)
 
       return
     }
@@ -76,7 +78,7 @@ export function useMessagesBelow({
 
     const measure = () => {
       frame = 0
-      publishThreadMessagesBelow(countMessagesBelow(viewport, content), { paneVisible })
+      publishThreadMessagesBelow(countMessagesBelow(viewport, content), { paneVisible }, sessionId)
     }
 
     const schedule = () => {
@@ -96,5 +98,5 @@ export function useMessagesBelow({
       viewport.removeEventListener('scroll', schedule)
       observer.disconnect()
     }
-  }, [contentRef, scrollRef, isAtBottom, paneVisible, rows, sessionKey])
+  }, [contentRef, scrollRef, isAtBottom, paneVisible, rows, sessionId, sessionKey])
 }

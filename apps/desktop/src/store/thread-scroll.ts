@@ -13,17 +13,81 @@ import { $activeProfile, normalizeProfileKey } from '@/store/profile'
 // shows the floating jump control. Both track `!isAtBottom` today, but stay
 // separate so their thresholds can diverge again without touching consumers.
 //
-// Keep-alive tabs stay mounted with a real layout box, so only the on-screen
-// pane may publish or reset this composer-facing mirror. Jump-to-bottom
-// requests are keyed by session so a click (or an input-request snap) cannot
-// scroll every mounted transcript.
-export const $threadScrolledUp = atom(false)
-export const $threadJumpButtonVisible = atom(false)
-export const $threadMessagesBelow = atom(0)
+// Identity is per session, never process-global: each split pane shows its
+// own session with its own composer + jump button + transcript scroller, and
+// a shared atom would light up every pane's button when only one scrolled
+// away (#103586). The `$…` exports below are the unscoped (single-pane /
+// test) slot; panes that know their session id use the scoped stores. The
+// scroll-request bridge further down was already keyed by session id.
+export type ThreadScrollScope = string | null | undefined
 
-export const publishThreadMessagesBelow = (count: number, publisher: { paneVisible: boolean }): void => {
-  if (publisher.paneVisible && $threadMessagesBelow.get() !== count) {
-    $threadMessagesBelow.set(count)
+const scopeSlot = (scope: ThreadScrollScope): string => scope ?? ''
+
+function scopedBooleanAtom(
+  slots: Map<string, WritableAtom<boolean>>,
+  scope: ThreadScrollScope,
+  initial: boolean
+): WritableAtom<boolean> {
+  const key = scopeSlot(scope)
+  let slot = slots.get(key)
+
+  if (!slot) {
+    slot = atom(initial)
+    slots.set(key, slot)
+  }
+
+  return slot
+}
+
+function scopedNumberAtom(
+  slots: Map<string, WritableAtom<number>>,
+  scope: ThreadScrollScope,
+  initial: number
+): WritableAtom<number> {
+  const key = scopeSlot(scope)
+  let slot = slots.get(key)
+
+  if (!slot) {
+    slot = atom(initial)
+    slots.set(key, slot)
+  }
+
+  return slot
+}
+
+const scrolledUpSlots = new Map<string, WritableAtom<boolean>>()
+const jumpVisibleSlots = new Map<string, WritableAtom<boolean>>()
+const messagesBelowSlots = new Map<string, WritableAtom<number>>()
+
+export function threadScrolledUpStore(scope: ThreadScrollScope = ''): WritableAtom<boolean> {
+  return scopedBooleanAtom(scrolledUpSlots, scope, false)
+}
+
+export function threadJumpButtonVisibleStore(scope: ThreadScrollScope = ''): WritableAtom<boolean> {
+  return scopedBooleanAtom(jumpVisibleSlots, scope, false)
+}
+
+export function threadMessagesBelowStore(scope: ThreadScrollScope = ''): WritableAtom<number> {
+  return scopedNumberAtom(messagesBelowSlots, scope, 0)
+}
+
+export const $threadScrolledUp = threadScrolledUpStore()
+export const $threadJumpButtonVisible = threadJumpButtonVisibleStore()
+export const $threadMessagesBelow = threadMessagesBelowStore()
+
+export const publishThreadMessagesBelow = (
+  count: number,
+  publisher: { paneVisible: boolean },
+  scope: ThreadScrollScope = ''
+): void => {
+  if (!publisher.paneVisible) {
+    return
+  }
+
+  const target = threadMessagesBelowStore(scope)
+
+  if (target.get() !== count) {
+    target.set(count)
   }
 }
 
@@ -34,33 +98,37 @@ const setter = (target: WritableAtom<boolean>) => (value: boolean) => {
   }
 }
 
-const setScrolledUp = setter($threadScrolledUp)
-const setJumpButtonVisible = setter($threadJumpButtonVisible)
-
-export const setThreadAtBottom = (isAtBottom: boolean) => {
-  setScrolledUp(!isAtBottom)
-  setJumpButtonVisible(!isAtBottom)
+export const setThreadAtBottom = (isAtBottom: boolean, scope: ThreadScrollScope = '') => {
+  setter(threadScrolledUpStore(scope))(!isAtBottom)
+  setter(threadJumpButtonVisibleStore(scope))(!isAtBottom)
 }
 
-export const resetThreadScroll = () => {
-  setThreadAtBottom(true)
-  $threadMessagesBelow.set(0)
+export const resetThreadScroll = (scope: ThreadScrollScope = '') => {
+  setThreadAtBottom(true, scope)
+  threadMessagesBelowStore(scope).set(0)
 }
 
-export const publishThreadAtBottom = (isAtBottom: boolean, publisher: { paneVisible: boolean }): void => {
+export const publishThreadAtBottom = (
+  isAtBottom: boolean,
+  publisher: { paneVisible: boolean },
+  scope: ThreadScrollScope = ''
+): void => {
   if (!publisher.paneVisible) {
     return
   }
 
-  setThreadAtBottom(isAtBottom)
+  setThreadAtBottom(isAtBottom, scope)
 }
 
-export const resetPublishedThreadScroll = (publisher: { paneVisible: boolean }): void => {
+export const resetPublishedThreadScroll = (
+  publisher: { paneVisible: boolean },
+  scope: ThreadScrollScope = ''
+): void => {
   if (!publisher.paneVisible) {
     return
   }
 
-  resetThreadScroll()
+  resetThreadScroll(scope)
 }
 
 // Cross-component bridge: the jump button lives by the composer, the viewport's

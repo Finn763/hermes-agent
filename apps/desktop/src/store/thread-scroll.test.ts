@@ -2,17 +2,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   $threadJumpButtonVisible,
+  $threadMessagesBelow,
   $threadScrolledUp,
   onScrollToBottomRequest,
   publishThreadAtBottom,
+  publishThreadMessagesBelow,
   requestScrollToBottom,
   resetPublishedThreadScroll,
   resetThreadScroll,
-  setThreadAtBottom
+  setThreadAtBottom,
+  threadJumpButtonVisibleStore,
+  threadMessagesBelowStore,
+  threadScrolledUpStore
 } from './thread-scroll'
 
 afterEach(() => {
   resetThreadScroll()
+  resetThreadScroll('session-a')
+  resetThreadScroll('session-b')
 })
 
 describe('publishThreadAtBottom', () => {
@@ -89,5 +96,44 @@ describe('requestScrollToBottom', () => {
     expect(first).not.toHaveBeenCalled()
     expect(second).toHaveBeenCalledOnce()
     stopSecond()
+  })
+})
+
+describe('split-pane scroll isolation (#103586)', () => {
+  it('shows the jump button only in the pane that scrolled up', () => {
+    publishThreadAtBottom(false, { paneVisible: true }, 'session-a')
+
+    expect(threadJumpButtonVisibleStore('session-a').get()).toBe(true)
+    expect(threadScrolledUpStore('session-a').get()).toBe(true)
+    expect(threadJumpButtonVisibleStore('session-b').get()).toBe(false)
+    expect(threadScrolledUpStore('session-b').get()).toBe(false)
+  })
+
+  it('keeps the below-count per session', () => {
+    publishThreadMessagesBelow(4, { paneVisible: true }, 'session-a')
+
+    expect(threadMessagesBelowStore('session-a').get()).toBe(4)
+    expect(threadMessagesBelowStore('session-b').get()).toBe(0)
+  })
+
+  it("an unmount resets only its own pane's session", () => {
+    publishThreadAtBottom(false, { paneVisible: true }, 'session-a')
+    publishThreadAtBottom(false, { paneVisible: true }, 'session-b')
+
+    resetPublishedThreadScroll({ paneVisible: true }, 'session-a')
+
+    expect(threadJumpButtonVisibleStore('session-a').get()).toBe(false)
+    expect(threadJumpButtonVisibleStore('session-b').get()).toBe(true)
+  })
+
+  it('keeps the unscoped single-pane behavior on the default slot', () => {
+    publishThreadAtBottom(false, { paneVisible: true })
+
+    expect($threadJumpButtonVisible.get()).toBe(true)
+    expect($threadScrolledUp.get()).toBe(true)
+
+    publishThreadMessagesBelow(3, { paneVisible: true })
+
+    expect($threadMessagesBelow.get()).toBe(3)
   })
 })

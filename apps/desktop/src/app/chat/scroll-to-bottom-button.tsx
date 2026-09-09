@@ -8,7 +8,7 @@ import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
 import { $approvalRequest } from '@/store/prompts'
-import { $threadJumpButtonVisible, $threadMessagesBelow, requestScrollToBottom } from '@/store/thread-scroll'
+import { requestScrollToBottom, threadJumpButtonVisibleStore, threadMessagesBelowStore } from '@/store/thread-scroll'
 
 /**
  * Floating "jump to bottom" control. Sits centered just above the composer,
@@ -33,8 +33,8 @@ import { $threadJumpButtonVisible, $threadMessagesBelow, requestScrollToBottom }
  */
 export function ScrollToBottomButton({ sessionId }: { sessionId: string | null }) {
   const { t } = useI18n()
-  const visible = useStore($threadJumpButtonVisible)
-  const count = useStore($threadMessagesBelow)
+  const visible = useStore(threadJumpButtonVisibleStore(sessionId))
+  const count = useStore(threadMessagesBelowStore(sessionId))
   const reducedMotion = useReducedMotion()
   const request = useStore($approvalRequest)
   // Scrolled away while an approval is pending → the inline Run/Reject bar is

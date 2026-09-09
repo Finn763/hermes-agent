@@ -27,7 +27,7 @@ import {
 } from '@/store/composer-status'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $sessionControlBySession, refreshSessionControl } from '@/store/session-control'
-import { $threadScrolledUp } from '@/store/thread-scroll'
+import { threadScrolledUpStore } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
 import { PreviewStatusRow } from './preview-row'
@@ -105,7 +105,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const controlEntry = useSessionValue($sessionControlBySession, sessionId)
 
-  const scrolledUp = useStore($threadScrolledUp)
+  const scrolledUp = useStore(threadScrolledUpStore(sessionId))
   const billing = useStore($billingBlock)
 
   const isStructuredSupported = controlEntry?.capability === 'supported'

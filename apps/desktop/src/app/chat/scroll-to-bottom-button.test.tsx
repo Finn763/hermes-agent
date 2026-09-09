@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { Fragment } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { clearAllPrompts, setApprovalRequest } from '@/store/prompts'
@@ -21,6 +22,8 @@ afterEach(() => {
   cleanup()
   clearAllPrompts()
   resetThreadScroll()
+  resetThreadScroll('sess-a')
+  resetThreadScroll('sess-b')
   $activeSessionId.set(null)
 })
 
@@ -62,12 +65,25 @@ describe('ScrollToBottomButton', () => {
   it('re-arms sticky-bottom on click', () => {
     const handler = vi.fn()
     const stop = onScrollToBottomRequest(handler, 'sess-1')
-    setThreadAtBottom(false)
+    setThreadAtBottom(false, 'sess-1')
     render(<ScrollToBottomButton sessionId="sess-1" />)
 
     fireEvent.click(screen.getByRole('button'))
 
     expect(handler).toHaveBeenCalledTimes(1)
     stop()
+  })
+
+  it('shows the jump button only in the scrolled pane when two panes mount (#103586)', () => {
+    setThreadAtBottom(false, 'sess-a')
+    setThreadAtBottom(true, 'sess-b')
+    render(
+      <Fragment>
+        <ScrollToBottomButton sessionId="sess-a" />
+        <ScrollToBottomButton sessionId="sess-b" />
+      </Fragment>
+    )
+
+    expect(screen.getAllByRole('button')).toHaveLength(1)
   })
 })
