@@ -1,0 +1,9 @@
+[rtk] /!\ No hook installed — run `rtk init -g` for automatic token savings
+remote: 
+remote: Create a pull request for 'fix/96014-delegate-model-provider' on GitHub by visiting:        
+remote:      https://github.com/Finn763/hermes-agent/pull/new/fix/96014-delegate-model-provider        
+remote: 
+To https://github.com/Finn763/hermes-agent.git
+ * [new branch]            fix/96014-delegate-model-provider -> fix/96014-delegate-model-provider
+branch 'fix/96014-delegate-model-provider' set up to track 'fork/fix/96014-delegate-model-provider'.
+ok fix/96014-delegate-model-provider
