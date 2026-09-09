@@ -560,6 +560,7 @@ class BatchRunner:
         skipped_indices = []
 
         for idx, entry in enumerate(self.dataset):
+<<<<<<< HEAD
             prompt_text = entry.get("prompt", "").strip()
 
             # Also check conversations format
@@ -571,6 +572,15 @@ class BatchRunner:
                         prompt_text = (msg.get("content") or msg.get("value", "")).strip()
                         break
 
+=======
+            # Extract the prompt with the same defensive helper the resume
+            # content scan uses (_entry_prompt_text): non-string ``prompt``
+            # values (#95322) and flat/sharegpt/messages shapes must be
+            # treated identically by both paths, or filtering drifts from
+            # what the scan actually recorded.
+            prompt_text = _entry_prompt_text(entry)
+            
+>>>>>>> 6c174b4db4 (fix(batch_runner): align --resume filter and shard numbering with actual run state)
             if prompt_text in completed_prompts:
                 skipped_indices.append(idx)
             else:
@@ -623,14 +633,86 @@ class BatchRunner:
             config[key] = getattr(self, key)
         return config
 
+<<<<<<< HEAD
     def _run_pool(self, config, checkpoint_data, completed_prompts_set, checkpoint_lock) -> List[Dict[str, Any]]:
         """Process all batches in a worker pool, checkpointing after each result."""
+=======
+        config = {
+            "distribution": self.distribution,
+            "model": self.model,
+            "max_iterations": self.max_iterations,
+            "base_url": self.base_url,
+            "api_key": worker_api_key,
+            "verbose": self.verbose,
+            "ephemeral_system_prompt": self.ephemeral_system_prompt,
+            "log_prefix_chars": self.log_prefix_chars,
+            "providers_allowed": self.providers_allowed,
+            "providers_ignored": self.providers_ignored,
+            "providers_order": self.providers_order,
+            "provider_sort": self.provider_sort,
+            "openrouter_min_coding_score": self.openrouter_min_coding_score,
+            "max_tokens": self.max_tokens,
+            "reasoning_config": self.reasoning_config,
+            "prefill_messages": self.prefill_messages,
+        }
+        
+        # For backward compatibility, still track by index (but this is secondary to content matching)
+        completed_prompts_set = set(checkpoint_data.get("completed_prompts", []))
+
+        # Workers may skip by index only on a FRESH run, where batch_data
+        # carries original dataset indices. On --resume, self.batches was
+        # rebuilt from content-filtered entries re-indexed against the
+        # *current* file; checkpoint indices describe the interrupted run,
+        # so a never-completed prompt whose new index happens to collide
+        # would be silently skipped inside the worker — reintroducing the
+        # exact index-drift bug the content scan exists to fix (#95322).
+        # Resume batches are already content-filtered, so hand workers an
+        # empty index set there. ``completed_prompts_set`` keeps acting as
+        # the parent-side accumulator persisted to the checkpoint.
+        worker_completed_indices = set() if resume else set(completed_prompts_set)
+        
+        # Aggregate statistics across all batches
+        total_tool_stats = {}
+        
+        start_time = time.time()
+        
+>>>>>>> 6c174b4db4 (fix(batch_runner): align --resume filter and shard numbering with actual run state)
         print(f"\n🔧 Initializing {self.num_workers} worker processes...")
 
+<<<<<<< HEAD
+=======
+        # Resumed runs must not renumber shards from 0 (#95322): workers
+        # derive their output filename from the batch number and open it in
+        # append mode, and per-shard batch_stats are keyed by that same
+        # number — new shards numbered 0..k would append their rows into
+        # the previous run's batch_*.jsonl files and overwrite its stats.
+        # Continue past the highest existing shard number instead.
+        shard_num_offset = 0
+        if resume:
+            existing_shard_nums = []
+            if self.output_dir.exists():
+                for f in self.output_dir.glob("batch_*.jsonl"):
+                    suffix = f.stem[len("batch_"):]
+                    if suffix.isdigit():
+                        existing_shard_nums.append(int(suffix))
+            shard_num_offset = max(existing_shard_nums, default=-1) + 1
+
+        # Process batches in parallel
+>>>>>>> 6c174b4db4 (fix(batch_runner): align --resume filter and shard numbering with actual run state)
         with Pool(processes=self.num_workers) as pool:
             # output_dir as str for pickling
             tasks = [
+<<<<<<< HEAD
                 (batch_num, batch_data, str(self.output_dir), completed_prompts_set, config)
+=======
+                (
+                    shard_num_offset + batch_num,
+                    batch_data,
+                    str(self.output_dir),  # Convert Path to string for pickling
+                    worker_completed_indices,
+                    config
+                )
+>>>>>>> 6c174b4db4 (fix(batch_runner): align --resume filter and shard numbering with actual run state)
                 for batch_num, batch_data in enumerate(self.batches)
             ]
             print(f"✅ Created {len(tasks)} batch tasks")
