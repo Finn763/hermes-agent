@@ -2763,6 +2763,29 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     sessions = await _list()
             except Exception:
                 pass  # resolution degrades to today's no-row behavior
+        if title_filter and not sessions and include_hidden and not source:
+            # A hidden canonical Bot Chat that has rotated through compression is invisible to the
+            # rich listing above: it projects the ended root onto its live tip (replacing the title),
+            # so the exact-title filter drops it; the peer then creates a duplicate and the
+            # UNIQUE(title) guard rejects it with 400 (#106165). Fall back to the window-free
+            # exact-title lookup (the same one the local session.list path uses) and resolve the
+            # lineage to its live tip, presenting the canonical title the client matches on.
+            # Archived rows stay invisible here — the resurrection above owns that decision.
+            try:
+                direct = db.get_session_by_title(title_filter)
+                if direct and not direct.get("archived"):
+                    tip_id = direct["id"]
+                    with suppress(Exception):
+                        tip_id = db.get_compression_tip(direct["id"]) or direct["id"]
+                    row = db.get_session(tip_id) or direct
+                    if row and not row.get("archived"):
+                        row = dict(row)
+                        row["title"] = title_filter
+                        if tip_id != direct["id"]:
+                            row["_lineage_root_id"] = direct["id"]
+                        sessions = [row]
+            except Exception:
+                pass  # resolution degrades to today's no-row behavior
         # Back-filled pins arrive PAST the limit, so counting them would report
         # another page that doesn't exist. Only the recency window decides.
         windowed = sum(1 for s in sessions if not s.get("pinned"))
