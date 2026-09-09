@@ -281,11 +281,34 @@ def _register_plugin_provider(pp: Any) -> None:
         PROVIDER_REGISTRY.setdefault(alias, pconfig)
 
 
-try:
-    from providers import list_providers as _list_providers_for_registry
-    for _pp in _list_providers_for_registry():
-        if _pp.name not in PROVIDER_REGISTRY:
+def sync_plugin_providers_to_registry() -> int:
+    """Mirror ``providers/`` plugin profiles into ``PROVIDER_REGISTRY`` (idempotent).
+
+    Only adds names that are missing — never overwrites hand-declared entries.
+    Runs once at import below, and is called back by ``providers`` when dynamic
+    discovery completes: an ``import hermes_cli.auth`` that happens mid-discovery
+    (e.g. from an entry-point plugin) would otherwise snapshot a partial provider
+    list that never refreshes. See #102123.
+    """
+    added = 0
+    try:
+        from providers import list_providers as _list_sync_providers
+    except Exception:
+        return 0
+    try:
+        for _pp in _list_sync_providers():
+            if _pp.name in PROVIDER_REGISTRY:
+                continue
             _register_plugin_provider(_pp)
+            if _pp.name in PROVIDER_REGISTRY:
+                added += 1
+    except Exception:
+        pass
+    return added
+
+
+try:
+    sync_plugin_providers_to_registry()
 except Exception:
     pass
 

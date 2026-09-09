@@ -65,6 +65,26 @@ def register_provider(profile: ProviderProfile) -> None:
     for alias in profile.aliases:
         _ALIASES[alias] = profile.name
     _PROVIDER_LIST_CACHE = None
+    _sync_auth_registry()
+
+
+def _sync_auth_registry() -> None:
+    """Best-effort re-sync of ``hermes_cli.auth.PROVIDER_REGISTRY`` (#102123).
+
+    Called when discovery completes and on every registration so an
+    ``import hermes_cli.auth`` that happened mid-discovery (partial import-time
+    snapshot) is reconciled once the full provider set is known. Looks the auth
+    module up through ``sys.modules`` and never imports it — importing here
+    would run its top-level code mid-scan and risks a circular import. Never
+    raises: provider registration must not fail because of an auth mirror.
+    """
+    try:
+        auth_mod = sys.modules.get("hermes_cli.auth")
+        sync = getattr(auth_mod, "sync_plugin_providers_to_registry", None)
+        if sync is not None:
+            sync()
+    except Exception:
+        pass
 
 
 def get_provider_profile(name: str) -> ProviderProfile | None:
@@ -413,6 +433,12 @@ def _discover_providers() -> None:
                 )
     except Exception:
         pass
+
+    # Reconcile hermes_cli.auth.PROVIDER_REGISTRY when a full scan completes:
+    # an auth import that happened mid-scan snapshotted a partial provider set
+    # (the _discovered flag is set before the scan). No-op unless auth was
+    # already imported. See #102123.
+    _sync_auth_registry()
 
     # (Pip entry-point providers are discovered in step 0, before the
     # filesystem plugins, so first-party profiles always win on name
