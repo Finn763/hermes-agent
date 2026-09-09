@@ -575,7 +575,7 @@ def _restart_macos_launchd_gateways(
     cannot leave the rest of the fleet on old code (#68523).
     """
     from hermes_cli.gateway import (
-        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install, _graceful_restart_via_sigusr1, _launchd_kickstart,
+        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install, _graceful_restart_via_sigusr1, _launchd_fresh_pid_predicate, _launchd_kickstart,
         _locate_launchd_gateway_service, _wait_for_launchd_service_pid,
     )
     if require_supervision:
@@ -588,9 +588,11 @@ def _restart_macos_launchd_gateways(
     failed_or_stale_units.extend(_failed)
     current_label = get_launchd_label()
 
-    for label in launchd_gateway_labels_for_install():
-        if label == current_label:
-            continue
+    def _restart_one_sibling(label: str) -> None:
+        # Per-label isolation lives here now: TimeoutExpired and all other
+        # launchctl failures stay on this label so one wedged sibling cannot
+        # leave the rest of the fleet on old code (#68523).
+        _t0 = _time.monotonic()
         try:
             # Locate = liveness + domain in one probe; kickstart and fresh-PID checks
             # reuse that domain so a sibling is never probed in one and restarted in another.
@@ -598,36 +600,58 @@ def _restart_macos_launchd_gateways(
             if domain is None:
                 if require_supervision and get_launchd_plist_path().with_name(f"{label}.plist").exists():
                     failed_or_stale_units.append(label)
-                continue  # A profile without an installed job has no restart target.
+                return  # A profile without an installed job has no restart target.
             graceful_ok = False
             if old_pid is not None and old_pid > 0:
                 print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
-                graceful_ok = _graceful_restart_via_sigusr1(old_pid, drain_timeout=drain_budget)
+                graceful_ok = _graceful_restart_via_sigusr1(
+                    old_pid,
+                    drain_timeout=drain_budget,
+                    # Same early-exit as the current profile: a revived
+                    # sibling must not idle on its lingering old PID (#101426).
+                    is_revived=_launchd_fresh_pid_predicate(domain, label, old_pid),
+                )
             if graceful_ok and _wait_for_launchd_service_pid(label, old_pid=old_pid, timeout=10.0, domain=domain):
                 # KeepAlive already respawned it on new code — a kickstart would kill it.
+                print(f"  ✓ {label} restarted (fresh PID, {_time.monotonic() - _t0:.0f}s)")
                 restarted_services.append(label)
-                continue
+                return
             try:
                 _launchd_kickstart(label, domain)
             except subprocess.CalledProcessError as e:
                 stderr = (getattr(e, "stderr", "") or "").strip()
                 failed_or_stale_units.append(label)
                 print(
-                    f"  ⚠ Failed to restart {label}: {stderr}\n"
+                    f"  ⚠ Failed to restart {label} ({_time.monotonic() - _t0:.0f}s): {stderr}\n"
                     f"    Recover manually: launchctl kickstart -k {domain}/{label}"
                 )
-                continue
+                return
             if _wait_for_launchd_service_pid(label, old_pid=old_pid, timeout=15.0, domain=domain):
+                print(f"  ✓ {label} restarted ({_time.monotonic() - _t0:.0f}s)")
                 restarted_services.append(label)
             else:
                 failed_or_stale_units.append(label)
                 print(
-                    f"  ✗ {label} failed to come back after restart.\n"
+                    f"  ✗ {label} failed to come back after restart ({_time.monotonic() - _t0:.0f}s).\n"
                     f"    Check logs, then: launchctl kickstart -k {domain}/{label}"
                 )
         except subprocess.TimeoutExpired:
             failed_or_stale_units.append(label)
-            print(f"  ⚠ launchctl timed out restarting {label}; continuing with remaining gateways")
+            print(f"  ⚠ launchctl timed out restarting {label} ({_time.monotonic() - _t0:.0f}s); continuing with remaining gateways")
+
+    siblings = [l for l in launchd_gateway_labels_for_install() if l != current_label]
+    if len(siblings) > 1:
+        # ponytail: threads only to overlap blocking launchctl waits — each
+        # `kickstart -k` can block ~60s on launchd's crash back-off, so a
+        # sequential loop idles 8+ min on a 9-gateway install (#101426).
+        # Per-label failure isolation above is preserved; bounded to 8 workers.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(8, len(siblings))) as _pool:
+            list(_pool.map(_restart_one_sibling, siblings))
+    else:
+        for label in siblings:
+            _restart_one_sibling(label)
 
 
 def _surviving_gateway_pids_after_failed_restart():

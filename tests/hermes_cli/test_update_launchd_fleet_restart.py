@@ -293,7 +293,7 @@ def _fleet(monkeypatch, tmp_path, *, current, labels, located,
     monkeypatch.setattr(
         gw,
         "_graceful_restart_via_sigusr1",
-        lambda pid, drain_timeout: (rec.drains.append(pid), (drain_results or {}).get(pid, False))[1],
+        lambda pid, drain_timeout, **kw: (rec.drains.append(pid), (drain_results or {}).get(pid, False))[1],
     )
 
     def fake_kickstart(label, domain):
@@ -352,19 +352,21 @@ class TestRestartMacosLaunchdGateways:
         _restart_macos_launchd_gateways(restarted, failed, drain_budget=0.0)
 
         assert rec.current_restarts == [current]
-        assert rec.kickstarts == [
+        # Siblings now restart concurrently (ThreadPoolExecutor) — order is
+        # completion order, so compare order-insensitively (#101426).
+        assert sorted(rec.kickstarts) == sorted([
             f"gui/{UID}/ai.hermes.gateway",
             f"user/{UID}/ai.hermes.gateway-user-scoped",
-        ]
-        assert rec.waits == [
+        ])
+        assert sorted(rec.waits) == sorted([
             f"gui/{UID}/ai.hermes.gateway",
             f"user/{UID}/ai.hermes.gateway-user-scoped",
-        ]
-        assert restarted == [
-            current,
+        ])
+        assert restarted[0] == current
+        assert sorted(restarted[1:]) == sorted([
             "ai.hermes.gateway",
             "ai.hermes.gateway-user-scoped",
-        ]
+        ])
         assert failed == []
         # Siblings were drained before the hard kickstart.
         assert set(rec.drains) == {100, 300}
@@ -612,6 +614,30 @@ class TestRestartMacosLaunchdGateways:
 
         assert restarted == ["ai.hermes.gateway"]
         assert failed == ["ai.hermes.gateway-zombie"]
+
+    def test_many_siblings_all_restart(self, monkeypatch, tmp_path):
+        """#101426: a 9-gateway install must restart every sibling — the
+        concurrent sibling path reports each label exactly once."""
+        sibs = [f"ai.hermes.gateway-p{i}" for i in range(8)]
+        located = {"ai.hermes.gateway": (f"gui/{UID}", 100)}
+        for i, s in enumerate(sibs):
+            located[s] = (f"gui/{UID}", 200 + i)
+        rec = _fleet(
+            monkeypatch,
+            tmp_path,
+            current="ai.hermes.gateway",
+            labels=["ai.hermes.gateway", *sibs],
+            located=located,
+        )
+        restarted: list[str] = []
+        failed: list[str] = []
+
+        _restart_macos_launchd_gateways(restarted, failed, drain_budget=0.0)
+
+        assert failed == []
+        assert restarted[0] == "ai.hermes.gateway"
+        assert sorted(restarted[1:]) == sorted(sibs)
+        assert sorted(rec.kickstarts) == sorted(f"gui/{UID}/{s}" for s in sibs)
 
 
 class TestWaitForLaunchdServicePid:
