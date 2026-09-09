@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, dropdownMenuSectionLabel } from '@/components/ui/dropdown-menu'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { $localRuntimeJobs } from '@/store/local-runtime-jobs'
 import {
@@ -205,5 +205,34 @@ describe('in-flight local downloads', () => {
     expect(screen.queryByText(/Qwen3\.6 27B/i)).toBeNull()
     expect(screen.queryByText('Qwen3.8 Flash Next (UD-Q4_K_XL)')).toBeNull()
     expect(screen.queryByText('Local')).toBeNull()
+  })
+})
+
+// #103432: provider group headings must read as headings (accent token),
+// while model rows keep their existing styling.
+describe('provider heading contrast', () => {
+  it('renders provider headings with the accent token, not tertiary', async () => {
+    renderMenu()
+    await screen.findByText(/Gemini 3\.1 Pro/i)
+
+    const heading = screen.getByText('Google').closest('[role="menuitem"]')
+
+    expect(heading?.className).toContain('text-(--ui-accent)')
+    // Leading space: a standalone text-color utility, not the primitive's
+    // `[&_svg:...]:text-(--ui-text-tertiary)` icon selector.
+    expect(heading?.className).not.toContain(' text-(--ui-text-tertiary)')
+  })
+
+  it('leaves model rows off the accent token', async () => {
+    renderMenu()
+    await screen.findByText(/Gemini 3\.1 Pro/i)
+
+    const row = screen.getByText(/Gemini 3\.1 Pro/i).closest('[role="menuitem"]')
+
+    expect(row?.className ?? '').not.toContain('text-(--ui-accent)')
+  })
+
+  it('shares the accent section-label token', () => {
+    expect(dropdownMenuSectionLabel).toContain('text-(--ui-accent)')
   })
 })
