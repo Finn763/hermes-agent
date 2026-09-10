@@ -951,10 +951,36 @@ class SessionSessionsMixin:
         combined = " AND ".join(clauses)
         return (f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"), params
 
+    def _chain_spend_by_tip(self, chains: Dict[str, List[str]]) -> Dict[str, float]:
+        """Whole-lineage spend per tip, keyed by tip id: every member's billed-over-estimated
+        figure (``COALESCE(actual_cost_usd, estimated_cost_usd, 0)``) summed, in one chunked
+        query. A root's own cost is a snapshot frozen at rotation while the tip keeps billing,
+        so a row projected from a tip must carry the chain total instead (#105535). Ids absent
+        from the table (pruned/deleted segments) simply contribute nothing."""
+        member_tip: Dict[str, str] = {}
+        for tip, chain in chains.items():
+            for member in chain:
+                member_tip.setdefault(member, tip)
+        totals = dict.fromkeys(chains, 0.0)
+        members = list(member_tip)
+        # SQLITE_MAX_VARIABLE_NUMBER is 999 on old SQLite; same choke-point chunking as
+        # _get_session_rich_rows_batch.
+        for start in range(0, len(members), 900):
+            chunk = members[start:start + 900]
+            rows = self._read_all(
+                "SELECT id, COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS spend FROM sessions"
+                f" WHERE id IN ({','.join('?' for _ in chunk)})",
+                chunk,
+            )
+            for row in rows:
+                totals[member_tip[row["id"]]] += float(row["spend"] or 0.0)
+        return totals
+
     def _project_compression_tips(self, sessions: List[Dict[str, Any]], compact_rows: bool) -> List[Dict[str, Any]]:
         """Replace each compression root's surfaced fields with its live tip's (root ``started_at`` kept
         for stable ordering), one batched query. ``_lineage_ids`` carries every chain id (a tile may
-        hold a MIDDLE segment's id)."""
+        hold a MIDDLE segment's id). Cost is not a per-segment figure on this row: the whole chain's
+        spend is stamped on it, so a rotation cannot freeze the sidebar's number (#105535)."""
         chain_by_root: Dict[str, List[str]] = {}  # only roots whose tip differs from themselves
         for s in sessions:
             if s.get("end_reason") == "compression":
@@ -965,6 +991,12 @@ class SessionSessionsMixin:
             self._get_session_rich_rows_batch(
                 {chain[-1] for chain in chain_by_root.values()}, compact_rows=compact_rows,
             ) if chain_by_root else {}
+        )
+        # Only chains that actually rotated resolve here, so this extra query runs per page,
+        # not per row.
+        chain_spend = (
+            self._chain_spend_by_tip({chain[-1]: chain for chain in chain_by_root.values()})
+            if chain_by_root else {}
         )
         projected = []
         for s in sessions:
@@ -980,6 +1012,14 @@ class SessionSessionsMixin:
             ):
                 if key in tip_row:
                     merged[key] = tip_row[key]
+            # The whole conversation's spend belongs to the one row that represents it. The sum
+            # prefers billed figures per member, so the carried root's own ``actual_cost_usd``
+            # must be cleared: consumers read the pair as ``actual or estimated``
+            # (sidebar-archive.ts sessionCostUsd, tui_gateway/project_tree.py) and a nonzero root
+            # actual would shadow the fresh total behind the frozen snapshot. ``None`` is the
+            # never-billed state the column already holds (#105535).
+            merged["estimated_cost_usd"] = chain_spend.get(chain[-1], 0.0)
+            merged["actual_cost_usd"] = None
             if merged.get("title") is None:
                 # The title is carried root->tip AFTER the publish transaction; a rotation cut off in
                 # between leaves it on the ended root, and exact-title lookups (`hermes peer dm` ->
