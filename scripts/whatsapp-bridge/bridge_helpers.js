@@ -2,6 +2,11 @@ import path from 'path';
 import { mkdirSync, writeFileSync } from 'fs';
 import { randomBytes } from 'crypto';
 
+// Extension → MIME. Keep this in sync with the gateway's document table in
+// gateway/platforms/base.py (SUPPORTED_DOCUMENT_TYPES) so a file the agent can
+// attach is labelled the same way on every path. A missing entry makes the
+// document branch below fall back to application/octet-stream, which WhatsApp
+// clients render as an unopenable "BIN" (#89074).
 export const MIME_MAP = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
   webp: 'image/webp', gif: 'image/gif',
@@ -10,8 +15,27 @@ export const MIME_MAP = {
   pdf: 'application/pdf',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain', log: 'text/plain', ini: 'text/plain', cfg: 'text/plain',
+  md: 'text/markdown', csv: 'text/csv',
+  html: 'text/html', htm: 'text/html',
+  json: 'application/json', xml: 'application/xml',
+  yaml: 'application/yaml', yml: 'application/yaml', toml: 'application/toml',
+  zip: 'application/zip',
 };
+
+/**
+ * Lowercased extension without the dot, or '' when the path has none.
+ * `path.extname` keeps multi-dot names correct (`report.final.html` → `html`)
+ * and returns '' for extensionless paths, so those keys never collide with a
+ * real extension (and still fall back to application/octet-stream).
+ */
+function extName(filePath) {
+  return path.extname(String(filePath || '')).slice(1).toLowerCase();
+}
 
 export function normalizeWhatsAppId(value) {
   if (!value) return '';
@@ -524,7 +548,7 @@ export function inboundReadReceiptKeys({ key, enabled }) {
 }
 
 export function mediaPayloadForFile({ buffer, filePath, mediaType, caption, fileName }) {
-  const ext = filePath.toLowerCase().split('.').pop();
+  const ext = extName(filePath);
   const type = mediaType || inferMediaType(ext);
   if (type === 'image' && ext === 'gif') {
     // Pure helper fallback: do not lie and label raw GIF bytes as mp4.
