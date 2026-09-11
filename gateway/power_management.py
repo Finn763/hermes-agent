@@ -57,6 +57,99 @@ PBT_APMRESUMESUSPEND = 0x0007
 PBT_APMRESUMEAUTOMATIC = 0x0012
 PBT_POWERSETTINGCHANGE = 0x8013
 
+# Win32 prototypes. On 64-bit Windows ctypes marshals an argument of an
+# undeclared function as a C ``int``, so HWND/HINSTANCE/WPARAM/LPARAM (all
+# pointer-sized) get truncated: the hidden helper window then fails to be
+# created and ``GetLastError`` reads 0 because ctypes' own marshalling
+# clobbered it. Declare the prototypes once, with ``use_last_error=True``,
+# so the calls are correct and ``ctypes.get_last_error()`` is truthful.
+_win32_dlls_cache: Optional[tuple[Any, Any]] = None
+
+
+def _win32_dlls() -> tuple[Any, Any]:
+    """Return typed ``(user32, kernel32)`` DLLs with our prototypes applied.
+
+    Cached -- the declarations are process-wide and idempotent. Callers check
+    ``sys.platform`` first; this raises on platforms without ``ctypes.WinDLL``.
+    """
+    global _win32_dlls_cache
+    if _win32_dlls_cache is not None:
+        return _win32_dlls_cache
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    lresult = ctypes.c_ssize_t  # LRESULT is pointer-sized, not c_long
+    msgp = ctypes.POINTER(wintypes.MSG)
+
+    user32.DefWindowProcW.restype = lresult
+    user32.DefWindowProcW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
+    ]
+    user32.RegisterClassExW.restype = wintypes.ATOM
+    user32.RegisterClassExW.argtypes = [ctypes.c_void_p]
+    user32.UnregisterClassW.restype = wintypes.BOOL
+    user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+    user32.DestroyWindow.restype = wintypes.BOOL
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    user32.PostThreadMessageW.restype = wintypes.BOOL
+    user32.PostThreadMessageW.argtypes = [
+        wintypes.DWORD,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    user32.PostQuitMessage.restype = None
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    user32.GetMessageW.restype = ctypes.c_int  # 0 = WM_QUIT, -1 = error
+    user32.GetMessageW.argtypes = [msgp, wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    user32.TranslateMessage.restype = wintypes.BOOL
+    user32.TranslateMessage.argtypes = [msgp]
+    user32.DispatchMessageW.restype = lresult
+    user32.DispatchMessageW.argtypes = [msgp]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+    kernel32.GetCurrentThreadId.argtypes = []
+
+    _win32_dlls_cache = (user32, kernel32)
+    return _win32_dlls_cache
+
+
+def _win32_last_error() -> int:
+    """Real last-error code for the typed Win32 calls above."""
+    import ctypes
+
+    return ctypes.get_last_error()
+
 # Sleep-detection tuning -- deliberately conservative so a slow DNS
 # lookup or a WSL2 VHDX stall (measured p99 31 s, max 112 s on the
 # #90502 incident box) is not mistaken for an overnight suspend.
@@ -332,21 +425,21 @@ class WindowsPowerMonitor:
         hwnd = self._hwnd
         if hwnd is not None:
             try:
-                import ctypes
+                user32, kernel32 = _win32_dlls()
 
-                ctypes.windll.user32.PostMessageW(hwnd, 0x0012, 0, 0)  # WM_QUIT via PostMessage
+                user32.PostMessageW(hwnd, 0x0012, 0, 0)  # WM_QUIT via PostMessage
                 # Also try to wake GetMessage if it's blocked
-                ctypes.windll.user32.PostThreadMessageW(
-                    ctypes.windll.kernel32.GetCurrentThreadId(), 0x0012, 0, 0
+                user32.PostThreadMessageW(
+                    kernel32.GetCurrentThreadId(), 0x0012, 0, 0
                 )
             except Exception:
                 pass
         # Also post WM_QUIT to the pump thread's message queue directly
         try:
             if self._thread is not None and self._thread.ident is not None:
-                import ctypes
+                user32, _kernel32 = _win32_dlls()
 
-                ctypes.windll.user32.PostThreadMessageW(self._thread.ident, 0x0012, 0, 0)
+                user32.PostThreadMessageW(self._thread.ident, 0x0012, 0, 0)
         except Exception:
             pass
         if self._thread is not None:
@@ -371,8 +464,7 @@ class WindowsPowerMonitor:
         import ctypes
         from ctypes import wintypes
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        user32, kernel32 = _win32_dlls()
 
         # Capture loop at start-time. If we're not on the gateway loop thread
         # (e.g. called from a test), fall back to get_event_loop.
@@ -395,7 +487,7 @@ class WindowsPowerMonitor:
         loop_ref = loop
 
         WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_long,
+            ctypes.c_ssize_t,  # LRESULT -- c_long truncates it on win64
             wintypes.HWND,
             wintypes.UINT,
             wintypes.WPARAM,
@@ -521,7 +613,7 @@ class WindowsPowerMonitor:
         if not atom:
             # Class may already be registered from a previous GatewayRunner
             # in this process (tests that reuse the interpreter). That's OK.
-            err = kernel32.GetLastError()
+            err = _win32_last_error()
             # 1410 == ERROR_CLASS_ALREADY_EXISTS
             if err != 1410:
                 logger.debug("WindowsPowerMonitor: RegisterClassExW failed err=%s", err)
@@ -552,7 +644,7 @@ class WindowsPowerMonitor:
                     None,
                 )
                 if not hwnd:
-                    failed[0] = f"CreateWindowExW failed err={kernel32.GetLastError()}"
+                    failed[0] = f"CreateWindowExW failed err={_win32_last_error()}"
                     ready.set()
                     return
                 hwnd_ref[0] = hwnd
@@ -569,7 +661,7 @@ class WindowsPowerMonitor:
                     if ret == 0:  # WM_QUIT
                         break
                     if ret == -1:
-                        logger.debug("WindowsPowerMonitor: GetMessageW error err=%s", kernel32.GetLastError())
+                        logger.debug("WindowsPowerMonitor: GetMessageW error err=%s", _win32_last_error())
                         break
                     user32.TranslateMessage(ctypes.byref(msg))
                     user32.DispatchMessageW(ctypes.byref(msg))
