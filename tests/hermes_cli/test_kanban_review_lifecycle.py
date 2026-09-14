@@ -66,7 +66,7 @@ def _events(conn, tid, kind=None):
 
 def _last_run(conn, tid):
     return conn.execute(
-        "SELECT status, outcome, summary FROM task_runs "
+        "SELECT status, outcome, summary, profile, step_key FROM task_runs "
         "WHERE task_id = ? ORDER BY id DESC LIMIT 1",
         (tid,),
     ).fetchone()
@@ -694,6 +694,52 @@ def test_request_review_on_unclaimed_ready_synthesizes_run(kanban_home: Path) ->
         evs = _events(conn, tid, kind="review_requested")
         assert len(evs) == 1
         assert evs[0][1]["summary"] == "done without a claim"
+
+
+def test_review_handoff_attributes_synthesized_run_to_implementer(kanban_home: Path) -> None:
+    """#111064: the reviewer takes over ``assignee``, but the zero-duration
+    handoff run belongs to the implementer who performed the handoff. The run
+    row must not be re-derived from the card after the reassignment."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="handoff attribution", assignee="default")
+        assert kb.get_task(conn, tid).current_run_id is None
+
+        ok = kb.request_review(conn, tid, summary="ready, handing off", reviewer="reviewer")
+        assert ok is True
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "review"
+        # Assignee semantics unchanged: the reviewer owns the review run.
+        assert task.assignee == "reviewer"
+
+        run = _last_run(conn, tid)
+        assert run["outcome"] == "review_requested"
+        assert run["profile"] == "default", (
+            "the handoff run is the implementer's, not the reassigned reviewer's"
+        )
+        # step_key still comes from the card.
+        assert run["step_key"] == kb.get_task(conn, tid).current_step_key
+
+        ev = _events(conn, tid, kind="review_requested")[0][1]
+        assert ev["implementer"] == "default"
+        assert ev["reviewer"] == "reviewer"
+
+
+def test_non_review_transitions_keep_card_assignee_on_synthesized_runs(kanban_home: Path) -> None:
+    """Regression guard: transitions that do NOT reassign the card still get
+    their synthesized run attributed to the card's assignee."""
+    with kbc.connect() as conn:
+        blocked = kb.create_task(conn, title="block handoff", assignee="worker")
+        assert kb.block_task(conn, blocked, reason="waiting on upstream") is True
+        assert _last_run(conn, blocked)["profile"] == "worker"
+
+        scheduled = kb.create_task(conn, title="schedule handoff", assignee="worker")
+        assert kb.schedule_task(conn, scheduled, reason="not yet") is True
+        assert _last_run(conn, scheduled)["profile"] == "worker"
+
+        done = kb.create_task(conn, title="complete handoff", assignee="worker")
+        assert kb.complete_task(conn, done, summary="done without a claim") is True
+        assert _last_run(conn, done)["profile"] == "worker"
 
 
 def test_reviewer_reassigns_for_autonomous_dispatch(kanban_home: Path) -> None:
