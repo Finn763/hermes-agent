@@ -492,7 +492,7 @@ stt:
 
 ### Provider Details
 
-**Local (faster-whisper)** — Runs Whisper locally via [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Uses CPU by default, GPU if available. Model sizes:
+**Local (faster-whisper)** — Runs Whisper locally via [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Uses CPU by default, GPU if available. The model is downloaded from Hugging Face on first use, then served from the local cache (mirror/offline setup: [Local STT model download](/user-guide/features/voice-mode#local-stt-model-download)). Model sizes:
 
 | Model | Size | Speed | Quality |
 |-------|------|-------|---------|

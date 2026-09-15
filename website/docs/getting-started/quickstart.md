@@ -289,6 +289,9 @@ For Docker sandboxes, you can also enable the **egress credential-injection prox
 cd ~/.hermes/hermes-agent
 uv pip install --python ./venv/bin/python -e ".[voice]"
 # Includes faster-whisper for free local speech-to-text
+# (first transcription downloads the model, ~150 MB for 'base', from huggingface.co —
+#  see https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode#local-stt-model-download
+#  for the mirror variables to use when huggingface.co is unreachable)
 ```
 
 Then in the CLI: `/voice on`. Press `Ctrl+B` to record. See [Voice Mode](../user-guide/features/voice-mode.md).

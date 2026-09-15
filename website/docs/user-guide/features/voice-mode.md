@@ -104,8 +104,38 @@ ELEVENLABS_API_KEY=***           # ElevenLabs — premium quality
 ```
 
 :::tip
-If `faster-whisper` is installed, voice mode works with **zero API keys** for STT. The model (~150 MB for `base`) downloads automatically on first use.
+If `faster-whisper` is installed, voice mode works with **zero API keys** for STT. The model (~150 MB for `base`) is fetched from Hugging Face once and cached; [afterwards it loads from disk with no network access](#local-stt-model-download).
 :::
+
+### Local STT model download
+
+The local `faster-whisper` provider is free and needs no key, but the **first** transcription is not
+offline-only: it downloads the model from `huggingface.co` into the Hugging Face cache
+(`~/.cache/huggingface/hub/` — `base` is ~150 MB, `large-v3` ~3 GB). There is no progress output on
+that first message, so a slow link looks like a hang.
+
+Once the snapshot is cached, later transcriptions load it straight from disk — no Hub lookup, so
+local STT keeps working with no internet at all. Configure the size with `stt.local.model`.
+
+If `huggingface.co` is unreachable from your network (mainland China, locked-down proxies), point
+the download at a mirror. **Both** variables are required:
+
+```bash
+# ~/.hermes/.env — loaded into the process environment at startup
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
+```
+
+`HF_HUB_DISABLE_XET=1` is not optional: with `hf-xet` installed, blobs are redirected to the Xet
+CAS bridge, which ignores `HF_ENDPOINT` and fails with `401 Unauthorized`. If a cold-cache
+download fails, Hermes names both variables in the error instead of leaving a bare
+`LocalEntryNotFoundError`.
+
+To verify the model landed and SHA-256-check the blob:
+
+```bash
+ls ~/.cache/huggingface/hub/models--Systran--faster-whisper-base/blobs/
+```
 
 ---
 
@@ -589,6 +619,20 @@ The bot requires an @mention by default in server channels. Make sure you:
 - TTS provider may be failing — check API key and quota
 - Edge TTS (free, no key) is the default fallback
 - Check logs for TTS errors
+
+### Local STT stalls or fails to download the model
+
+`huggingface.co` is unreachable from this host. The first local-whisper transcription has to fetch
+the model from the Hub; if that host is blocked, set the mirror pair in `~/.hermes/.env`:
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
+```
+
+Both are required (see [Local STT model download](#local-stt-model-download)). A cached model needs
+no network at all — if local STT is slow on every restart, check the model is actually cached under
+`~/.cache/huggingface/hub/models--Systran--faster-whisper-<size>/`.
 
 ### Whisper returns garbage text
 

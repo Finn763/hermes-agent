@@ -21,8 +21,8 @@ from typing import Any, Dict, Optional
 from tools.transcription_audio import _find_whisper_binary, _prepare_local_audio, _run_quiet
 from tools.transcription_common import (
     DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_STT_LANGUAGE, GROQ_MODELS, LOCAL_STT_COMMAND_ENV,
-    OPENAI_MODELS, _config_number, _error_result, _log_prompt_unsupported, _ok_result,
-    _process_error_detail)
+    OPENAI_MODELS, _config_number, _error_result, _hf_mirror_hint, _is_hub_error,
+    _is_whisper_model_cached, _log_prompt_unsupported, _ok_result, _process_error_detail)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -128,25 +128,63 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
 
     ``device`` / ``compute_type`` default to ``"auto"`` so the historical behaviour is unchanged; pass
     explicit values from ``stt.local.device`` / ``stt.local.compute_type`` to pin a configuration (#9088).
+
+    Cache-first (#111072): when the snapshot is already on disk the model is constructed with
+    ``local_files_only``, so huggingface_hub never performs the revision lookup that stalls for
+    minutes on hosts where huggingface.co is unreachable. A cache miss falls back to the normal
+    downloading path, which now fails with the mirror escape hatch in the message instead of a
+    bare ``LocalEntryNotFoundError``.
     """
+    from faster_whisper import WhisperModel
     force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
         # Importing ctranslate2 can itself abort on Apple Silicon/Rosetta when
         # multiple Intel OpenMP runtimes are loaded — set before the import.
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    from faster_whisper import WhisperModel
+    cached = _is_whisper_model_cached(model_name)
+
+    def load_model(loader_kwargs: Dict[str, Any]):
+        """Cache-first load: a warm cache is resolved offline, a cold one takes the download path.
+
+        The offline attempt only happens when the snapshot is already on disk, so a cold cache
+        still makes exactly one (network) construction — the pre-#111072 behaviour. A failure of
+        the online load is rewritten with the mirror escape hatch instead of a bare
+        ``LocalEntryNotFoundError``.
+        """
+        if cached:
+            logger.info("Local whisper model '%s' found in the Hugging Face cache — loading offline",
+                        model_name)
+            try:
+                return WhisperModel(model_name, **loader_kwargs, local_files_only=True)
+            except Exception as local_exc:
+                if isinstance(local_exc, ValueError):
+                    raise  # invalid model size — not a cache miss, don't retry online
+                logger.warning("Cached local whisper model '%s' failed to load offline (%s) — "
+                               "retrying with hub access", model_name, local_exc)
+        try:
+            return WhisperModel(model_name, **loader_kwargs)
+        except Exception as download_exc:
+            # The hub's own errors already carry its documentation link — append ours only when the
+            # failure didn't come from there (a local device/file error, say).
+            tail = "" if _is_hub_error(download_exc) else f" {_hf_mirror_hint()}"
+            logger.error("Local whisper model '%s' could not be loaded from Hugging Face: %s.%s",
+                         model_name, download_exc, tail)
+            raise RuntimeError(
+                f"whisper model '{model_name}' is not cached and could not be downloaded from "
+                f"Hugging Face: {download_exc}.{tail}") from download_exc
+
     if force_cpu:
         logger.info("Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
                     "(int8) to avoid native device autodetection crashes")
-        return WhisperModel(model_name, device="cpu", compute_type="int8")
+        return load_model({"device": "cpu", "compute_type": "int8"})
     try:
-        return WhisperModel(model_name, device=device, compute_type=compute_type)
+        return load_model({"device": device, "compute_type": compute_type})
     except Exception as exc:
         if not _looks_like_cuda_lib_error(exc):
             raise
         logger.warning("faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
                        "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.", exc)
-        return WhisperModel(model_name, device="cpu", compute_type="int8")
+        return load_model({"device": "cpu", "compute_type": "int8"})
 
 
 # Silence-hallucination hardening for local faster-whisper (whisper decodes junk like

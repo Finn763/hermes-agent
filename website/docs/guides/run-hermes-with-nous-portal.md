@@ -153,7 +153,9 @@ Because the Tool Gateway includes OpenAI TTS, [voice mode](/user-guide/features/
 ```bash
 hermes setup tts
 # → pick "Nous Subscription" for TTS
-# → pick a speech-to-text backend (local faster-whisper is free, no setup)
+# → pick a speech-to-text backend (local faster-whisper is free, no setup; the first
+#   transcription downloads the model from huggingface.co — see
+#   https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode#local-stt-model-download)
 ```
 
 Then in any messaging-platform session (Telegram, Discord, Signal, etc.), send a voice message and Hermes will transcribe it, respond, and reply with synthesized voice — all on your Portal subscription.
