@@ -255,6 +255,7 @@ export const en: Translations = {
       unavailable: 'Voice unavailable',
       liveEnded: 'Live voice session ended',
       liveError: 'Live voice',
+      liveIdleEnded: 'Live voice ended after idle timeout.',
       liveDelegationFailed: 'Could not hand the request to Hermes',
       liveUnavailable: reason => `GPT-Live voice chat is not available: ${reason}. Using speech-to-text instead.`
     },

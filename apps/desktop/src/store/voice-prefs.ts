@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { persistBoolean, readKey, storedBoolean } from '@/lib/storage'
+import { DEFAULT_IDLE_HANGUP_SECONDS } from '@/lib/voice-live'
 
 // Desktop read-aloud is local; voice.auto_tts belongs to the messaging gateway.
 const AUTO_SPEAK_KEY = 'hermes.desktop.autoSpeakReplies'
@@ -49,6 +50,22 @@ export function applyThinkingSoundFromConfig(
   config: { voice?: { thinking_sound?: unknown } | null } | null | undefined
 ) {
   $thinkingSoundEnabled.set(config?.voice?.thinking_sound !== false)
+}
+
+// `voice.gpt_live.idle_hangup_seconds` — hang up a silent GPT-Live call so a
+// forgotten one stops metering (OpenAI bills session minutes, idle included).
+// Default on; 0 = never.
+export const $voiceLiveIdleHangupSeconds = atom<number>(DEFAULT_IDLE_HANGUP_SECONDS)
+
+/** Seed the live idle-hangup deadline from a loaded config payload. */
+export function applyVoiceLiveIdleHangupFromConfig(
+  config: { voice?: { gpt_live?: { idle_hangup_seconds?: unknown } } | null } | null | undefined
+) {
+  const raw = config?.voice?.gpt_live?.idle_hangup_seconds
+
+  $voiceLiveIdleHangupSeconds.set(
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_IDLE_HANGUP_SECONDS
+  )
 }
 
 /** Persist even an unchanged value, so migrating false is also one-time. */

@@ -72,11 +72,54 @@ export interface VoiceLiveHandlers {
 
 const CLOSE_TIMEOUT_MS = 15_000
 const ICE_GATHER_TIMEOUT_MS = 10_000
+// How often the idle deadline is checked (see LiveIdleWatchdog).
+const IDLE_TICK_MS = 1_000
 // Vendor cap: 500 tokens per append. ~4 chars/token, keep headroom.
 const APPEND_CHAR_LIMIT = 1_400
 // How much conversation the backend receives per delegation.
 const CONTEXT_WINDOW_MS = 5 * 60_000
 const CONTEXT_MAX_FRAGMENTS = 80
+
+/** Fallback when config never loaded / predates the key: keep the cost guard on. */
+export const DEFAULT_IDLE_HANGUP_SECONDS = 300
+/** `onClosed` reason for a hangup the idle deadline triggered (vs. the user's stop). */
+export const IDLE_HANGUP_REASON = 'idle_timeout'
+
+/**
+ * Silence deadline for a live call. OpenAI bills a live session per minute of
+ * session time — idle included — so a forgotten call has to end itself. Any
+ * user, assistant or agent signal resets the clock. The session polls
+ * `expired()` on its own tick instead of re-arming a timeout, so the injected
+ * clock stays the only time source. `idleSeconds <= 0` disables it.
+ *
+ * ponytail: user speech is inferred from what the vendor transcribes (and from
+ * Hermes activity), not from the raw mic level — a 5-minute deadline does not
+ * need a second AudioContext. Probe the local stream too if short deadlines
+ * ever have to survive speech the vendor never transcribes.
+ */
+export class LiveIdleWatchdog {
+  private lastMs: number
+
+  constructor(
+    private readonly idleMs: number,
+    private readonly now: () => number = () => Date.now()
+  ) {
+    this.lastMs = now()
+  }
+
+  get enabled(): boolean {
+    return this.idleMs > 0
+  }
+
+  /** Any activity: user speech, assistant speech, or a turn in flight. */
+  note(): void {
+    this.lastMs = this.now()
+  }
+
+  expired(): boolean {
+    return this.enabled && this.now() - this.lastMs >= this.idleMs
+  }
+}
 
 export async function fetchVoiceLiveStatus(): Promise<null | VoiceLiveStatus> {
   try {
@@ -225,18 +268,42 @@ export class VoiceLiveSession {
   private analyser: null | AnalyserNode = null
   private audioContext: null | AudioContext = null
   private lastSpeaking = false
+  private readonly idle: LiveIdleWatchdog
+  private idleTimer: null | number = null
+  /** Reason WE initiated the close, so an idle hangup is never reported as the
+   *  user's stop (nor as the vendor's echoed `closed` reason). */
+  private closeReason: null | string = null
   sessionId: null | string = null
   /** The delegation currently being answered by Hermes; late results for an
    *  older id are dropped by the conversation hook. */
   activeDelegationId: null | string = null
 
-  constructor(private readonly handlers: VoiceLiveHandlers) {
+  constructor(
+    private readonly handlers: VoiceLiveHandlers,
+    options: { idleHangupSeconds?: number; now?: () => number } = {}
+  ) {
     this.audio = new Audio()
     this.audio.autoplay = true
+    this.idle = new LiveIdleWatchdog(Math.round((options.idleHangupSeconds ?? 0) * 1_000), options.now)
+
+    // Cost guard, armed at construction rather than in start(): a live session
+    // bills by wall-clock, so a mic prompt left open must count too.
+    if (this.idle.enabled) {
+      this.idleTimer = window.setInterval(() => {
+        if (this.idle.expired()) {
+          this.close(IDLE_HANGUP_REASON)
+        }
+      }, IDLE_TICK_MS)
+    }
   }
 
   get connected(): boolean {
     return this.started && this.events?.readyState === 'open'
+  }
+
+  /** A Hermes turn is in flight — silence now is work, not idleness. */
+  noteActivity(): void {
+    this.idle.note()
   }
 
   private nextEventId(prefix: string): string {
@@ -246,6 +313,10 @@ export class VoiceLiveSession {
   }
 
   private send(event: Record<string, unknown>): boolean {
+    // Every outbound event (commentary, thinking, instructions) is agent
+    // activity: the call is not idle while Hermes is talking to it.
+    this.idle.note()
+
     if (!this.events || this.events.readyState !== 'open') {
       return false
     }
@@ -360,6 +431,11 @@ export class VoiceLiveSession {
         quietFrames = loud ? 0 : quietFrames + 1
         const speaking = loud || quietFrames < 4
 
+        // The assistant is audibly talking: everything but that is idle.
+        if (loud) {
+          this.idle.note()
+        }
+
         if (speaking !== this.lastSpeaking) {
           this.lastSpeaking = speaking
           this.handlers.onSpeakingChange?.(speaking)
@@ -383,6 +459,7 @@ export class VoiceLiveSession {
       case 'session.started':
         this.started = true
         this.sessionId = event.session?.id ?? this.sessionId
+        this.idle.note()
 
         return
 
@@ -395,6 +472,8 @@ export class VoiceLiveSession {
           text: event.delta ?? ''
         }
 
+        // Someone (either side) just said something.
+        this.idle.note()
         this.transcript.push(fragment)
 
         if (this.transcript.length > 2_000) {
@@ -410,6 +489,7 @@ export class VoiceLiveSession {
         const id = event.delegation?.id
 
         if (id) {
+          this.idle.note()
           this.activeDelegationId = id
           this.handlers.onDelegation(id, this.contextWindow())
         }
@@ -491,19 +571,23 @@ export class VoiceLiveSession {
     })
   }
 
-  /** Graceful close: ask for `session.closed`, tear down after it (or a timeout). */
-  close(): void {
+  /** Graceful close: ask for `session.closed`, tear down after it (or a timeout).
+   *  `reason` is what `onClosed` reports — 'close_requested' for the user's stop,
+   *  `IDLE_HANGUP_REASON` for the idle deadline. */
+  close(reason = 'close_requested'): void {
     if (this.finalized) {
       return
     }
 
+    this.closeReason = reason
+
     if (!this.send({ type: 'session.close' })) {
-      this.finish('close_requested', null)
+      this.finish(reason, null)
 
       return
     }
 
-    this.closeTimer = window.setTimeout(() => this.finish('close_requested', null), CLOSE_TIMEOUT_MS)
+    this.closeTimer = window.setTimeout(() => this.finish(reason, null), CLOSE_TIMEOUT_MS)
   }
 
   private finish(reason: string, usageSeconds: null | number): void {
@@ -518,6 +602,11 @@ export class VoiceLiveSession {
       this.closeTimer = null
     }
 
+    if (this.idleTimer) {
+      window.clearInterval(this.idleTimer)
+      this.idleTimer = null
+    }
+
     if (this.speakingProbe) {
       window.clearInterval(this.speakingProbe)
       this.speakingProbe = null
@@ -530,6 +619,7 @@ export class VoiceLiveSession {
     this.peer?.close()
     this.audio.srcObject = null
     this.audio.pause()
-    this.handlers.onClosed(reason, usageSeconds)
+    // Our own close reason wins over the vendor's echo of it.
+    this.handlers.onClosed(this.closeReason ?? reason, usageSeconds)
   }
 }

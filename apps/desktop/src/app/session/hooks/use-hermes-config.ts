@@ -20,6 +20,7 @@ import { refreshVoiceLiveStatus } from '@/store/voice-live'
 import {
   applyAutoSpeakFromConfig,
   applyThinkingSoundFromConfig,
+  applyVoiceLiveIdleHangupFromConfig,
   applyVoiceStopPhraseFromConfig
 } from '@/store/voice-prefs'
 import { setChatFontFamilyFromConfig } from '@/themes/chat-font'
@@ -150,6 +151,7 @@ export function useHermesConfig({ activeSessionIdRef }: HermesConfigOptions) {
         applyAutoSpeakFromConfig(config)
         applyVoiceStopPhraseFromConfig(config)
         applyThinkingSoundFromConfig(config)
+        applyVoiceLiveIdleHangupFromConfig(config)
         // Resolved server-side (mode + whether a key resolves); non-critical.
         void refreshVoiceLiveStatus().catch(() => undefined)
       } catch {

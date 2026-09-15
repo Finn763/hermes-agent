@@ -293,6 +293,7 @@ export interface Translations {
       unavailable: string
       liveEnded: string
       liveError: string
+      liveIdleEnded: string
       liveDelegationFailed: string
       liveUnavailable: (reason: string) => string
     }

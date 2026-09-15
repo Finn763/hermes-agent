@@ -462,7 +462,8 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
     voiceChatMode: 'Voice Chat Mode',
     gptLive: {
       voice: 'GPT-Live Voice',
-      instructions: 'GPT-Live Persona'
+      instructions: 'GPT-Live Persona',
+      idleHangupSeconds: 'GPT-Live Idle Hangup'
     }
   },
   stt: {
@@ -630,7 +631,9 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
     gptLive: {
       voice: 'Voice for GPT-Live mode. Custom voice IDs are accepted.',
       instructions:
-        'Extra sentences for the live voice persona (tone, pace, language). Hermes keeps its own system prompt.'
+        'Extra sentences for the live voice persona (tone, pace, language). Hermes keeps its own system prompt.',
+      idleHangupSeconds:
+        'Hang up a silent GPT-Live call after this many seconds. Idle session time bills at $0.05/min, so a forgotten call keeps metering until stopped. 0 = never.'
     }
   },
   tts: {
@@ -740,6 +743,7 @@ export const SECTIONS: DesktopConfigSection[] = [
       'voice.voice_chat_mode',
       'voice.gpt_live.voice',
       'voice.gpt_live.instructions',
+      'voice.gpt_live.idle_hangup_seconds',
       'tts.provider',
       'stt.enabled',
       'stt.echo_transcripts',

@@ -2,9 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useI18n } from '@/i18n'
 import { sanitizeTextForSpeech } from '@/lib/speech-text'
-import { type LiveHistoryMessage, type LiveTranscriptFragment, VoiceLiveSession } from '@/lib/voice-live'
+import {
+  IDLE_HANGUP_REASON,
+  type LiveHistoryMessage,
+  type LiveTranscriptFragment,
+  VoiceLiveSession
+} from '@/lib/voice-live'
 import { isVoiceStopCommand } from '@/lib/voice-stop-word'
 import { notify, notifyError } from '@/store/notifications'
+import { $voiceLiveIdleHangupSeconds } from '@/store/voice-prefs'
 
 import type { ConversationStatus } from './use-voice-conversation'
 
@@ -214,95 +220,111 @@ export function useVoiceLiveConversation({
       return
     }
 
-    const session = new VoiceLiveSession({
-      // The voice model answers a bare "stop" itself (it just goes quiet) and
-      // never delegates it, so the spoken stop phrase is judged on the user
-      // transcript once the utterance settles.
-      onTranscript: fragment => {
-        if (fragment.speaker !== 'user') {
-          return
-        }
+    const session = new VoiceLiveSession(
+      {
+        // The voice model answers a bare "stop" itself (it just goes quiet) and
+        // never delegates it, so the spoken stop phrase is judged on the user
+        // transcript once the utterance settles.
+        onTranscript: fragment => {
+          if (fragment.speaker !== 'user') {
+            return
+          }
 
-        userUtteranceRef.current += fragment.text
+          userUtteranceRef.current += fragment.text
 
-        if (utteranceTimerRef.current) {
-          window.clearTimeout(utteranceTimerRef.current)
-        }
+          if (utteranceTimerRef.current) {
+            window.clearTimeout(utteranceTimerRef.current)
+          }
 
-        utteranceTimerRef.current = window.setTimeout(() => {
-          utteranceTimerRef.current = null
-          const utterance = userUtteranceRef.current
-          userUtteranceRef.current = ''
+          utteranceTimerRef.current = window.setTimeout(() => {
+            utteranceTimerRef.current = null
+            const utterance = userUtteranceRef.current
+            userUtteranceRef.current = ''
 
-          if (sessionRef.current === session && isVoiceStopCommand(utterance)) {
+            if (sessionRef.current === session && isVoiceStopCommand(utterance)) {
+              void end()
+              latest.current.onStopWord?.()
+            }
+          }, UTTERANCE_SETTLE_MS)
+        },
+        onClosed: (reason, usageSeconds) => {
+          if (sessionRef.current !== session) {
+            return
+          }
+
+          sessionRef.current = null
+          setDelegation(null)
+          setStatus('idle')
+
+          // The idle deadline only hung up the live connection: the chat
+          // session and any in-flight turn are untouched (the reply keeps
+          // running, it just is not spoken).
+          if (reason === IDLE_HANGUP_REASON) {
+            notify({
+              id: 'voice-live-idle-hangup',
+              kind: 'info',
+              message: voiceCopy.liveIdleEnded,
+              title: voiceCopy.liveEnded
+            })
+            latest.current.onFatalError?.()
+          } else if (reason !== 'close_requested') {
+            notify({
+              kind: 'warning',
+              message: usageSeconds != null ? `${reason} (${Math.round(usageSeconds)}s)` : reason,
+              title: voiceCopy.liveEnded
+            })
+            latest.current.onFatalError?.()
+          }
+        },
+        onDelegation: (delegationId, context) => {
+          if (sessionRef.current !== session) {
+            return
+          }
+
+          const { context: voiceContext, prompt } = delegationPrompt(context)
+
+          // A spoken stop command ends the conversation instead of becoming a turn.
+          if (prompt && isVoiceStopCommand(prompt)) {
             void end()
             latest.current.onStopWord?.()
+
+            return
           }
-        }, UTTERANCE_SETTLE_MS)
-      },
-      onClosed: (reason, usageSeconds) => {
-        if (sessionRef.current !== session) {
-          return
-        }
 
-        sessionRef.current = null
-        setDelegation(null)
-        setStatus('idle')
+          // A newer request supersedes an in-flight turn: stop it so the answer
+          // the voice speaks is for what the user asked last.
+          if (busyRef.current) {
+            void latest.current.onInterrupt?.()
+          }
 
-        if (reason !== 'close_requested') {
-          notify({
-            kind: 'warning',
-            message: usageSeconds != null ? `${reason} (${Math.round(usageSeconds)}s)` : reason,
-            title: voiceCopy.liveEnded
-          })
-          latest.current.onFatalError?.()
-        }
-      },
-      onDelegation: (delegationId, context) => {
-        if (sessionRef.current !== session) {
-          return
-        }
-
-        const { context: voiceContext, prompt } = delegationPrompt(context)
-
-        // A spoken stop command ends the conversation instead of becoming a turn.
-        if (prompt && isVoiceStopCommand(prompt)) {
-          void end()
-          latest.current.onStopWord?.()
-
-          return
-        }
-
-        // A newer request supersedes an in-flight turn: stop it so the answer
-        // the voice speaks is for what the user asked last.
-        if (busyRef.current) {
-          void latest.current.onInterrupt?.()
-        }
-
-        setDelegation(delegationId)
-        spokenResponseIdRef.current = null
-        spokenLengthRef.current = 0
-        lastToolLabelRef.current = null
-        turnObservedRef.current = false
-        submittedAtRef.current = Date.now()
-        latest.current.consumePendingResponse()
-        refreshStatus()
-        void Promise.resolve(latest.current.onSubmit(prompt, voiceContext)).catch(error => {
-          notifyError(error, voiceCopy.liveDelegationFailed)
-          session.speak(delegationId, 'Sorry, I could not reach Hermes for that request.')
-          setDelegation(null)
+          setDelegation(delegationId)
+          spokenResponseIdRef.current = null
+          spokenLengthRef.current = 0
+          lastToolLabelRef.current = null
+          turnObservedRef.current = false
+          submittedAtRef.current = Date.now()
+          latest.current.consumePendingResponse()
           refreshStatus()
-        })
+          void Promise.resolve(latest.current.onSubmit(prompt, voiceContext)).catch(error => {
+            notifyError(error, voiceCopy.liveDelegationFailed)
+            session.speak(delegationId, 'Sorry, I could not reach Hermes for that request.')
+            setDelegation(null)
+            refreshStatus()
+          })
+        },
+        onError: (message, fatal) => {
+          notify({ kind: fatal ? 'error' : 'warning', message, title: voiceCopy.liveError })
+        },
+        onSpeakingChange: speaking => {
+          speakingRef.current = speaking
+          setLevel(speaking ? 0.6 : 0)
+          refreshStatus()
+        }
       },
-      onError: (message, fatal) => {
-        notify({ kind: fatal ? 'error' : 'warning', message, title: voiceCopy.liveError })
-      },
-      onSpeakingChange: speaking => {
-        speakingRef.current = speaking
-        setLevel(speaking ? 0.6 : 0)
-        refreshStatus()
-      }
-    })
+      // Latched at start, like the engine choice: the deadline from the config
+      // snapshot this conversation opened with.
+      { idleHangupSeconds: $voiceLiveIdleHangupSeconds.get() }
+    )
 
     sessionRef.current = session
     startingRef.current = false
@@ -341,7 +363,8 @@ export function useVoiceLiveConversation({
     voiceCopy.couldNotStartSession,
     voiceCopy.liveDelegationFailed,
     voiceCopy.liveEnded,
-    voiceCopy.liveError
+    voiceCopy.liveError,
+    voiceCopy.liveIdleEnded
   ])
 
   // Drive the reply back into the voice: stream commentary as Hermes writes
@@ -363,6 +386,9 @@ export function useVoiceLiveConversation({
 
       if (busyRef.current) {
         turnObservedRef.current = true
+        // A turn in flight is Hermes working, not the user walking away —
+        // otherwise an idle hangup would drop the reply they are waiting for.
+        session.noteActivity()
       }
 
       const tool = latest.current.activeToolLabel?.() ?? null

@@ -1135,6 +1135,10 @@ DEFAULT_CONFIG = {
             "voice": "marin",  # marin | quartz | ripple | vesper | willow | stone | gleam | meridian | ...
             # Extra sentences appended to the live model's conversation persona (tone, pacing, language).
             "instructions": "",
+            # Hang up the live voice call after this many seconds with no user or assistant
+            # speech. OpenAI bills the voice layer per minute of session time (idle included),
+            # so a forgotten call meters on until stopped. 0 = never.
+            "idle_hangup_seconds": 300,
             # optional "api_key" / "base_url" keys override the OpenAI audio credentials for this mode only
         },
         "record_key": "ctrl+b",

@@ -7,7 +7,12 @@ vi.mock('@/hermes', () => ({
 
 import { saveHermesConfig } from '@/hermes'
 
-import { $voiceStopPhrase, applyVoiceStopPhraseFromConfig } from './voice-prefs'
+import {
+  $voiceLiveIdleHangupSeconds,
+  $voiceStopPhrase,
+  applyVoiceLiveIdleHangupFromConfig,
+  applyVoiceStopPhraseFromConfig
+} from './voice-prefs'
 
 it('keeps the desktop toggle local across config refreshes', async () => {
   for (const fails of [false, true]) {
@@ -93,5 +98,35 @@ describe('applyVoiceStopPhraseFromConfig', () => {
   it('malformed entries are skipped; all-blank list disables', () => {
     applyVoiceStopPhraseFromConfig({ voice: { stop_phrases: ['  ', ''] } })
     expect($voiceStopPhrase.get()).toBeNull()
+  })
+})
+
+describe('applyVoiceLiveIdleHangupFromConfig', () => {
+  it('defaults to 300s when the key is absent or unreadable', () => {
+    for (const config of [
+      { voice: {} },
+      { voice: { gpt_live: {} } },
+      null,
+      { voice: { gpt_live: { idle_hangup_seconds: 'lot' } } }
+    ]) {
+      $voiceLiveIdleHangupSeconds.set(1)
+      applyVoiceLiveIdleHangupFromConfig(config)
+      expect($voiceLiveIdleHangupSeconds.get()).toBe(300)
+    }
+  })
+
+  it('takes the configured deadline', () => {
+    applyVoiceLiveIdleHangupFromConfig({ voice: { gpt_live: { idle_hangup_seconds: 45 } } })
+    expect($voiceLiveIdleHangupSeconds.get()).toBe(45)
+  })
+
+  it('keeps 0 — the deadline is off, not a fall back to the default', () => {
+    applyVoiceLiveIdleHangupFromConfig({ voice: { gpt_live: { idle_hangup_seconds: 0 } } })
+    expect($voiceLiveIdleHangupSeconds.get()).toBe(0)
+  })
+
+  it('refuses a negative deadline', () => {
+    applyVoiceLiveIdleHangupFromConfig({ voice: { gpt_live: { idle_hangup_seconds: -5 } } })
+    expect($voiceLiveIdleHangupSeconds.get()).toBe(300)
   })
 })
