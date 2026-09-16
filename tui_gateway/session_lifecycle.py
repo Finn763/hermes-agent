@@ -391,9 +391,28 @@ def _close_session_by_id(
     return _teardown_popped_session(session, end_reason=end_reason)
 
 
+def _session_has_live_client(session: dict | None) -> bool:
+    """True when a client can still be shown this session: a live peer in the transport slot, or a live
+    viewer registration (the same registrations ``_close_sessions_for_transport`` re-binds a survivor from).
+
+    Deliberately narrow: a peer that closed latches ``_closed`` (``_transport_is_dead``), and stdio / the
+    ``_DropTransport`` sentinels are never live peers (``_transport_is_live_peer``) — so neither a dead
+    registration nor the process-wide stdio sink can make a genuinely clientless session immortal.
+    """
+    if _session_has_live_transport(session):
+        return True
+    return any(_transport_is_live_peer(viewer) for viewer in ((session or {}).get("viewers") or {}))
+
+
 def _ws_session_is_detached(session: dict | None) -> bool:
-    """True if a live session is still bound to the disconnected-WS sentinel."""
-    return bool(session and not session.get("_finalized") and session.get("transport") is _detached_ws_transport)
+    """True if a live session is parked on the disconnected-WS sentinel with NO client still attached.
+
+    The parking flag alone is not proof of an orphan: this predicate is the single gate shared by the reap
+    Timer (``_schedule_ws_orphan_reap``), the reaper's re-arm scan (``_repair_missing_ws_orphan_reaps``) and
+    the discard-style callers, so no producer of the parked state can reclaim a session a client holds.
+    """
+    return bool(session and not session.get("_finalized") and session.get("transport") is _detached_ws_transport
+                and not _session_has_live_client(session))
 
 
 def _ws_session_is_orphaned(session: dict | None) -> bool:
