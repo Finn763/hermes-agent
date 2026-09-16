@@ -441,7 +441,11 @@ def heartbeat_current_worker_from_env() -> bool:
     attempted. ``HERMES_KANBAN_RUN_ID`` pins the run row so a reclaimed stale run is not
     heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers)."""
     global _auto_heartbeat_last_attempt
-    tid = os.environ.get("HERMES_KANBAN_TASK")
+    # Owner-scoped exactly like inject_new_comments_from_env below: a delegate_task child (or an
+    # in-process cron job) shares this process and inherits the worker's task id + claim lock, so
+    # raw env here would let it extend the PARENT's claim and consume the shared rate-limit slot.
+    # The parent's claim stays alive meanwhile through delegate_tool's own activity heartbeat.
+    tid = os.environ.get("HERMES_KANBAN_TASK") if _is_dispatcher_owned_worker() else None
     now = time.monotonic()
     if not tid or (now - _auto_heartbeat_last_attempt) < _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS:
         return False
