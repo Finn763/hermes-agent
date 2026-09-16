@@ -87,6 +87,170 @@ describe('useSessionStateCache — stored-id rotation provenance', () => {
   })
 })
 
+describe('useSessionStateCache — a proven stored↔runtime binding is never stolen by a stale pair', () => {
+  afterEach(() => {
+    cleanup()
+    clearAllSessionStates()
+    setActiveSessionId(null)
+    setActiveSessionStoredIdRotation(null)
+  })
+
+  // THE PICTURE ON SCREEN: the OLD conversation (stored-old) and the
+  // conversation the user has since opened (stored-new) each own a live
+  // runtime. A stale send-time pair — a pipeline that still holds the OLD
+  // runtime id while its target stored id is the NEW session's, the shape
+  // submit.ts documents for a queue drain ("sessionId=A-runtime with
+  // storedSessionId=B") — arrives at the one shared write path. Accepting it
+  // RELABELS the old runtime onto the new session, so the next Enter in the
+  // new session resolves a "proven" runtime that is really the old one's and
+  // the turn persists into the old conversation while the UI shows the new.
+  it('① a stale pair cannot relabel a live runtime onto a session another runtime owns', () => {
+    let cache!: Cache
+
+    setActiveSessionId('rt-old')
+    render(<Harness activeSessionId="rt-old" onReady={value => (cache = value)} selectedStoredSessionId="stored-old" />)
+
+    act(() => {
+      cache.updateSessionState('rt-other', state => ({ ...state, model: 'other' }), 'stored-new')
+      cache.updateSessionState('rt-old', state => ({ ...state, model: 'old' }), 'stored-old')
+    })
+
+    act(() => {
+      cache.updateSessionState('rt-old', state => ({ ...state, model: 'stolen' }), 'stored-new')
+    })
+
+    // The new session's next turn must still resolve to the runtime that owns
+    // it — not to the old conversation's live runtime.
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-new')).toBe('rt-other')
+    expect(cache.getRuntimeIdForStoredSession('stored-new')).toBe('rt-other')
+    // The refusal must stop the caller's own update too, not just the binding:
+    // that updater is written for the session it MEANT (stored-new), so landing
+    // it here would publish the other conversation's state under this runtime —
+    // a stale seedOptimistic appends its prompt and marks it busy. `old`, not
+    // `stolen`, is what proves the update was dropped.
+    expect($sessionStates.get()['rt-old']?.model).toBe('old')
+    // The old runtime keeps its own durable identity.
+    expect($sessionStates.get()['rt-old']?.storedSessionId).toBe('stored-old')
+    expect(cache.getRuntimeIdForStoredSession('stored-old')).toBe('rt-old')
+    // And no foreground navigation event is published to route the view onto
+    // the other conversation off the back of a stale pair.
+    expect($activeSessionStoredIdRotation.get()).toBeNull()
+  })
+
+  // PROTECTION: the rotation the mechanism exists for — one conversation's own
+  // stored-id rotation (auto-compression mints a new tip) — still lands.
+  it('② a genuine stored-id rotation of the same runtime still applies', () => {
+    let cache!: Cache
+
+    setActiveSessionId('rt-a')
+    render(<Harness activeSessionId="rt-a" onReady={value => (cache = value)} selectedStoredSessionId="stored-a" />)
+
+    act(() => {
+      cache.updateSessionState('rt-a', state => ({ ...state, model: 'a' }), 'stored-a')
+      cache.updateSessionState('rt-a', state => ({ ...state, model: 'tip' }), 'stored-a-tip')
+    })
+
+    expect($activeSessionStoredIdRotation.get()).toEqual({
+      nextStoredSessionId: 'stored-a-tip',
+      previousStoredSessionId: 'stored-a',
+      runtimeSessionId: 'rt-a'
+    })
+    expect(cache.runtimeIdByStoredSessionIdRef.current.has('stored-a')).toBe(false)
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-a-tip')).toBe('rt-a')
+    expect($sessionStates.get()['rt-a']?.storedSessionId).toBe('stored-a-tip')
+  })
+
+  // PROTECTION: a fast A → B → A switch writes each session's own turn through
+  // the same entry. Nothing is lost and nothing crosses over.
+  it('③ a fast switch keeps each session on its own runtime and its own messages', () => {
+    let cache!: Cache
+
+    const userMessage = (id: string): ChatMessage => ({ id, parts: [{ text: id, type: 'text' }], role: 'user' })
+
+    setActiveSessionId('rt-a')
+    render(<Harness activeSessionId="rt-a" onReady={value => (cache = value)} selectedStoredSessionId="stored-a" />)
+
+    act(() => {
+      cache.updateSessionState('rt-a', state => ({ ...state, messages: [userMessage('in-a')] }), 'stored-a')
+      cache.updateSessionState('rt-b', state => ({ ...state, messages: [userMessage('in-b')] }), 'stored-b')
+    })
+
+    // ...switch back to A and send again.
+    act(() => {
+      cache.updateSessionState('rt-a', state => ({
+        ...state,
+        messages: [...state.messages, userMessage('in-a-2')]
+      }))
+    })
+
+    expect($sessionStates.get()['rt-a']?.messages.map(message => message.id)).toEqual(['in-a', 'in-a-2'])
+    expect($sessionStates.get()['rt-b']?.messages.map(message => message.id)).toEqual(['in-b'])
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-a')).toBe('rt-a')
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-b')).toBe('rt-b')
+    expect($activeSessionStoredIdRotation.get()).toBeNull()
+  })
+
+  // The other half of the same ownership decision, on a runtime with no cache
+  // entry yet: the `session.info` a rebuilt runtime (a mid-conversation
+  // model/provider switch) emits for the conversation already on screen while
+  // the runtime that works it is still there. maybeRebindPaneToRebuiltRuntime
+  // refuses to adopt that rebuilt runtime for exactly this reason, so the
+  // binding must not move to it either — otherwise the conversation's next send
+  // resolves onto a runtime the pane is not following.
+  it('④ a freshly observed runtime cannot take a stored id from a live holder', () => {
+    let cache!: Cache
+
+    setActiveSessionId('rt-owner')
+    render(<Harness activeSessionId="rt-owner" onReady={value => (cache = value)} selectedStoredSessionId="stored-a" />)
+
+    act(() => {
+      cache.updateSessionState('rt-owner', state => ({ ...state, busy: true }), 'stored-a')
+    })
+
+    act(() => {
+      cache.ensureSessionState('rt-rebuilt', 'stored-a')
+    })
+
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-a')).toBe('rt-owner')
+    expect(cache.getRuntimeIdForStoredSession('stored-a')).toBe('rt-owner')
+    // The rebuilt runtime still gets an entry of its own — its events (and its
+    // own transcript) keep landing there — it just does not inherit the send
+    // target of the conversation the other runtime is still serving.
+    expect(cache.sessionStateByRuntimeIdRef.current.get('rt-rebuilt')?.storedSessionId).toBe('stored-a')
+  })
+
+  // PROTECTION: the take-over the guard must not close off. Once the old runtime
+  // is gone — evicted/reaped, which drops its entry and, with it, its reverse
+  // binding (onEvict) — the replacement that keeps announcing the pair claims it
+  // on its own next observation.
+  it('⑤ a replacement claims the stored id once its holder is gone', () => {
+    let cache!: Cache
+
+    setActiveSessionId('rt-owner')
+    render(<Harness activeSessionId="rt-owner" onReady={value => (cache = value)} selectedStoredSessionId="stored-a" />)
+
+    act(() => {
+      cache.updateSessionState('rt-owner', state => ({ ...state, busy: true }), 'stored-a')
+      cache.ensureSessionState('rt-rebuilt', 'stored-a')
+    })
+
+    expect(cache.getRuntimeIdForStoredSession('stored-a')).toBe('rt-owner')
+
+    act(() => {
+      // What onEvict does for a reaped runtime: state and binding go together.
+      cache.sessionStateByRuntimeIdRef.current.delete('rt-owner')
+      cache.runtimeIdByStoredSessionIdRef.current.delete('stored-a')
+    })
+
+    act(() => {
+      cache.ensureSessionState('rt-rebuilt', 'stored-a')
+    })
+
+    expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-a')).toBe('rt-rebuilt')
+    expect(cache.getRuntimeIdForStoredSession('stored-a')).toBe('rt-rebuilt')
+  })
+})
+
 function Harness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessProps) {
   const busyRef: MutableRefObject<boolean> = { current: false }
 

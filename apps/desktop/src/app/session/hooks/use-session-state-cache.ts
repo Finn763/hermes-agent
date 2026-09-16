@@ -126,6 +126,31 @@ export function useSessionStateCache({
   }
 
   const sessionStateCache = sessionStateByRuntimeIdRef.current
+
+  // The runtime currently holding a stored id, when it is not this one and it
+  // still has a cache entry: the single ownership fact the relabel guard, the
+  // freshly-observed claim, and the caller's own update all consult. Null means
+  // the binding is free — nobody holds it, this runtime holds it, or its holder
+  // was evicted/reaped, which is exactly the take-over a resume or reconnect
+  // performs. Read through a stable callback so the two write paths below can
+  // share one decision without re-rendering their callers.
+  const liveHolderOfStoredSession = useCallback(
+    (storedSessionId: string | null | undefined, sessionId: string): string | null => {
+      if (!storedSessionId) {
+        return null
+      }
+
+      const holder = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+
+      if (!holder || holder === sessionId) {
+        return null
+      }
+
+      return sessionStateCache.get(holder) ? holder : null
+    },
+    [sessionStateCache]
+  )
+
   const pendingViewStateRef = useRef<{ sessionId: string; state: ClientSessionState } | null>(null)
   const viewSyncRafRef = useRef<number | null>(null)
   const transcriptViewGateByRuntimeIdRef = useRef(new Map<string, symbol>())
@@ -144,39 +169,78 @@ export function useSessionStateCache({
 
       if (existing) {
         if (storedSessionId !== undefined && storedSessionId !== existing.storedSessionId) {
-          // Stored id changed (e.g. auto-compression rotated it). Create a NEW
-          // state object rather than mutating in place — updateSessionState needs
-          // the PREVIOUS state to detect transitions (busy→idle, id rotation).
-          const updated = invalidatePersistedDisplayTranscriptAuthority({ ...existing, storedSessionId })
+          // A stored id another LIVE runtime already owns is not this runtime's
+          // rotation — it is a stale pair: some pipeline still holds the OLD
+          // conversation's runtime id while its target stored id is the session
+          // the user has since opened (the queue-drain shape submit.ts
+          // documents as "sessionId=A-runtime with storedSessionId=B"). Taking
+          // it would do three wrong things at once: DELETE the other runtime's
+          // proven stored→runtime binding, REBIND the new session to this old
+          // runtime, and (when this runtime is the active one) publish a
+          // rotation that walks the foreground onto the new session. The next
+          // Enter there then resolves a "proven" runtime that is really the old
+          // conversation's, so the turn is persisted into the OLD stored
+          // session while the view shows the new one — the UI/backend split
+          // this guard exists to prevent. Refuse the relabel outright: the
+          // caller's own target resolution (getRuntimeIdForStoredSession, the
+          // send-time ownership check) then fails closed and re-resumes the
+          // session it actually meant to send to. The refusal has to cover the
+          // caller's UPDATE as well, not just the binding — see updateSessionState,
+          // which drops its updater for this same pair.
+          //
+          // Only a LIVE claimer blocks the relabel: a binding left behind by an
+          // evicted/reaped runtime is exactly the take-over a resume or
+          // reconnect performs, and must keep working.
+          // ponytail: single stale-runtime claim, no alias walk. Add a lineage
+          // check (sessionMatchesStoredId) if a dead binding for a rotated tip
+          // ever blocks a genuine compression rotation.
+          const blockedByLiveHolder = Boolean(liveHolderOfStoredSession(storedSessionId, sessionId))
 
-          // Drop the obsolete stored→runtime reverse mapping as soon as the id
-          // rotates (e.g. auto-compression forks a continuation). Leaving the
-          // stale key lets getRuntimeIdForStoredSession resolve the old stored id
-          // to this runtime, which the compression route-follow logic relies on
-          // being absent. The rotation signal was previously emitted centrally
-          // from handleTransition (session-states.ts), but updateSessionState
-          // now skips publishSessionState (and thus handleTransition) when the
-          // updater is a no-op — fire it here so the route-follow effect still
-          // tracks compression without needing a dummy state write.
-          if (existing.storedSessionId && existing.storedSessionId !== storedSessionId) {
-            runtimeIdByStoredSessionIdRef.current.delete(existing.storedSessionId)
+          if (!blockedByLiveHolder) {
+            // Stored id changed (e.g. auto-compression rotated it). Create a NEW
+            // state object rather than mutating in place — updateSessionState needs
+            // the PREVIOUS state to detect transitions (busy→idle, id rotation).
+            const updated = invalidatePersistedDisplayTranscriptAuthority({ ...existing, storedSessionId })
 
-            // A rotation event needs a real next id — a null/cleared stored id
-            // is a detach, not a rotation the route-follow effect should chase.
-            if (storedSessionId && sessionId === $activeSessionId.get()) {
-              setActiveSessionStoredIdRotation({
-                nextStoredSessionId: storedSessionId,
-                previousStoredSessionId: existing.storedSessionId,
-                runtimeSessionId: sessionId
-              })
+            // Drop the obsolete stored→runtime reverse mapping as soon as the id
+            // rotates (e.g. auto-compression forks a continuation). Leaving the
+            // stale key lets getRuntimeIdForStoredSession resolve the old stored id
+            // to this runtime, which the compression route-follow logic relies on
+            // being absent. The rotation signal was previously emitted centrally
+            // from handleTransition (session-states.ts), but updateSessionState
+            // now skips publishSessionState (and thus handleTransition) when the
+            // updater is a no-op — fire it here so the route-follow effect still
+            // tracks compression without needing a dummy state write.
+            if (existing.storedSessionId && existing.storedSessionId !== storedSessionId) {
+              runtimeIdByStoredSessionIdRef.current.delete(existing.storedSessionId)
+
+              // A rotation event needs a real next id — a null/cleared stored id
+              // is a detach, not a rotation the route-follow effect should chase.
+              if (storedSessionId && sessionId === $activeSessionId.get()) {
+                setActiveSessionStoredIdRotation({
+                  nextStoredSessionId: storedSessionId,
+                  previousStoredSessionId: existing.storedSessionId,
+                  runtimeSessionId: sessionId
+                })
+              }
             }
-          }
 
-          if (storedSessionId) {
-            runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
-          }
+            if (storedSessionId) {
+              runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
+            }
 
-          sessionStateCache.set(sessionId, updated)
+            sessionStateCache.set(sessionId, updated)
+          }
+        } else if (storedSessionId && !liveHolderOfStoredSession(storedSessionId, sessionId)) {
+          // This runtime's own record already names this stored id, so there is
+          // no relabel to judge — but the reverse binding can still be missing or
+          // stale: the refusal above leaves it with the previous owner, and
+          // eviction/reaping drops it together with the entry (onEvict). Re-prove
+          // it here, so a runtime that kept announcing the pair — the rebuilt
+          // runtime of a mid-conversation model switch — takes the conversation
+          // over on its next observation once the old runtime is gone, instead of
+          // staying unbound until its own entry is recycled.
+          runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
         }
 
         return sessionStateCache.get(sessionId)!
@@ -184,7 +248,16 @@ export function useSessionStateCache({
 
       const created = createClientSessionState(storedSessionId ?? null)
 
-      if (storedSessionId) {
+      // A freshly observed runtime (no cache entry yet) is the other half of the
+      // same ownership decision. The reachable shape is the `session.info` a
+      // rebuilt runtime emits for the conversation already on screen while the
+      // runtime that owns it is still there — the pair
+      // maybeRebindPaneToRebuiltRuntime refuses to adopt for exactly this reason.
+      // Letting it claim the binding would resolve the conversation's next send
+      // onto a runtime the pane is not even following. Its own entry is still
+      // created so its events and its own transcript keep landing somewhere, and
+      // the branch above hands it the binding once the holder is gone.
+      if (storedSessionId && !liveHolderOfStoredSession(storedSessionId, sessionId)) {
         runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
       }
 
@@ -192,7 +265,7 @@ export function useSessionStateCache({
 
       return created
     },
-    [sessionStateCache]
+    [liveHolderOfStoredSession, sessionStateCache]
   )
 
   const resetViewSync = useCallback(() => {
@@ -344,6 +417,32 @@ export function useSessionStateCache({
       storedSessionId?: string | null
     ) => {
       const previous = ensureSessionState(sessionId, storedSessionId)
+
+      // A refused stale pair must not land the caller's update either. The
+      // updater is written for the session the caller MEANT — its optimistic
+      // prompt, its busy flag, its seeded transcript — so running it here
+      // publishes that session's state under the runtime that still owns the
+      // OLD conversation: the UI/backend split the binding refusal exists to
+      // prevent, with the binding left intact but the payload still crossed
+      // (the stale seedOptimistic appends the other session's prompt and marks
+      // the old runtime busy even though its stored id never moved). Hand the
+      // caller the untouched state instead; its own target resolution then fails
+      // closed and re-resumes the session it actually meant to send to.
+      //
+      // ensureSessionState only ever leaves `previous.storedSessionId` short of
+      // the requested pair in that one refused case — a fresh runtime's entry is
+      // created with (or without) the requested id, and a granted rotation writes
+      // it — so the holder check is a re-statement of the same decision, not a
+      // second policy.
+      const refusedStalePair =
+        Boolean(storedSessionId) &&
+        storedSessionId !== previous.storedSessionId &&
+        Boolean(liveHolderOfStoredSession(storedSessionId, sessionId))
+
+      if (refusedStalePair) {
+        return previous
+      }
+
       // Give the updater the raw previous state so it can return the same
       // reference when nothing changed (the caller sees a no-op). Previously
       // the param was always a fresh spread, so every call looked like a
@@ -374,7 +473,7 @@ export function useSessionStateCache({
 
       return next
     },
-    [ensureSessionState, sessionStateCache, syncSessionStateToView]
+    [ensureSessionState, liveHolderOfStoredSession, sessionStateCache, syncSessionStateToView]
   )
 
   useEffect(() => {
