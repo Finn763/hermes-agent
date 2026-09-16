@@ -42,16 +42,30 @@ def _transcript(base_ts=1_700_000_000.0):
     ]
 
 
+def _rematerialize(db, session_id=SESSION_ID):
+    """Re-materialize the transcript the way production does, so the copy carries durable provenance:
+    a reload is born-durable (``_db_persisted``) and a reload-with-ids carries ``_row_id``; the live
+    list's dicts were stamped with ``_row_id`` by their first flush. A BARE copy of the same dicts
+    carries no proof — it is indistinguishable from a brand-new same-text event and must insert
+    (#112044 review P1)."""
+    return db.get_messages_as_conversation(session_id, include_row_ids=True)
+
+
 def test_rematerialized_transcript_does_not_duplicate_active_rows(tmp_path):
-    """Re-appending an identical (re-materialized) copy must not create a second row."""
+    """Re-appending a PROVEN re-materialization (reload / re-flush of the live dicts) must not create
+    a second row."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = _db(tmpdir)
         try:
-            db.append_messages_batch(SESSION_ID, _transcript())
+            live = _transcript()
+            db.append_messages_batch(SESSION_ID, live)
             before = len(db.get_messages(SESSION_ID))
             assert before == 3, f"expected the 3 logical rows, got {before}"
 
-            db.append_messages_batch(SESSION_ID, _transcript())
+            db.append_messages_batch(SESSION_ID, _rematerialize(db))
+            db.append_messages_batch(SESSION_ID, live)
+            for _ in range(3):
+                db.append_messages_batch(SESSION_ID, _rematerialize(db))
 
             rows = db.get_messages(SESSION_ID)
             assert len(rows) == before, (
@@ -71,7 +85,7 @@ def test_repeated_repair_repack_does_not_grow_the_transcript(tmp_path):
             db.append_messages_batch(SESSION_ID, _transcript())
             counts = []
             for _ in range(3):
-                db.append_messages_batch(SESSION_ID, _transcript())
+                db.append_messages_batch(SESSION_ID, _rematerialize(db))
                 counts.append(len(db.get_messages(SESSION_ID)))
             assert counts == [3, 3, 3], f"transcript grew on every repack: {counts}"
         finally:

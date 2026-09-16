@@ -9,7 +9,11 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent.context_compressor import _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY, split_user_originated_turn
+from agent.context_compressor import (
+    _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY,
+    _DURABLE_COPY_MARKER,
+    split_user_originated_turn,
+)
 from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
 from hermes_cli.timefmt import coerce_epoch
@@ -42,6 +46,18 @@ _SET_COUNTERS_SQL = "UPDATE sessions SET message_count = ?, tool_call_count = ?"
 _RESET_COUNTERS_SQL = "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?"
 _SET_DISPLAY_META_SQL = "UPDATE messages SET display_metadata = ? WHERE id = ?"
 _ARCHIVE_ACTIVE_SQL = "UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ? AND active = 1"
+def _is_durable_materialization(msg: Dict[str, Any]) -> bool:
+    """True when *msg* proves it descends from a durable row, so reconciling it with an ACTIVE row
+    of the same logical identity is safe: a ``_row_id`` stamped by an earlier flush, the
+    born-durable marker a load stamps, or the flag a compaction copy carries across its marker
+    sweep. Anything else is a fresh user/gateway event — its identity cannot be inferred from
+    role/content/timestamp (#112044 review P1), so it must insert."""
+    rid = msg.get("_row_id")
+    if isinstance(rid, int) and not isinstance(rid, bool) and rid > 0:
+        return True
+    return bool(msg.get(_DB_PERSISTED_MARKER_KEY) or msg.get(_DURABLE_COPY_MARKER))
+
+
 # Idempotent-write probe (#111996): ACTIVE rows of this session carrying the same display
 # identity. display_identity omits platform_message_id, so differing non-null platform ids
 # must never match (two same-text gateway events in the same second are distinct).
@@ -531,8 +547,16 @@ class SessionMessagesMixin:
                         if (row[1] or None) == incoming_pid:
                             match_id = int(row[0])
                             break
-                else:
-                    match_id = int(existing[0][0])
+                elif _is_durable_materialization(msg):
+                    # Only a dict that PROVES it descends from a durable row may reconcile on
+                    # role/content/timestamp. A missing platform id cannot establish identity
+                    # (#112044 review P1): ``_persist_branch`` and other copy paths build fresh
+                    # dicts, so two same-text/same-second events of their own must both insert.
+                    rid = msg.get("_row_id")
+                    match_id = int(rid) if (
+                        isinstance(rid, int) and not isinstance(rid, bool)
+                        and any(int(row[0]) == rid for row in existing)
+                    ) else int(existing[0][0])
             if match_id is not None:
                 msg["_row_id"] = match_id
                 continue

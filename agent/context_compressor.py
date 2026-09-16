@@ -243,6 +243,12 @@ MICRO_COMPACT_MARKER_KEY = "_micro_compact_marker"
 # agent/context_compressor.py (micro-compaction defrag) for the two canonical pop sites. Mutating without
 # popping leaves the DB silently stale.
 _DB_PERSISTED_MARKER = "_db_persisted"
+# Provenance a compaction copy carries ACROSS the persistence-marker sweep (#112044 review P1).
+# ``_fresh_compaction_message_copy`` pops ``_DB_PERSISTED_MARKER`` so the rewritten content is
+# re-persisted; without a marker of its own the copy becomes indistinguishable from a brand-new
+# same-text event, and the writer would have to infer identity from role/content/timestamp alone —
+# which silently drops a genuinely distinct event. This flag says "I descend from a durable row".
+_DURABLE_COPY_MARKER = "_durable_copy"
 # Carried-forward tail rows archive as rewind-style (active=0, compacted=0) so
 # they don't duplicate live copies in recall; never persisted (unknown column).
 _COMPACTION_TAIL_MARKER = "_compaction_tail"
@@ -268,7 +274,11 @@ _BACKGROUND_PROCESS_NOTIFICATION_PREFIX = "[IMPORTANT: Background process "
 def _fresh_compaction_message_copy(msg: Dict[str, Any]) -> Dict[str, Any]:
     """Copy a message for compaction assembly without persistence markers (``_strip_persistence_markers`` is authoritative)."""
     fresh = msg.copy()
-    fresh.pop(_DB_PERSISTED_MARKER, None)
+    # Carry provenance across the sweep (#112044 review P1): the popped marker is what proved this
+    # dict's content was durable, so the copy must keep an equivalent claim or the writer would fall
+    # back to identity-by-content and could swallow a distinct same-text event.
+    if fresh.pop(_DB_PERSISTED_MARKER, None) or "_row_id" in fresh:
+        fresh[_DURABLE_COPY_MARKER] = True
     return fresh
 
 
