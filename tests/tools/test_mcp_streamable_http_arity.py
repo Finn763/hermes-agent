@@ -145,11 +145,20 @@ def test_the_seeded_protocol_header_matches_the_handshake_the_client_sends():
     assert mcp_tool.LATEST_HANDSHAKE_VERSION == sdk_handshake
 
 
-def test_the_seeded_header_is_the_handshake_version_on_the_wire():
-    """Asserted through the header dict `_run_http` actually builds."""
+def test_no_protocol_version_is_advertised_before_the_handshake():
+    """The bring-up must not seed ``MCP-Protocol-Version`` from our own newest revision.
+
+    That header carries the revision ``initialize`` negotiated and belongs to the
+    requests after it; seeding it pre-handshake makes the initialize POST name a
+    revision the server may not know, which a server whose newest is older answers
+    with ``400 -32020 Unsupported MCP-Protocol-Version`` (obsidian-mcp-connector).
+    The negotiated value reaches the wire through the SDK's post-handshake stamp —
+    see tests/tools/test_mcp_streamable_http_version_negotiation.py for that half.
+    Asserted through the header dict `_run_http` actually builds.
+    """
     from unittest.mock import patch as _patch
 
-    from tools.mcp_tool import MCPServerTask, LATEST_HANDSHAKE_VERSION
+    from tools.mcp_tool import MCPServerTask
 
     server = MCPServerTask("remote")
     seen: dict = {}
@@ -175,7 +184,7 @@ def test_the_seeded_header_is_the_handshake_version_on_the_wire():
     asyncio.run(_drive())
 
     headers = {k.lower(): v for k, v in (seen.get("headers") or {}).items()}
-    assert headers.get("mcp-protocol-version") == LATEST_HANDSHAKE_VERSION
+    assert "mcp-protocol-version" not in headers
 
 
 def test_an_explicit_protocol_header_still_wins():

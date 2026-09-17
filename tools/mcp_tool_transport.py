@@ -459,10 +459,11 @@ class MCPServerTransportMixin:
         # redirect — capture their names BEFORE client-generated headers are merged in.
         configured_header_names = {key.lower() for key in headers}
         headers = _apply_identity_header(self.name, config, headers)  # explicit same-name headers win
-        # Seed MCP-Protocol-Version (user override wins) from the HANDSHAKE version, not the latest: a
-        # 2026-07-28 header routes the handshake-era ``initialize()`` onto the envelope ladder, which rejects it.
-        if not any(key.lower() == "mcp-protocol-version" for key in headers):
-            headers["mcp-protocol-version"] = _core.LATEST_HANDSHAKE_VERSION
+        # No MCP-Protocol-Version is seeded before the handshake: the header carries the revision
+        # ``initialize`` negotiated (the SDK stamps it on every request that follows, and caches it
+        # for its own GET/DELETE), so advertising our own newest revision here rejects the handshake
+        # against any server whose newest is older — 400 -32020 on the initialize POST itself. A
+        # header the user set explicitly still wins; it is already in ``headers``.
         connect_timeout = config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
         common = (url, headers, connect_timeout, config.get("ssl_verify", True), _resolve_client_cert(self.name, config),
                   self._build_oauth_auth(url, config), bool(config.get("strict_redirect_headers")))
