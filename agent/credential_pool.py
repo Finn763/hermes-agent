@@ -1610,8 +1610,18 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     # ---- selection ---------------------------------------------------------
 
-    def select(self, *, model: Optional[str] = None) -> Optional[PooledCredential]:
-        entry, pending_refresh = self._select_under_lock(model=model)
+    def select(self, *, model: Optional[str] = None, observe: bool = False) -> Optional[PooledCredential]:
+        """Select the best available entry.
+
+        ``observe=True`` is the strictly read-only observation a status/display snapshot needs:
+        no single-use refresh is spent, no selection is counted, no round-robin priority is
+        rotated or persisted, no cooldown is healed, and ``current()`` is not repointed. A status
+        read that refreshed speculatively spent the token and PERSISTED the failure as a cooldown,
+        which every credential-gated listing (picker, desktop chat picker, doctor) then read as
+        "no usable credential" while the runtime resolver still served it. Request paths keep the
+        default lease, which is allowed to refresh, count, rotate and persist.
+        """
+        entry, pending_refresh = self._select_under_lock(model=model, observe=observe)
         if pending_refresh:
             self._refresh_pending_entries(pending_refresh)
             # Re-select now that the refreshed entries are back in the pool.
@@ -1621,9 +1631,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             self._unmatched_rotation_streak = 0
         return entry
 
-    def _select_under_lock(self, *, model: Optional[str] = None) -> Tuple[Optional[PooledCredential], List[PooledCredential]]:
+    def _select_under_lock(
+        self, *, model: Optional[str] = None, observe: bool = False,
+    ) -> Tuple[Optional[PooledCredential], List[PooledCredential]]:
         with self._lock:
-            return self._select_unlocked(model=model)
+            return self._select_unlocked(model=model, observe=observe)
 
     def _refresh_pending_entries(self, pending: List[PooledCredential]) -> None:
         """Refresh deferred single-use-token entries OUTSIDE the pool lock.
@@ -1652,6 +1664,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False, model: Optional[str] = None,
+        observe: bool = False,
     ) -> Tuple[List[PooledCredential], List[PooledCredential]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
@@ -1661,6 +1674,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         xai-oauth), which are returned as *pending_refresh* so the caller
         refreshes them outside the lock instead of stalling every pool
         consumer during cross-process flock acquisition + OAuth network I/O.
+        *observe* is the read-only contract a status/display snapshot needs:
+        nothing below resyncs from the token authority, prunes, heals a
+        cooldown or persists (see ``select(observe=True)``).
         """
         now = time.time()
         cleared_any = False
@@ -1674,16 +1690,17 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             # unhydrated duplicate as an empty key.
             if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
                 continue
-            synced = self._resync_stale_entry(entry)
-            if synced is not entry:
-                entry = synced
-                cleared_any = True
+            if not observe:
+                synced = self._resync_stale_entry(entry)
+                if synced is not entry:
+                    entry = synced
+                    cleared_any = True
             if entry.last_status == STATUS_DEAD:
                 # Manual DEAD credentials are pruned after a 24h quiet window;
                 # singleton-seeded ones stay (audit trail, and the seeder would
                 # re-create them anyway). DEAD never re-enters via TTL — only a
                 # write-side re-auth sync clears it.
-                if _is_manual_source(entry.source):
+                if _is_manual_source(entry.source) and not observe:
                     dead_at = entry.last_status_at or 0
                     if dead_at and now - dead_at > DEAD_MANUAL_PRUNE_TTL_SECONDS:
                         logger.warning(
@@ -1744,15 +1761,20 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _select_unlocked(
         self, *, refresh: bool = True, count: bool = True, model: Optional[str] = None,
+        observe: bool = False,
     ) -> Tuple[Optional[PooledCredential], List[PooledCredential]]:
         """Select the best available entry; returns ``(entry, pending_refresh)``.
 
         ``count=False`` skips the ``request_count`` bump for selections that are
         not going to serve a request (a forced-refresh target lookup).
+        ``observe=True`` returns the same pick without leasing it: no refresh, no
+        accounting, no rotation, no ``current()`` repoint (see ``select``).
         """
-        available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh, model=model)
+        available, pending_refresh = self._available_entries(
+            clear_expired=not observe, refresh=refresh and not observe, model=model, observe=observe)
         if not available:
-            self._current_id = None
+            if not observe:
+                self._current_id = None
             self._log_no_available_entries()
             return None, pending_refresh
 
@@ -1769,15 +1791,16 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # Count the selection under every strategy. The counter is ``least_used``'s
         # baseline and reaches auth.json on the next persist (exhaustion, rotation,
         # refresh); it used to move only while ``least_used`` was active.
-        if count:
+        if count and not observe:
             entry = self._adopt(entry, persist=False, request_count=entry.request_count + 1)
-        if self._strategy == STRATEGY_ROUND_ROBIN and len(available) > 1:
+        if self._strategy == STRATEGY_ROUND_ROBIN and len(available) > 1 and not observe:
             rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
             rotated.append(replace(entry, priority=len(self._entries) - 1))
             self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
             self._persist()
             entry = self._find(lambda candidate: candidate.id == entry.id) or entry
-        self._current_id = entry.id
+        if not observe:
+            self._current_id = entry.id
         return entry, pending_refresh
 
     def peek(self) -> Optional[PooledCredential]:
