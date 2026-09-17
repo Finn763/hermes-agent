@@ -334,11 +334,17 @@ class GatewayBusySessionMixin:
                 for key in self._SECURITY_METADATA_KEYS
             )
         )
+        # #114363 — the merge branch is only for (a) PHOTO on either side (album/burst) and (b) a
+        # TEXT follow-up that belongs to the pending media as its caption. Triggering it on *any*
+        # media on either side absorbed independent deliveries: three Telegram voice notes sent
+        # during a long turn collapsed into the head event and ran as ONE follow-up turn, bypassing
+        # the arrival-order FIFO that text follow-ups already get (#28503). Every other media
+        # follow-up goes to the FIFO like text does.
+        same_media_context = bool(getattr(existing, "media_urls", None)) and event.message_type == MessageType.TEXT
         if same_security_context and (
-            getattr(existing, "message_type", None) == MessageType.PHOTO
+            same_media_context
+            or getattr(existing, "message_type", None) == MessageType.PHOTO
             or event.message_type == MessageType.PHOTO
-            or bool(getattr(existing, "media_urls", None))
-            or bool(getattr(event, "media_urls", None))
         ):
             # Preserve photo-burst / media-merge semantics for the head slot.
             merge_pending_message_event(
