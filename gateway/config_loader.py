@@ -196,6 +196,9 @@ def _str_keyed(value: Any) -> Any:
 
 
 _TELEGRAM = frozenset({Platform.TELEGRAM})
+# Teams is a bundled plugin platform (no import-time enum member — ``Platform.TEAMS`` only exists
+# after a dynamic ``_missing_`` lookup), so resolve it the same way ``shared_loop_targets`` does.
+_TELEGRAM_AND_TEAMS = _TELEGRAM | {p for p in (Platform("teams"),) if p is not None}
 _DISCORD_SLACK = frozenset({Platform.DISCORD, Platform.SLACK})
 
 def _plain(*keys: str) -> tuple:
@@ -213,7 +216,7 @@ _SHARED_KEYS: tuple = (
     ("group_allowed_chats", _TELEGRAM, None),
     ("allowed_topics", _TELEGRAM, None),
     *_plain("free_response_channels", "mention_patterns", "exclusive_bot_mentions"),
-    ("observe_unmentioned_group_messages", _TELEGRAM, None),
+    ("observe_unmentioned_group_messages", _TELEGRAM_AND_TEAMS, None),
     *_plain(
         "dm_policy", "allow_from", "allow_admin_from", "user_allowed_commands",
         "group_policy", "group_allow_from", "group_allow_admin_from", "group_user_allowed_commands",

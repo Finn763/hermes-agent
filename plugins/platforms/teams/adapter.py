@@ -14,12 +14,14 @@ import asyncio
 # import time. Importing it during plugin discovery / ``TeamsSummaryWriter`` imports would pollute process
 # ``os.environ`` from a cwd-discovered ``.env`` (#62935). Detect presence via find_spec only; bind symbols
 # in ``check_teams_requirements()`` behind a dotenv no-op.
+import dataclasses
 import importlib.util
 import json
 import logging
 import re
 import sys
 from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import urlparse
 
@@ -60,7 +62,8 @@ from gateway.platforms.base_exec_approval import (
     EA_HEADER_TEXT, EA_REASON_LABEL_TEXT, approval_timeout_seconds, format_approval_deadline_line)
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms._shared import (
-    coerce_port, get_scoped_secret as _get_scoped_secret, seed_extra_from_env as _seed_extra_from_env, send_error
+    coerce_port, extra_or_secret as _extra_or_secret, get_scoped_secret as _get_scoped_secret,
+    seed_extra_from_env as _seed_extra_from_env, send_error
 )
 
 logger = logging.getLogger(__name__)
@@ -308,6 +311,11 @@ def check_teams_requirements() -> bool:
 
 
 _CHAT_TYPES = {"personal": "dm", "groupChat": "group", "channel": "channel"}
+# Conversation types where the mention gate and observed context apply (DMs always dispatch).
+_GROUP_CHAT_TYPES = frozenset({"group", "channel"})
+# Downstream contract: gateway/run.py separates ``observed`` transcript rows into a context-only
+# block when the channel prompt carries this marker (same contract as Telegram's spelling).
+_TEAMS_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Teams group context"
 # DOCUMENT wins over PHOTO/VIDEO/AUDIO for mixed attachments: document-context
 # injection gates strictly on MessageType.DOCUMENT (same precedence as Email/Signal).
 _MEDIA_KIND_PRECEDENCE = (
@@ -321,6 +329,16 @@ _APPROVAL_LABELS = {
 
 def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "..." if len(text) > limit else text
+
+
+def _settings_bool(extra: Any, key: str, env: str, default: bool = False) -> bool:
+    """Boolean setting: scoped ``env`` → ``extra[key]`` → ``default`` (a blank env value is unset)."""
+    configured = _extra_or_secret(extra or {}, key, env, None)
+    if configured is None:
+        return default
+    if isinstance(configured, bool):
+        return configured
+    return str(configured).strip().lower() in {"true", "1", "yes", "on"}
 
 
 def _approval_body(cmd: str, desc: str, *, always: bool = False) -> list:
@@ -464,6 +482,90 @@ class TeamsAdapter(BasePlatformAdapter):
                 # Never buffer .content — a lying Content-Length must not OOM the gateway.
                 return await _read_httpx_body_with_limit(response, media_type="attachment")
 
+    # ── Group mention gating + observed context ───────────────────────────────
+    # ``require_mention`` is the shared key every other adapter honors; with resource-specific
+    # consent granted (ChannelMessage.Read.Group / ChatMessage.Read.Chat) Teams delivers EVERY
+    # message in the conversation, so without the gate the bot answers all of them. The observe
+    # flag keeps the filtered ones as session context instead of dropping them (Telegram parity).
+
+    def _teams_require_mention(self) -> bool:
+        """Whether a channel / group-chat message must address the bot to get a turn."""
+        return _settings_bool(self.config.extra, "require_mention", "TEAMS_REQUIRE_MENTION")
+
+    def _teams_observe_unmentioned_group_messages(self) -> bool:
+        """Keep unmentioned channel/group messages as observed context instead of dropping them."""
+        return _settings_bool(
+            self.config.extra, "observe_unmentioned_group_messages", "TEAMS_OBSERVE_UNMENTIONED_GROUP_MESSAGES")
+
+    def _mentions_bot(self, activity: Any) -> bool:
+        """True when the activity carries a Bot Framework mention entity for this bot's app id."""
+        bot_ids = {i for i in (getattr(self._app, "id", None), self._client_id) if i}
+        for entity in getattr(activity, "entities", None) or []:
+            data = entity if isinstance(entity, dict) else (getattr(entity, "__dict__", None) or {})
+            if data.get("type") != "mention":
+                continue
+            mentioned = data.get("mentioned")
+            mentioned_id = mentioned.get("id") if isinstance(mentioned, dict) else getattr(mentioned, "id", None)
+            if mentioned_id and mentioned_id in bot_ids:
+                return True
+        return False
+
+    def _teams_group_observe_shared_source(self, source):
+        """Chat-scoped source for observed Teams group context: observed rows and the later mention
+        turn must land in ONE session, so the per-sender group key cannot be used."""
+        return dataclasses.replace(source, user_id=None, user_name=None, user_id_alt=None)
+
+    @staticmethod
+    def _teams_group_observe_attributed_text(source: Any, text: Optional[str]) -> str:
+        """``[name|id]`` attribution, matching Telegram's observed-history format."""
+        user_id = getattr(source, "user_id", None) or "unknown"
+        return f"[{getattr(source, 'user_name', None) or user_id}|{user_id}]\n{text or ''}"
+
+    @staticmethod
+    def _teams_group_observe_channel_prompt() -> str:
+        return (
+            "You are handling a Microsoft Teams channel or group chat message.\n"
+            f"- {_TEAMS_OBSERVED_CONTEXT_PROMPT_MARKER} may be provided in a separate context-only "
+            "block before the current message; it is not necessarily addressed to you.\n"
+            "- Treat only the current new message as a request explicitly directed at you, "
+            "and use observed context only when the current message asks for it.")
+
+    def _apply_teams_group_observe_attribution(self, event: MessageEvent) -> MessageEvent:
+        """Align a triggered channel/group turn with observed-history attribution."""
+        # Both flags, because observation itself needs ``require_mention`` on: sharing the
+        # chat-scoped session is only correct once observed rows can exist in it. (Telegram gates
+        # this on its chat allowlist instead; Teams has no equivalent, so the mention gate is it.)
+        if not self._teams_observe_unmentioned_group_messages() or not self._teams_require_mention():
+            return event
+        source = getattr(event, "source", None)
+        if getattr(source, "chat_type", "") not in _GROUP_CHAT_TYPES:
+            return event
+        observe_prompt = self._teams_group_observe_channel_prompt()
+        channel_prompt = f"{event.channel_prompt}\n\n{observe_prompt}" if event.channel_prompt else observe_prompt
+        if event.is_command():
+            # Commands keep the original source (user_id) so slash access can identify the sender.
+            return dataclasses.replace(event, channel_prompt=channel_prompt)
+        return dataclasses.replace(
+            event, text=self._teams_group_observe_attributed_text(source, event.text),
+            source=self._teams_group_observe_shared_source(source), channel_prompt=channel_prompt)
+
+    def _observe_unmentioned_group_message(self, source: Any, text: Optional[str], message_id: Optional[str]) -> None:
+        """Append skipped channel/group chatter to the shared session without dispatching."""
+        store = getattr(self, "_session_store", None)
+        if not store:
+            return
+        try:
+            entry = store.get_or_create_session(self._teams_group_observe_shared_source(source))
+            row = {
+                "role": "user", "content": self._teams_group_observe_attributed_text(source, text),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(), "observed": True}
+            if message_id:
+                row["message_id"] = str(message_id)
+            store.append_to_transcript(entry.session_id, row)
+            logger.info("[teams] Message observed (bot not mentioned): chat=%s", getattr(source, "chat_id", "?"))
+        except Exception as exc:
+            logger.warning("[teams] Failed to observe unmentioned group message: %s", exc)
+
     async def _on_message(self, ctx: ActivityContext[MessageActivity]) -> None:
         activity = ctx.activity
         bot_id = self._app.id if self._app else None
@@ -489,12 +591,18 @@ class TeamsAdapter(BasePlatformAdapter):
             user_name=getattr(from_account, "name", None) or "",
             guild_id=getattr(conv, "tenant_id", None) or self._tenant_id,
             message_id=msg_id)
+        if source.chat_type in _GROUP_CHAT_TYPES and self._teams_require_mention() and not self._mentions_bot(activity):
+            if self._teams_observe_unmentioned_group_messages():
+                self._observe_unmentioned_group_message(source, text, msg_id)
+            else:
+                logger.debug("[teams] Ignoring channel/group message (require_mention=true, bot not mentioned)")
+            return
         media: list = [m for m in [await self._cache_attachment(a) for a in getattr(activity, "attachments", None) or []] if m]
         media_kinds = [kind for _, _, kind in media]  # media items are (path, media_type, kind)
         msg_type = next((t for kind, t in _MEDIA_KIND_PRECEDENCE if kind in media_kinds), MessageType.TEXT)
-        await self.handle_message(MessageEvent(
+        await self.handle_message(self._apply_teams_group_observe_attribution(MessageEvent(
             text=text, source=source, message_type=msg_type, message_id=msg_id,
-            media_urls=[path for path, _, _ in media], media_types=[mt for _, mt, _ in media]))
+            media_urls=[path for path, _, _ in media], media_types=[mt for _, mt, _ in media])))
 
     async def _cache_attachment(self, att: Any) -> Optional[tuple]:
         """Download + cache one inbound attachment → ``(path, media_type, kind)`` or ``None``."""
