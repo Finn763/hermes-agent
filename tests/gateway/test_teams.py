@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from gateway.config import Platform, PlatformConfig, HomeChannel
+from gateway.config import GatewayConfig, Platform, PlatformConfig, HomeChannel
 from plugins.teams_pipeline.models import TeamsMeetingRef, TeamsMeetingSummaryPayload
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
 
@@ -282,6 +282,36 @@ class TestTeamsAdapterInit:
         assert adapter._client_id == "cfg-id"
         assert adapter._client_secret == "cfg-secret"
         assert adapter._tenant_id == "cfg-tenant"
+
+
+    def test_extra_is_instance_state(self):
+        """The adapter keeps the platform's ``extra`` dict, so keys it does not consume in
+        ``__init__`` (and any ``getattr(self, "_extra", None)`` read) resolve instead of
+        silently seeing ``None``."""
+        config = _make_config(
+            client_id="id", client_secret="secret", tenant_id="tenant",
+            files_site_id="site-123", require_mention=True,
+        )
+        adapter = TeamsAdapter(config)
+        assert getattr(adapter, "_extra", None) is not None
+        assert adapter._extra.get("files_site_id") == "site-123"
+        assert adapter._extra.get("require_mention") is True
+
+
+    def test_yaml_extra_reaches_adapter_instance(self):
+        """Full chain: YAML platform block → ``PlatformConfig.extra`` → adapter instance.
+        Config loading was already correct; the adapter dropped the dict, so any key it does
+        not read in ``__init__`` had no effect."""
+        config = GatewayConfig.from_dict({
+            "platforms": {"teams": {"enabled": True, "extra": {
+                "client_id": "id", "client_secret": "secret", "tenant_id": "tenant",
+                "files_site_id": "site-123",
+            }}},
+        })
+        platform_config = config.platforms[Platform("teams")]
+        assert platform_config.extra["files_site_id"] == "site-123"  # loading half always worked
+        adapter = TeamsAdapter(platform_config)
+        assert adapter._extra["files_site_id"] == "site-123"
 
 
     def test_custom_port_from_env(self, monkeypatch):

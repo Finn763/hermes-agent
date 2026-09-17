@@ -344,14 +344,16 @@ class TeamsAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("teams"))
-        extra = config.extra or {}
+        # ``platforms.teams.extra`` as instance state: keys not consumed here are read through
+        # ``self._extra`` (as sibling plugin adapters do), not dropped with a constructor-local.
+        self._extra = config.extra or {}
         self._client_id, self._client_secret, self._tenant_id = _credentials(config)
         # (token, expiry monotonic ts) for connector attachment auth; refreshed under
         # _bf_token_lock so concurrent attachments can't stampede the STS.
         self._bf_token_cache: Optional[tuple] = None
         self._bf_token_lock: Optional[asyncio.Lock] = None
-        self._port = coerce_port(extra.get("port") or _get_scoped_secret("TEAMS_PORT", str(_DEFAULT_PORT)), _DEFAULT_PORT)
-        _raw_host = extra.get("host") or _get_scoped_secret("TEAMS_HOST", "") or _DEFAULT_HOST  # falsy → dual-stack None
+        self._port = coerce_port(self._extra.get("port") or _get_scoped_secret("TEAMS_PORT", str(_DEFAULT_PORT)), _DEFAULT_PORT)
+        _raw_host = self._extra.get("host") or _get_scoped_secret("TEAMS_HOST", "") or _DEFAULT_HOST  # falsy → dual-stack None
         self._host: Optional[str] = str(_raw_host) if _raw_host else None
         self._app: Optional["App"] = None
         self._runner: Optional["web.AppRunner"] = None
