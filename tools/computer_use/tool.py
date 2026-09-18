@@ -372,13 +372,19 @@ def _do_scroll(backend, action, args, **delivery):
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
                           element=args.get("element"), **_scroll_xy(args), modifiers=args.get("modifiers"), **delivery)
 
+def _screenshot_inline(args: Dict[str, Any]) -> bool:
+    """``screenshot_inline`` (default true): false writes the capture to disk and returns only its path instead of
+    inlining MB-scale base64 into the tool result (#114695). Only an explicit JSON ``false`` opts out — a mistyped
+    value keeps the old inline behaviour."""
+    return args.get("screenshot_inline") is not False
+
 def _do_capture(backend, action, args, session_id=None, **_):
     if (mode := str(args.get("mode", "som"))) not in {"som", "vision", "ax"}:
         return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
     # pid/window_id forwarded only when given so older backends keep their defaults.
     return _capture_response(backend.capture(mode=mode, app=args.get("app"),
                                              **{k: args[k] for k in ("pid", "window_id") if args.get(k) is not None}),
-                             session_id=session_id)
+                             session_id=session_id, screenshot_inline=_screenshot_inline(args))
 
 def _do_listing(backend, action, args, key, **_):
     return json.dumps({key: (items := getattr(backend, action)()), "count": len(items)})
@@ -446,7 +452,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any], se
     res = spec.handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
                        bring_to_front=bool(args.get("bring_to_front")), **({} if spec.input else {"session_id": session_id}))
     return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")),
-                                                                         session_id=session_id)
+                                                                         session_id=session_id,
+                                                                         screenshot_inline=_screenshot_inline(args))
 
 # ── Response shaping ────────────────────────────────────────────────────────
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
@@ -594,10 +601,25 @@ def _capture_digest(cap: CaptureResult) -> str:
                           + (cap.png_b64 or "").encode("ascii", "ignore")).hexdigest()
 
 def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS,
-                      session_id: Optional[str] = None) -> Any:
+                      session_id: Optional[str] = None, screenshot_inline: bool = True) -> Any:
     v = _capture_view(cap, max_elements)
     lines = _capture_summary_lines(v)
     summary, extra = "\n".join(lines), None  # multimodal/aux paths use this; text paths append notes and rebuild
+    if v.has_image and not screenshot_inline:
+        # File-path delivery (#114695): the caller asked for the image NOT to ride along in the result. MB-scale
+        # base64 in the tool result is what dominates `capture(mode='som')` through the tool surface (22-64s for a
+        # capture the driver returns in ~1s), and no tree parameter can shrink it. This lane returns the persisted
+        # `screenshot_path` plus size/elements — and deliberately skips BOTH the dedup check and auxiliary.vision:
+        # no pixels are delivered here, so there is nothing to dedup and nothing to pre-analyse on the caller's
+        # behalf (they asked for a path, not a vision call). Cache lifecycle is the shared bounded one
+        # (`_MAX_CAPTURE_FILES`), so nothing accumulates.
+        lines.append(
+            f"  (screenshot NOT inlined (screenshot_inline=false): {v.width}x{v.height} image written to "
+            f"{v.screenshot_path} — deliver it with `MEDIA: <path>` when the user asks to see it, or re-capture "
+            "with screenshot_inline=true to receive the pixels yourself)" if v.screenshot_path else
+            "  (screenshot NOT inlined (screenshot_inline=false) and the file could not be written; re-capture with "
+            "screenshot_inline=true to receive the image)")
+        return _text_capture_payload(v, "\n".join(lines), {"screenshot_inlined": False})
     if v.has_image and session_id and _screenshot_dedup_check(
             _scoped_sid(session_id), _capture_digest(cap), (str(cap.app or ""), str(cap.window_title or ""))):
         # Unchanged frame: same pixels for the same target in this session — no image (and no aux-vision call);
@@ -638,7 +660,7 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
     return _text_capture_payload(v, "\n".join(lines), extra)
 
 def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_capture: bool,
-                          session_id: Optional[str] = None) -> Any:
+                          session_id: Optional[str] = None, screenshot_inline: bool = True) -> Any:
     # No follow-up capture after a failed action: a normal-looking screenshot would suggest success.
     if not do_capture or not res.ok:
         return _text_response(res)
@@ -651,7 +673,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
-    resp, payload = _capture_response(cap, session_id=session_id), _action_payload(res)
+    resp, payload = _capture_response(cap, session_id=session_id, screenshot_inline=screenshot_inline), _action_payload(res)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the evidence/verdict contract visible alongside the image — it governs whether input may repeat.
         resp["content"][0]["text"] = resp["text_summary"] = json.dumps(payload) + "\n\n" + resp["text_summary"]

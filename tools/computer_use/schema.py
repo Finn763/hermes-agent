@@ -183,6 +183,15 @@ _PROPERTIES: Dict[str, Any] = {
             "Saves a round-trip when you need to verify an action's effect."
         ),
     },
+    "screenshot_inline": {
+        "type": "boolean",
+        "description": (
+            "Default true: `capture` returns the screenshot in the result so you can see it. Set false when you "
+            "do not need the pixels yourself (drive by `element` index, or hand the image to the user): the "
+            "screenshot is written to disk and the result carries `screenshot_path` plus its size instead of "
+            "multi-MB base64 — much smaller and faster to return. Re-capture with true to view the image."
+        ),
+    },
 }
 
 COMPUTER_USE_SCHEMA: Dict[str, Any] = {
