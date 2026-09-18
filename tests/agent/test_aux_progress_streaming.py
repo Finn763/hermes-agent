@@ -7,6 +7,7 @@ outer watchdogs (gateway session hygiene) can extend their deadline on
 liveness. Without a hook, behavior is byte-for-byte the old non-streaming call.
 """
 
+import asyncio
 import threading
 import time
 from types import SimpleNamespace
@@ -18,11 +19,14 @@ from agent.auxiliary_client import (
     _AnthropicCompletionsAdapter,
     _ChatStreamAccumulator,
     _CodexCompletionsAdapter,
+    _acreate_with_progress,
     _acreate_with_stream,
     _aggregate_chat_stream,
     _aggregate_chat_stream_async,
     _anthropic_event_has_content,
+    _aux_dispatch,
     _aux_stream_total_ceiling,
+    _aux_thread_local_hook,
     _create_with_progress,
     _notify_aux_progress,
     _provider_requires_stream,
@@ -81,6 +85,27 @@ _COMPLETE = SimpleNamespace(
     )],
     usage=None,
 )
+
+
+class _Auth401(Exception):
+    status_code = 401
+
+
+class _AuthFailClient:
+    """Provider that fails at dispatch (401): no payload is ever produced."""
+
+    def __init__(self, *, is_async=False):
+        self.calls = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(
+            create=self._acreate if is_async else self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise _Auth401("stale credential")
+
+    async def _acreate(self, **kwargs):
+        self.calls.append(kwargs)
+        raise _Auth401("stale credential")
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +170,9 @@ class TestCreateWithProgress:
         assert result.choices[0].message.reasoning == "thinking..."
         assert result.choices[0].finish_reason == "stop"
         assert result.usage.total_tokens == 7
-        # 1 dispatch tick (preserved for the watchdog's historical liveness
-        # signal — see _create_with_progress) + 1 per substantive chunk.
-        assert ticks == [1, 1, 1, 1]
+        # 1 tick per substantive chunk. Dispatch ticks nothing: it carries no
+        # summary payload, so it must not re-arm the inactivity budget (#114938).
+        assert ticks == [1, 1, 1]
 
     def test_completed_response_ticks_only_terminal_signals(self):
         calls = []
@@ -166,11 +191,10 @@ class TestCreateWithProgress:
 
         assert calls[0]["stream"] is True
         assert result is _COMPLETE
-        # A completed response object carries the full summary payload, and
-        # the dispatch tick is the watchdog's historical liveness signal:
-        # both are one-shot terminal ticks, not per-frame keepalives, so
-        # neither can defeat an inactivity timeout.
-        assert ticks == [1, 1]
+        # A completed response object carries the full summary payload: one
+        # terminal tick. Dispatch alone must not tick (#114938) — a dispatch-only
+        # failure has no payload, so it cannot defeat the inactivity timeout.
+        assert ticks == [1]
 
     def test_streaming_rejected_falls_back_to_plain_call(self):
         client = _FakeClient(
@@ -187,7 +211,35 @@ class TestCreateWithProgress:
         assert client.calls[0].get("stream") is True
         assert "stream" not in client.calls[1]
 
+    def test_dispatch_without_payload_does_not_reset_the_summary_idle_fence(self):
+        """#114938: dispatch is telemetry, never summary progress.
 
+        conversation_compression installs ``CompressionCommitFence.touch_progress`` as the aux
+        progress hook, which re-arms the 120s summary inactivity budget. Ticking it at dispatch
+        (auth refresh, retry, fallback) re-armed that budget without a single summary byte, so a
+        zero-output attempt ran to the 600s total ceiling instead of dying at the idle deadline.
+        """
+        fence = CompressionCommitFence()
+        time.sleep(0.05)
+        stale_age = fence.seconds_since_progress()
+        dispatches = []
+
+        with (
+            _aux_thread_local_hook(_aux_dispatch, lambda: dispatches.append("dispatch")),
+            aux_progress_hook(fence.touch_progress),
+        ):
+            sync_client = _AuthFailClient()
+            with pytest.raises(_Auth401):
+                _create_with_progress(sync_client, {"model": "m1", "messages": [], "timeout": 30})
+            async_client = _AuthFailClient(is_async=True)
+            with pytest.raises(_Auth401):
+                asyncio.run(_acreate_with_progress(
+                    async_client, {"model": "m1", "messages": [], "timeout": 30}))
+
+        assert sync_client.calls and async_client.calls  # both wings dispatched
+        assert dispatches == ["dispatch", "dispatch"]    # dispatch telemetry preserved
+        assert fence.progress_observed is False          # ...but no progress was claimed
+        assert fence.seconds_since_progress() >= stale_age  # idle clock never re-armed
 
 
 # ---------------------------------------------------------------------------
