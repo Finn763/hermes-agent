@@ -1321,8 +1321,12 @@ def test_orchestrator_can_complete_a_triage_stuck_card(monkeypatch, worker_env):
 
 
 def test_complete_refusal_names_the_blocking_status(monkeypatch, worker_env):
-    """A refused completion must name the real cause (the card's status), not
-    the old catch-all 'unknown id, stale run, or already terminal'."""
+    """A refused completion must name the real cause, not the old catch-all
+    'unknown id, stale run, or already terminal'.
+
+    Two causes, two messages: a card gated on an unfinished parent is refused
+    with that parent named, and a card parked in a state no lifecycle verb
+    leaves from reports its own ``status``."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
@@ -1332,10 +1336,20 @@ def test_complete_refusal_names_the_blocking_status(monkeypatch, worker_env):
     try:
         parent = kb.create_task(conn, title="parent", assignee="research")
         gated = kb.create_task(conn, title="gated", assignee="hrbot", parents=[parent])
+        parked = kb.create_task(conn, title="parked", assignee="hrbot")
+        assert kb.schedule_task(conn, parked)
+        assert kb.get_task(conn, gated).status == "todo"
+        assert kb.get_task(conn, parked).status == "scheduled"
     finally:
         conn.close()
 
     out = kt._handle_complete({"task_id": gated, "summary": "premature"})
     d = json.loads(out)
     assert d.get("ok") is not True, out
-    assert "status=todo" in d["error"], out
+    assert "unsatisfied parent dependencies" in d["error"], out
+    assert f"{parent} (ready)" in d["error"], out
+
+    out = kt._handle_complete({"task_id": parked, "summary": "premature"})
+    d = json.loads(out)
+    assert d.get("ok") is not True, out
+    assert "status=scheduled" in d["error"], out
