@@ -145,7 +145,7 @@ class TestNudgeLoopStops:
     def test_fixed_point_mid_turn_stops_the_continuation_loop(self, loop_agent):
         """Compaction arms the fixed point mid-turn and the response truncates: the
         nudge must not fire, or the next iteration re-runs the same cycle forever."""
-        from tests.run_agent.test_run_agent import _mock_response
+        from tests.agent.test_run_agent import _mock_response
 
         compressor = loop_agent.context_compressor
         calls = []
@@ -170,7 +170,7 @@ class TestNudgeLoopStops:
     def test_same_truncation_nudges_without_a_fixed_point(self, loop_agent):
         """Control: the identical truncation on an unarmed session still gets its
         one continuation — the guard must not break the normal path."""
-        from tests.run_agent.test_run_agent import _mock_response
+        from tests.agent.test_run_agent import _mock_response
 
         loop_agent.client.chat.completions.create.side_effect = [
             _mock_response(content="batch re-read part one ", finish_reason="length"),
@@ -184,7 +184,7 @@ class TestNudgeLoopStops:
 
     def test_fresh_turn_clears_the_fixed_point_before_nudging(self, loop_agent):
         """A new user turn IS new input: the armed verdict must not outlive turn start."""
-        from tests.run_agent.test_run_agent import _mock_response
+        from tests.agent.test_run_agent import _mock_response
 
         _arm(loop_agent.context_compressor)  # armed before the turn starts
         loop_agent.client.chat.completions.create.side_effect = [
