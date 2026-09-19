@@ -102,6 +102,46 @@ class HermesProviderMixin:
         self._tolerate_missing_iss_for_known_server()
         return await super()._perform_authorization()
 
+    async def _hermes_accept_same_identity_metadata(self, response):
+        """Accept the authorization-server metadata document the resource's advertisement points at,
+        when the two name the same authorization server in its two shapes.
+
+        ``validate_metadata_issuer`` (RFC 8414 §3.3) compares the document's ``issuer`` with the
+        identifier discovery was built from. For a **path-scoped** advertised identifier whose
+        metadata names the bare origin they differ forever, and the SDK rejects the very document the
+        advertisement resolves to (Strava, #116233). When ``issuer_identifiers_match`` says the two
+        name the same authorization server, Hermes installs that document itself and hands the SDK a
+        response it reads as an unusable metadata document, so the SDK's discovery loop ends with the
+        document already on the context.
+
+        Everything the SDK derives from the advertised identifier stays exactly as the SDK computed
+        it — the SEP-2352 credential binding it persists, the discovery URLs, and the RFC 9207 ``iss``
+        expectation against the document's real ``issuer``. Only the acceptance decision moves, and
+        only for a same-origin difference: a document naming another authorization server is still
+        passed through to the SDK's check untouched, which rejects it.
+
+        Returns the response to feed back into the SDK's flow.
+        """
+        if getattr(response, "status_code", None) != 200:
+            return response
+        url = str(getattr(getattr(response, "request", None), "url", ""))
+        advertised = getattr(self.context, "auth_server_url", None)
+        if not advertised or not any(path in url for path in _ASM_DISCOVERY_PATHS):
+            return response
+        try:
+            from mcp.shared.auth import OAuthMetadata
+            metadata = OAuthMetadata.model_validate_json(await response.aread())
+        except (ValueError, TypeError, AttributeError):
+            return response
+        issuer = str(metadata.issuer)
+        if issuer == advertised or not issuer_identifiers_match(issuer, advertised):
+            return response
+        self._hermes_logger.info(
+            "MCP OAuth: %s advertises %s while its metadata names %s; same authorization server, so "
+            "the document is accepted as the advertised one", url, advertised, issuer)
+        self.context.oauth_metadata = metadata
+        return _unusable_metadata_response(response)
+
     def _tolerate_missing_iss_for_known_server(self) -> None:
         """Figma advertises ``authorization_response_iss_parameter_supported`` and then omits ``iss``
         from the redirect, so the SDK's RFC 9207 check rejects every valid code (#111135). For that
@@ -205,6 +245,10 @@ class HermesProviderMixin:
                         failure = _asm_discovery_failure(sent)
                         if failure:
                             discovery_failures.append(failure)
+                        else:
+                            # Hermes may take over a metadata document the SDK would reject on its own
+                            # issuer check; it then hands back a response the SDK reads as unusable.
+                            sent = await self._hermes_accept_same_identity_metadata(sent)
             finally:
                 await self._hermes_release_refresh_fence()
 
@@ -432,6 +476,62 @@ class HermesProviderMixin:
         self.context.current_tokens = previous_tokens
         self.context.update_token_expiry(previous_tokens)
         return False
+
+
+def _issuer_parts(value: Any) -> tuple[str, str, int | None, str] | None:
+    """``(scheme, host, port, path)`` of an issuer identifier, normalized for the RFC 3986 §6.2.1
+    string comparison RFC 8414 §3.3 asks for: scheme and host lower-cased, default port resolved,
+    trailing slash dropped. None when *value* is not a usable absolute URL."""
+    from urllib.parse import urlsplit
+    if not value:
+        return None
+    try:
+        parts = urlsplit(str(value).strip())
+        port = parts.port  # raises ValueError on a non-numeric/out-of-range port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if not scheme or not parts.hostname:
+        return None
+    return (scheme, parts.hostname.lower(),
+            port if port is not None else {"https": 443, "http": 80}.get(scheme),
+            (parts.path or "").rstrip("/"))
+
+
+def issuer_identifiers_match(metadata_issuer: Any, advertised_issuer: Any) -> bool:
+    """Whether *metadata_issuer* — the ``issuer`` an authorization-server metadata document claims —
+    identifies the same authorization server as *advertised_issuer*, the identifier discovery was
+    built from (a ``authorization_servers`` entry of the protected-resource metadata).
+
+    RFC 8414 §3.3 wants the two to be identical under RFC 3986 §6.2.1 simple string comparison, and
+    two equivalent-by-construction shapes are accepted here: a trailing slash, and a metadata document
+    that names the **bare origin** of the advertised identifier — the server publishes its metadata at
+    a path-scoped ``/.well-known/oauth-authorization-server/<path>`` while its issuer identifier is the
+    origin. Strava (#116233) is the case in point: it advertises
+    ``authorization_servers: ["https://www.strava.com/mcp-issuer"]`` and its metadata answers
+    ``"issuer": "https://www.strava.com"``, so a strict comparison can never succeed and discovery
+    never completes.
+
+    Nothing else matches: another origin, scheme or port, or a different non-empty path on the same
+    origin still fails. The mix-up protection the check exists for — a metadata document speaking for
+    an authorization server the resource never advertised — is therefore unchanged.
+    """
+    claimed, advertised = _issuer_parts(metadata_issuer), _issuer_parts(advertised_issuer)
+    if claimed is None or advertised is None or claimed[:3] != advertised[:3]:
+        return False
+    return claimed[3] == advertised[3] or not claimed[3]
+
+
+def _unusable_metadata_response(response):
+    """A response the SDK's discovery loop gives up on (a non-4xx error, no body): what Hermes hands
+    back once it has installed a metadata document the SDK would otherwise reject on its own checks.
+    The loop's ``if not ok: break`` then leaves the installed metadata in place, instead of walking on
+    to the next candidate URL (whose document is not the one the advertisement resolved to)."""
+    from tools.mcp_tool import sdk_httpx
+    httpx = sdk_httpx()
+    if httpx is None:  # pragma: no cover — the SDK built the flow this response came from
+        return response
+    return httpx.Response(500, request=getattr(response, "request", None))
 
 
 def _metadata_issuer(context: Any) -> str | None:
