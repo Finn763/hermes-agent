@@ -207,7 +207,10 @@ def test_malformed_records_repaired_once_and_persisted(tmp_cron_dir, monkeypatch
 
 class TestSweepSurvivorFilter:
     def _completed_oneshot(self, age_days: float, name: str) -> str:
-        job = create_job(prompt=name, schedule="30m", repeat=1, name=name)
+        # NOTE: "30m" is a RECURRING interval in the current schedule grammar; the one-shot
+        # spelling is "in 30m"/a timestamp, and the retention sweep only prunes schedule.kind
+        # == "once" records. Building these with "30m" would silently stop testing the sweep.
+        job = create_job(prompt=name, schedule="in 30m", repeat=1, name=name)
         from cron.jobs import mark_job_run
 
         mark_job_run(job["id"], success=True)
@@ -251,7 +254,7 @@ class TestSweepSurvivorFilter:
 
     def test_due_view_excludes_swept_records(self, tmp_cron_dir):
         """A swept record must not surface as due in the same tick."""
-        stale = create_job(prompt="Old", schedule="30m", repeat=1, name="old")
+        stale = create_job(prompt="Old", schedule="in 30m", repeat=1, name="old")
         from cron.jobs import mark_job_run
 
         mark_job_run(stale["id"], success=True)
