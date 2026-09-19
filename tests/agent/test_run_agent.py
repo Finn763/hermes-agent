@@ -4633,7 +4633,11 @@ class TestRunConversation:
         assert agent.client.chat.completions.create.call_count == 2
         mock_hfc.assert_not_called()
         assert result["completed"] is False
-        assert result["final_response"] == "Response truncated due to output length limit"
+        # The site's copy moved into agent/turn_failure_copy (``site_copy("truncated")``) while
+        # this branch was open; assert against the source rather than the retired literal.
+        from agent.turn_failure_copy import site_copy
+
+        assert result["final_response"] == site_copy("truncated")
 
     def test_stub_stall_mid_tool_call_recovers_within_3_retries(self, agent):
         """A network stream stall mid tool-call (PARTIAL_STREAM_STUB_ID) must
