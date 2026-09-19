@@ -353,9 +353,11 @@ Hermes polls for approval, respects `authorization_pending` and `slow_down`, and
 on denial or expiry. No browser is launched and no callback listener is needed.
 `oauth.timeout` bounds the approval wait (default 300 seconds), also limited by the code's lifetime.
 When the server's protected-resource metadata lists several authorization servers, device
-login scans them in order and uses the first one whose metadata issuer matches its advertised
-URL and that offers the `device_code` grant (a browser-only server listed first is skipped);
-issuer validation is never relaxed.
+login scans them in order and uses the first one whose metadata issuer is the advertised
+identifier — a same-origin difference between the two shapes of one server's identifier (a
+metadata document under a path that names the bare origin) counts as the same authorization
+server, anything else is rejected — and that offers the `device_code` grant (a browser-only
+server listed first is skipped).
 
 Set `oauth.flow: device` on the server to make `hermes mcp login` and `hermes mcp reauth`
 (including `reauth --all`) use device authorization. `login --flow browser` overrides that
