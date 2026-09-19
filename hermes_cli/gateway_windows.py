@@ -249,18 +249,41 @@ def get_task_name() -> str:
     return f"{_TASK_NAME_DEFAULT}_{suffix}" if suffix else _TASK_NAME_DEFAULT
 
 
+def gateway_task_names() -> tuple[str, ...]:
+    """THE enumeration source for name-keyed launcher work: the current profile-scoped name, then the
+    bare pre-suffix name (#116157).
+
+    ``get_task_name()`` derives the bare name while HERMES_HOME is the platform default, so an install
+    made back then — or one left by the era before per-profile suffixes — sits under a DIFFERENT name
+    than the current one. Every accessor below is keyed on one name, so such a leftover is invisible:
+    never queried, never rewritten, never removed, never reported, while it keeps launching the gateway
+    at every logon. Callers iterate this tuple instead of re-deriving ``get_task_name()``.
+    """
+    current = get_task_name()
+    return (current, _TASK_NAME_DEFAULT) if current != _TASK_NAME_DEFAULT else (current,)
+
+
+def legacy_task_names() -> tuple[str, ...]:
+    """The bare pre-suffix names alone — empty when the current name already IS the bare name."""
+    return gateway_task_names()[1:]
+
+
 def _sanitize_filename(value: str) -> str:
     """Remove characters illegal in Windows filenames."""
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+
+
+def _task_script_path_for(task_name: str) -> Path:
+    """``gateway-service`` launcher path for ONE name; never creates the directory."""
+    return _hermes_home() / "gateway-service" / f"{_sanitize_filename(task_name)}.cmd"
 
 
 def get_task_script_path() -> Path:
     """The generated ``gateway.cmd`` wrapper under ``<HERMES_HOME>/gateway-service/`` (per-profile
     installs stay self-contained); the VBS launcher lives beside it."""
     _assert_windows()
-    script_dir = _hermes_home() / "gateway-service"
-    script_dir.mkdir(parents=True, exist_ok=True)
-    return script_dir / f"{_sanitize_filename(get_task_name())}.cmd"
+    (_hermes_home() / "gateway-service").mkdir(parents=True, exist_ok=True)
+    return _task_script_path_for(get_task_name())
 
 
 def _startup_dir() -> Path:
@@ -273,19 +296,41 @@ def _startup_dir() -> Path:
     return Path(userprofile).joinpath("AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 
 
+def _startup_entry_path_for(task_name: str, suffix: str) -> Path:
+    """Startup-folder path for ONE name and extension variant."""
+    return _startup_dir() / f"{_sanitize_filename(task_name)}{suffix}"
+
+
 def get_startup_entry_path() -> Path:
     _assert_windows()
-    return _startup_dir() / f"{_sanitize_filename(get_task_name())}.vbs"
+    return _startup_entry_path_for(get_task_name(), ".vbs")
 
 
 def _legacy_startup_entry_path() -> Path:
     _assert_windows()
-    return _startup_dir() / f"{_sanitize_filename(get_task_name())}.cmd"
+    return _startup_entry_path_for(get_task_name(), ".cmd")
 
 
 def _startup_staging_path() -> Path:
     """The Startup-folder staging file; also the debris a pre-fix failed swap left behind (#114093)."""
     return get_startup_entry_path().with_suffix(".tmp")
+
+
+def legacy_launcher_artifacts() -> tuple[tuple[Path, str], ...]:
+    """``(path, label)`` for every file a pre-suffix install owns that no current-name accessor reaches:
+    its ``gateway-service`` launcher pair and its Startup-folder login item (.vbs, the pre-#45599 ``.cmd``
+    and the staging debris). Empty when the current name already IS the bare name."""
+    return tuple(
+        (path, label)
+        for task_name in legacy_task_names()
+        for path, label in (
+            (_task_script_path_for(task_name), "legacy pre-suffix task script"),
+            (_task_script_path_for(task_name).with_suffix(".vbs"), "legacy pre-suffix task launcher"),
+            (_startup_entry_path_for(task_name, ".vbs"), "legacy pre-suffix Windows login item"),
+            (_startup_entry_path_for(task_name, ".cmd"), "legacy pre-suffix Windows login item (.cmd)"),
+            (_startup_entry_path_for(task_name, ".tmp"), "legacy pre-suffix login item staging file"),
+        )
+    )
 
 
 def _stable_gateway_working_dir(project_root: Path) -> str:
@@ -1189,38 +1234,47 @@ def _print_next_steps() -> None:
 
 
 def uninstall() -> None:
-    """Remove both the Scheduled Task and the Startup-folder fallback, if present."""
+    """Remove both the Scheduled Task and the Startup-folder fallback, if present — under every name a
+    previous install may have used (``gateway_task_names()``), never just the current one (#116157)."""
     _assert_windows()
-    task_name = get_task_name()
+    task_names = gateway_task_names()
     script_path = get_task_script_path()
 
-    scheduled_task_removed = False
-    if is_task_registered():
+    scheduled_task_removed: set[str] = set()
+    needs_elevation: list[str] = []
+    for task_name in task_names:
+        if not is_task_named_registered(task_name):
+            continue
         code, _out, err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
         detail = err.strip()
         if code == 0:
-            scheduled_task_removed = True
+            scheduled_task_removed.add(task_name)
             print(f"✓ Removed Scheduled Task {task_name!r}")
         elif _is_access_denied(detail) and not _is_running_as_admin():
-            from hermes_cli.setup import prompt_yes_no
-
-            print(f"↻ Scheduled Task uninstall needs administrator approval ({detail or 'access denied'})")
-            print("  UAC is Windows' admin approval prompt; it is needed to remove the Scheduled Task.")
-            if prompt_yes_no("  Open the UAC prompt now?", False):
-                if _launch_elevated_gateway_command("uninstall"):
-                    print("✓ Launched elevated Hermes gateway uninstall prompt.")
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
-                    return
-                print("⚠ Elevated uninstall prompt was unavailable or cancelled.")
-            else:
-                print("  Skipped elevation. Scheduled Task was not removed.")
+            needs_elevation.append(task_name)
         else:
-            print(f"⚠ schtasks /Delete returned code {code}: {detail}")
+            print(f"⚠ schtasks /Delete returned code {code} for {task_name!r}: {detail}")
+
+    if needs_elevation:
+        from hermes_cli.setup import prompt_yes_no
+
+        listed = ", ".join(repr(name) for name in needs_elevation)
+        print(f"↻ Scheduled Task uninstall needs administrator approval ({listed})")
+        print("  UAC is Windows' admin approval prompt; it is needed to remove the Scheduled Task.")
+        if prompt_yes_no("  Open the UAC prompt now?", False):
+            if _launch_elevated_gateway_command("uninstall"):
+                print("✓ Launched elevated Hermes gateway uninstall prompt.")
+                print("  Approve the Windows UAC prompt, then run: hermes gateway status")
+                return
+            print("⚠ Elevated uninstall prompt was unavailable or cancelled.")
+        else:
+            print("  Skipped elevation. Scheduled Task was not removed.")
 
     for path, label in (
         (get_startup_entry_path(), "Windows login item"), (_legacy_startup_entry_path(), "legacy Windows login item"),
         (_startup_staging_path(), "Windows login item staging file"),
         (script_path, "Task script"), (script_path.with_suffix(".vbs"), "Task launcher"),
+        *legacy_launcher_artifacts(),
     ):
         try:
             path.unlink()
@@ -1228,15 +1282,22 @@ def uninstall() -> None:
         except FileNotFoundError:
             pass
 
-    if is_task_registered() and not scheduled_task_removed:
-        print(f"⚠ Scheduled Task still registered: {task_name}")
+    still_registered = [name for name in task_names if name not in scheduled_task_removed and is_task_named_registered(name)]
+    if still_registered:
+        print(f"⚠ Scheduled Task still registered: {', '.join(still_registered)}")
 
 
 # ── Status / start / stop / restart
 
-def is_task_registered() -> bool:
-    code, _out, _err = _exec_schtasks(["/Query", "/TN", get_task_name()])
+def is_task_named_registered(task_name: str) -> bool:
+    """``/Query`` one name. ``is_task_registered()`` only ever sees the CURRENT name, so the pre-suffix
+    sweep cannot go through it (#116157)."""
+    code, _out, _err = _exec_schtasks(["/Query", "/TN", task_name])
     return code == 0
+
+
+def is_task_registered() -> bool:
+    return is_task_named_registered(get_task_name())
 
 
 def is_startup_entry_installed() -> bool:
@@ -1487,6 +1548,29 @@ def _print_deep_probes() -> None:
     _probe_exit_diag(home / "logs" / "gateway-exit-diag.log")
 
 
+def _print_legacy_launcher_warnings() -> None:
+    """Warn about pre-suffix leftovers (#116157). No name-keyed lookup sees them, so ``status`` is the
+    only place a user learns they exist — they keep launching the gateway at every logon (duplicate
+    starts), and a hand-edited one is never rewritten by an upgrade."""
+    strays = [
+        f"⚠ Legacy pre-suffix Scheduled Task still registered: {task_name}"
+        for task_name in legacy_task_names()
+        if is_task_named_registered(task_name)
+    ]
+    strays += [
+        f"⚠ Legacy pre-suffix gateway launcher still installed: {path}"
+        for path, _label in legacy_launcher_artifacts()
+        if path.exists()
+    ]
+    if not strays:
+        return
+    print()
+    for line in strays:
+        print(line)
+    print("  These predate per-profile launcher names; nothing rewrites or removes them.")
+    print("  Remove: hermes gateway uninstall")
+
+
 def status(deep: bool = False) -> None:
     """Print a status report for the Windows gateway service."""
     _assert_windows()
@@ -1510,6 +1594,7 @@ def status(deep: bool = False) -> None:
         print("✗ Gateway service not installed")
 
     print(f"✓ Gateway process running (PID: {', '.join(map(str, pids))})" if pids else "✗ No gateway process detected")
+    _print_legacy_launcher_warnings()
 
     if deep:
         print()

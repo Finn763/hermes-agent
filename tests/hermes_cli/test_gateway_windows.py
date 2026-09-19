@@ -366,10 +366,12 @@ def test_uninstall_and_reinstall_sweep_stale_startup_staging_file(monkeypatch, t
 
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
+    monkeypatch.setattr(gateway_windows, "_hermes_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(gateway_windows, "_startup_dir", lambda: startup)
     monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: script)
     monkeypatch.setattr(gateway_windows, "get_startup_entry_path", lambda: entry)
     monkeypatch.setattr(gateway_windows, "_legacy_startup_entry_path", lambda: startup / "Hermes_Gateway_alice.cmd")
-    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: False)
+    monkeypatch.setattr(gateway_windows, "is_task_named_registered", lambda task_name: False)
 
     staging.write_text("stale", encoding="utf-8")
     gateway_windows.uninstall()
