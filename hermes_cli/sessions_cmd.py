@@ -1353,11 +1353,12 @@ def cmd_sessions(args, sessions_parser=None):
                   "the foreground with progress below; safe to Ctrl-C and "
                   "re-run (it resumes).")
         if not getattr(args, "yes", False):
-            try:
-                resp = input("Proceed? [y/N] ").strip().lower()
-            except EOFError:
-                resp = ""
-            if resp not in ("y", "yes"):
+            # Same shared guard as the other confirms: a service-inherited pipe
+            # never yields data or EOF, so the bare input() this used to call
+            # blocked forever (#77566 shape) while every sibling prompt refused.
+            if not _confirm_prompt(
+                "Proceed? [y/N] ", hint="Re-run with --yes to proceed."
+            ):
                 print("Cancelled.")
                 db.close()
                 return

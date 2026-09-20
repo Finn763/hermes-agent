@@ -65,7 +65,6 @@ def test_confirm_prompt_refuses_non_tty_without_blocking(monkeypatch, capsys):
     import sys
 
     monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
-
     def _must_not_block(_prompt=""):
         raise AssertionError("input() must not be called on non-TTY stdin")
 
@@ -108,6 +107,31 @@ def test_confirm_prompt_without_stdin_refuses_instead_of_raising(
     monkeypatch.setattr(sys, "stdin", None)
     assert sc._confirm_prompt("Delete 3 session(s)? [y/N] ") is False
     assert "--yes" in capsys.readouterr().err
+
+
+def test_optimize_storage_refuses_non_tty_without_hanging(monkeypatch, capsys):
+    """`sessions optimize-storage` had its own bare input(): on a service-inherited
+    pipe (never any data, never EOF) it blocked forever while the other
+    confirmation prompts refused."""
+    import builtins
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    # Reach the confirmation at all: the command short-circuits (and never
+    # prompts) when the store is already compact.
+    from hermes_state import SessionDB
+    monkeypatch.setattr(SessionDB, "fts_optimize_available", lambda self: True)
+
+
+    def _must_not_block(_prompt=""):
+        raise AssertionError("input() must not be called on non-TTY stdin")
+
+    monkeypatch.setattr(builtins, "input", _must_not_block)
+    sc.cmd_sessions(_args("optimize-storage", yes=False))
+    out, err = capsys.readouterr()
+    assert "Cancelled." in out
+    assert "Optimizing search-index storage" not in out  # nothing ran
+    assert "--yes" in err
 
 
 def test_delete_refusal_advises_only_flags_delete_defines(monkeypatch, capsys):
