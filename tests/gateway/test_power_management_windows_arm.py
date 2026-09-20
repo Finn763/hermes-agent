@@ -11,7 +11,6 @@ user sees. These tests pin the arm and the dispatch.
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 import time
 
@@ -24,7 +23,12 @@ from gateway.power_management import (
     WindowsPowerMonitor,
 )
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only native power pump")
+# ``windows_only`` rather than a ``sys.platform`` skipif: the CI Windows lane
+# imports only the files scripts/ci/list_os_marked_tests.py finds this marker
+# in, so with a skipif alone the native pump ran on no lane at all -- skipped
+# on Linux, never imported on Windows. tests/conftest.py applies the skip on
+# every other host, which is all the skipif did.
+pytestmark = pytest.mark.windows_only
 
 
 @pytest.fixture(autouse=True)
