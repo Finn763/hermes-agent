@@ -1853,8 +1853,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._cooldown_persist_failed = False
         # Callers read this to know compression was attempted but aborted (freeze until manual /compress).
         self._last_compress_aborted = self._last_compress_refused_would_grow = False
-        # #100827: fingerprint of the last compress() input; a cron tick on an unchanged
-        # long thread skips the LLM re-summarize. Reset per session, never persisted.
+        # #100827: fingerprint of the last compress() input; a caller re-presenting an unchanged
+        # long thread skips the LLM re-summarize. Armed only by an attempt that produced a
+        # compression, so a stalled/cancelled attempt's retry still runs the summary.
+        # Reset per session, never persisted.
         self._last_compress_fingerprint: Optional[str] = None
         self._context_probed = self._context_probe_persistable = False
         self._reset_real_usage_pairing()
@@ -4631,8 +4633,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not force and _fp is not None and _fp == getattr(self, "_last_compress_fingerprint", None) and _can_dedup:
             telemetry["failure_class"] = "duplicate_input_skipped"
             return messages
-        if _fp is not None:
-            self._last_compress_fingerprint = _fp
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
@@ -4701,7 +4701,14 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # Phase 4: Assemble compressed message list
         compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
-        return self._finalize_compressed(compressed, messages, n_messages)
+        finalized = self._finalize_compressed(compressed, messages, n_messages)
+        # Arm the duplicate-input skip only NOW that this input actually produced a compression: an
+        # attempt abandoned before this point (stall, cancel, commit refused) produced nothing to
+        # reuse, and the host deliberately re-runs the summary on the SAME messages for the stall
+        # fallback route (#78981) and for every attempt-state rollback path.
+        if _fp is not None:
+            self._last_compress_fingerprint = _fp
+        return finalized
 
     def _summarize_window(
         self, messages: List[Dict[str, Any]], turns_to_summarize: List[Dict[str, Any]], scan: "_HandoffScan",
