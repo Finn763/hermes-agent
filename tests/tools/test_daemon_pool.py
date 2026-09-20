@@ -280,3 +280,102 @@ def test_legacy_initializer_still_runs_inside_the_worker():
     finally:
         pool.shutdown(wait=True)
     assert initialized_in == [task_ident]
+
+
+def _record_worker_spawns(monkeypatch):
+    """Record the argument tuple the pool hands each worker thread.
+
+    ``Thread._args`` is deleted once the thread finishes, so it has to be read
+    at spawn time.
+    """
+    spawned = []
+    real_thread = threading.Thread
+
+    def recording_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        spawned.append(kwargs.get("args"))
+        return thread
+
+    monkeypatch.setattr(daemon_pool.threading, "Thread", recording_thread)
+    return spawned
+
+
+def _join_spawned_workers(pool):
+    """Let thread-side failures land before asserting on them."""
+    for worker_thread in list(pool._threads):
+        worker_thread.join(timeout=5)
+
+
+def test_missing_context_metadata_never_guesses_the_legacy_four_args(monkeypatch):
+    """Regression 1: no context surface readable *and* a three-argument (3.14)
+    worker. Choosing the tuple from the missing context metadata hands that
+    worker the legacy four — ``expected 3 args, got 4`` — so the ABI must come
+    from the worker itself, and an unbuildable context must fail closed."""
+    pool = DaemonThreadPoolExecutor(max_workers=1)
+    monkeypatch.delattr(pool, "_create_worker_context", raising=False)
+    monkeypatch.delattr(pool, "_initializer", raising=False)
+    monkeypatch.delattr(pool, "_initargs", raising=False)
+    monkeypatch.delattr(type(pool), "prepare_context", raising=False)
+
+    called = []
+
+    def worker_314(executor_reference, worker_context, work_queue):
+        called.append((executor_reference, worker_context, work_queue))
+
+    monkeypatch.setattr(daemon_pool, "_worker", worker_314)
+    spawned = _record_worker_spawns(monkeypatch)
+    refused = None
+    try:
+        pool.submit(lambda: None)
+    except RuntimeError as exc:
+        refused = exc
+    _join_spawned_workers(pool)
+    pool.shutdown(wait=True)
+
+    assert not called, "the 3.14 worker must never run on a legacy-shaped call"
+    assert spawned == [], "a three-argument worker was handed %r" % (spawned,)
+    assert refused is not None, (
+        "an unconstructible 3.14 worker context must fail closed instead of "
+        "guessing the legacy four-argument tuple"
+    )
+
+
+def test_rebuilt_worker_context_keeps_the_executor_initializer_and_initargs(monkeypatch):
+    """Regression 2: the instance factory is gone but ``prepare_context`` is
+    readable, and the executor was built with a real initializer. Rebuilding the
+    context must ask for *this* executor's initializer/initargs; asking for
+    ``(None, ())`` silently drops them from every worker."""
+    the_initializer = lambda tag: None  # noqa: E731 - identity is what matters
+
+    pool = DaemonThreadPoolExecutor(
+        max_workers=1, initializer=the_initializer, initargs=("booted",)
+    )
+    monkeypatch.delattr(pool, "_create_worker_context", raising=False)
+
+    asked = []
+
+    def prepare_context(init, initargs):
+        asked.append((init, initargs))
+        return (lambda: ("ctx", init, initargs), None)
+
+    monkeypatch.setattr(type(pool), "prepare_context", prepare_context, raising=False)
+
+    def worker_314(executor_reference, worker_context, work_queue):
+        return None
+
+    monkeypatch.setattr(daemon_pool, "_worker", worker_314)
+    spawned = _record_worker_spawns(monkeypatch)
+    try:
+        pool.submit(lambda: None)
+        _join_spawned_workers(pool)
+    finally:
+        pool.shutdown(wait=True)
+
+    assert asked == [(the_initializer, ("booted",))], (
+        "prepare_context must be asked for this executor's initializer/initargs, got %r"
+        % (asked,)
+    )
+    assert len(spawned) == 1, "expected one worker spawn, got %r" % (spawned,)
+    assert spawned[0][1] == ("ctx", the_initializer, ("booted",)), (
+        "the worker got a context rebuilt without them: %r" % (spawned[0],)
+    )
