@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 
 import pytest
 
@@ -24,6 +25,21 @@ from gateway.power_management import (
 )
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only native power pump")
+
+
+@pytest.fixture(autouse=True)
+def _defuse_fail_closed_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the resume posts below from arming the real fail-closed exit.
+
+    A sync test has no *running* loop, so the resume path resolves a parked
+    ``ProactorEventLoop``; the guard's probe then never answers and ~20 s later
+    it dumps every thread and ``os._exit(75)``s the pytest process -- measured:
+    a run that lingers past the timeout dies with exit code 75. Per-file
+    isolation hides that today (the file finishes in ~1.5 s), any longer run
+    does not. In production this exit is the point; in a test process it is
+    only a fuse.
+    """
+    monkeypatch.setenv("HERMES_POWER_FAIL_CLOSED", "0")
 
 
 class _LogInbox(logging.Handler):
@@ -85,3 +101,31 @@ def test_pump_delivers_a_power_broadcast_to_the_window_proc():
         module_logger.removeHandler(inbox)
         module_logger.setLevel(previous_level)
         monitor.stop()
+
+
+def test_resume_broadcast_arms_the_fail_closed_guard(monkeypatch: pytest.MonkeyPatch):
+    """Dispatching a resume must also arm the stuck-loop guard (#100025 review).
+
+    Without this call a wedged loop waits forever for a callback it can never
+    run -- exactly the half-restored state the reporter asked us to exit out of
+    for a supervisor restart. Patched rather than asserted through the real
+    guard: the defuse fixture is test hygiene, this pins the wiring.
+    """
+    import gateway.power_management as pm
+
+    armed: list = []
+    monkeypatch.setattr(pm, "_spawn_resume_fail_closed_guard", lambda loop, **kw: armed.append(loop))
+    monitor = pm.WindowsPowerMonitor(on_suspend=lambda: None, on_resume=lambda: None)
+    try:
+        assert monitor.start() is True
+        user32, _kernel32 = pm._win32_dlls()
+        assert user32.PostMessageW(monitor._hwnd, WM_POWERBROADCAST, pm.PBT_APMRESUMESUSPEND, 0)
+        deadline = time.monotonic() + 5.0
+        while not armed and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        monitor.stop()
+    assert armed, "resume broadcast did not arm the fail-closed guard"
+    # Whatever loop it got is not running here -- which is why the guard would
+    # exit(75) on a wedged gateway and why the fixture above is needed in tests.
+    assert armed[0] is None or armed[0].is_running() is False
