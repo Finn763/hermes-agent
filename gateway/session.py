@@ -1125,23 +1125,21 @@ class SessionStore(
             entry = self._entry_locked(session_key)
             if entry is None or entry.model_override == cleaned:
                 return
+            # Snapshot the pin-time default BEFORE persistence: it is written into
+            # the routing index atomically with the override, so a failed persist
+            # cannot leave a pin whose snapshot is missing (or stale) on disk.
+            pinned_snapshot = read_model_default_snapshot() if cleaned is not None else None
             # Publish only after persistence so a failed clear remains retryable.
             data, generation = self._snapshot_routing_locked()
             # Snapshot reconciliation may replace the entry after database recovery.
             entry = self._entries[session_key]
-            replaced = replace(entry, model_override=cleaned)
-            if cleaned is None:
-                replaced.metadata.pop(PINNED_MODEL_DEFAULT_METADATA_KEY, None)
+            if pinned_snapshot is not None:
+                entry.metadata[PINNED_MODEL_DEFAULT_METADATA_KEY] = pinned_snapshot
             else:
-                snapshot = read_model_default_snapshot()
-                if snapshot is not None:
-                    replaced.metadata[PINNED_MODEL_DEFAULT_METADATA_KEY] = snapshot
-                else:
-                    replaced.metadata.pop(PINNED_MODEL_DEFAULT_METADATA_KEY, None)
-            data[session_key] = replaced.to_dict()
+                entry.metadata.pop(PINNED_MODEL_DEFAULT_METADATA_KEY, None)
+            data[session_key] = replace(entry, model_override=cleaned).to_dict()
             self._persist_routing_data(data, generation)
             entry.model_override = cleaned
-            entry.metadata = replaced.metadata
 
     def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:
         """Return the persisted /model override for *session_key*, if any."""

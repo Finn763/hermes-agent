@@ -41,9 +41,14 @@ def _runner(store):
     return runner
 
 
-def _rehydrate(store, key, cfg):
-    runner = _runner(store)
-    with patch("hermes_cli.config.load_config", return_value=cfg):
+def _rehydrate(store, key, cfg, runner=None):
+    runner = runner or _runner(store)
+    # Credential re-resolution runs through gateway.run's resolver; keep it
+    # offline so the test only exercises the pin/default comparison.
+    with patch("hermes_cli.config.load_config", return_value=cfg), patch(
+        "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+        return_value={},
+    ):
         runner._rehydrate_session_model_override(key)
     return runner
 
@@ -58,6 +63,21 @@ def test_stale_echo_pin_follows_default_change(store):
     with patch("hermes_cli.config.load_config", return_value=OLD):
         store.set_model_override(key, {"model": "old-m", "provider": "old-p"})
     runner = _rehydrate(store, key, NEW)
+    assert _live_override(runner, key) is None
+    assert store.get_model_override(key) is None
+
+
+def test_live_echo_pin_drops_on_later_rehydrate_after_default_change(store):
+    """Live-session path: a second rehydrate on the SAME runner sees the pin
+    already in memory, so it takes the live branch of
+    ``_rehydrate_session_model_override`` (gateway/run_agent_cache.py) rather
+    than the persisted-rehydrate path covered by the tests above."""
+    key = _key(store)
+    with patch("hermes_cli.config.load_config", return_value=OLD):
+        store.set_model_override(key, {"model": "old-m", "provider": "old-p"})
+        runner = _rehydrate(store, key, OLD)
+        assert (_live_override(runner, key) or {}).get("model") == "old-m"
+    runner = _rehydrate(store, key, NEW, runner=runner)
     assert _live_override(runner, key) is None
     assert store.get_model_override(key) is None
 
