@@ -60,12 +60,15 @@ def _confirm_prompt(
     argparse error instead of telling them how to proceed.
     """
     try:
-        if not sys.stdin.isatty():
+        if not getattr(sys.stdin, "isatty", lambda: False)():
             # Windows service / piped-stdin contexts (#77566): stdin is an
             # inherited pipe that never yields data or EOF, so input()
             # below would block forever (0 CPU, no network, nothing on
             # stderr) instead of failing. Fail fast and point at the
             # non-interactive way out instead of hanging the caller.
+            # A service that spawns the child without an inherited stdin
+            # handle leaves ``sys.stdin`` None, which is equally
+            # non-interactive but has no ``isatty`` to call.
             print(
                 "Refusing to prompt for confirmation: stdin is not "
                 f"interactive. {hint}",

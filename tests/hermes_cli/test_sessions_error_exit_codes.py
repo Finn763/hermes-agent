@@ -98,6 +98,18 @@ def test_confirm_prompt_eof_still_aborts_on_tty(monkeypatch):
     assert sc._confirm_prompt("Delete 3 session(s)? [y/N] ") is False
 
 
+def test_confirm_prompt_without_stdin_refuses_instead_of_raising(
+    monkeypatch, capsys
+):
+    """A service that spawns the child with no inherited stdin handle leaves
+    sys.stdin None; .isatty() on it would raise AttributeError."""
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", None)
+    assert sc._confirm_prompt("Delete 3 session(s)? [y/N] ") is False
+    assert "--yes" in capsys.readouterr().err
+
+
 def test_delete_refusal_advises_only_flags_delete_defines(monkeypatch, capsys):
     """`sessions delete` accepts --yes but no --dry-run: the non-TTY refusal must
     not send the user to a flag argparse rejects with exit 2."""
