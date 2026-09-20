@@ -100,7 +100,9 @@ function sessionsToKeep(scope?: string): Set<string> {
   if (active) {
     const session = scope ? $sessions.get().find(s => s.id === active) : null
 
-    if (!scope || !session || normalizeProfileKey(session.profile) === scope) {
+    // Scope comparison folds case ('Default' display label vs canonical
+    // 'default'): see store/profile.ts normalizeProfileKey.
+    if (!scope || !session || normalizeProfileKey(session.profile).toLowerCase() === scope.toLowerCase()) {
       keep.add(active)
     }
   }
@@ -180,7 +182,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       loadMoreMessagingRequestRef.current[requestKey] = requestId
 
       const inProfile = (s: SessionInfo) =>
-        sessionProfile === 'all' || normalizeProfileKey(s.profile) === sessionProfile
+        sessionProfile === 'all' || normalizeProfileKey(s.profile).toLowerCase() === sessionProfile.toLowerCase()
 
       const inPlatform = (s: SessionInfo) => normalizeSessionSource(s.source) === platform && inProfile(s)
       const loaded = $messagingSessions.get().filter(inPlatform).length

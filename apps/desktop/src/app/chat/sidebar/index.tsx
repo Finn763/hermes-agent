@@ -522,7 +522,13 @@ export function ChatSidebar({
 
       // Narrowing to a few of the profiles on screen. Scoped to one profile the
       // list is already that profile's, so a stale selection can't blank it.
-      if (showAllProfiles && profileFilter.length && !profileFilter.includes(normalizeProfileKey(session.profile))) {
+      // The membership test folds case: the filter holds canonical keys off
+      // $profiles while a row's profile can arrive title-cased ('Default').
+      if (
+        showAllProfiles &&
+        profileFilter.length &&
+        !profileFilter.some(name => normalizeProfileKey(name).toLowerCase() === normalizeProfileKey(session.profile).toLowerCase())
+      ) {
         return false
       }
 
