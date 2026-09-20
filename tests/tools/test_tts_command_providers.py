@@ -184,6 +184,18 @@ class TestRunCommandProviderWindowsFlags:
             # Group signalling kept so the idle-timeout tree kill still works.
             assert captured["creationflags"] & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
+    # Native Win32 hosts cannot run this one: patching ``os.name`` to "posix"
+    # makes the POSIX branch's lazy ``from tools.environments.local import
+    # hermes_subprocess_env`` build a ``Path`` at import time (hermes_constants),
+    # which raises ``NotImplementedError: cannot instantiate 'PosixPath'``. pytest
+    # then dies formatting that failure too (its reporter also builds a Path),
+    # so a Windows contributor running this node in isolation gets an
+    # INTERNALERROR instead of a verdict. The POSIX branch is covered on Linux CI.
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.name='posix' on a real Win32 interpreter breaks at import time "
+               "(Path -> PosixPath); POSIX branch is covered on Linux CI",
+    )
     def test_posix_spawn_unaffected(self, monkeypatch):
         monkeypatch.setattr(os, "name", "posix")
         captured: dict = {}
