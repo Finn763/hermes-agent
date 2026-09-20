@@ -32,6 +32,7 @@ suite tests macOS auto-detect off-host.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 from typing import Any, Dict, Optional
@@ -152,6 +153,91 @@ class TestWindowsSessionZeroDetection:
             assert _is_windows_session_zero() is True
         # lru_cache(maxsize=1) collapses repeated calls to a single probe.
         assert counter["calls"] == 1
+
+
+class TestWindowsSessionIdIsProcessScoped:
+    """``_windows_session_id`` must name THIS process, never the console.
+
+    ``WTSGetActiveConsoleSessionId`` takes no arguments, so its return value
+    can only be a property of the machine — the session attached to the
+    physical console — and cannot answer "which session is this process in".
+    On the topology this policy exists for (gateway in Session 0, owner
+    logged in interactively) it reports the *owner's* session, so
+    ``_is_windows_session_zero()`` answers False, ``auto`` picks MCP, and
+    cua-driver rejects the spawn with the exact Session-0 error being worked
+    around here.
+
+    The console session id is also mutable (RDP connect/disconnect, Fast
+    User Switching) while a process's session id is fixed at creation, which
+    is what makes it a valid ``lru_cache`` key.
+
+    These tests drive the ctypes seam with a fake kernel32 so they run on any
+    CI host, and fail loudly if the console API is reached for again.
+    """
+
+    @staticmethod
+    def _fake_kernel32(session_id: int = 0, ok: bool = True):
+        calls = {"pid": 0, "session": 0}
+
+        class _Fn:
+            def __init__(self, fn):
+                self._fn = fn
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, *args):
+                return self._fn(*args)
+
+        class _Kernel32:
+            def __init__(self):
+                self.GetCurrentProcessId = _Fn(self._current_pid)
+                self.ProcessIdToSessionId = _Fn(self._pid_to_session)
+
+            @staticmethod
+            def _current_pid():
+                calls["pid"] += 1
+                return 4242
+
+            @staticmethod
+            def _pid_to_session(pid, out):
+                assert pid == 4242, pid
+                calls["session"] += 1
+                if not ok:
+                    return 0
+                out._obj.value = session_id
+                return 1
+
+            def __getattr__(self, name):
+                # Regression guard: any console-scoped or unknown export
+                # means the detector stopped being process-scoped.
+                raise AssertionError(
+                    f"Session-0 probe must not call kernel32.{name}"
+                )
+
+        return _Kernel32(), calls
+
+    def _install(self, monkeypatch, **kwargs):
+        fake, calls = self._fake_kernel32(**kwargs)
+        monkeypatch.setattr(cua_backend.sys, "platform", "win32")
+        monkeypatch.setattr(
+            ctypes, "WinDLL", lambda *a, **kw: fake, raising=False
+        )
+        return calls
+
+    def test_reports_session_zero_for_this_process(self, monkeypatch):
+        calls = self._install(monkeypatch, session_id=0)
+        assert cua_backend._windows_session_id() == 0
+        assert calls["session"] == 1
+        assert calls["pid"] == 1
+
+    def test_reports_interactive_session_for_this_process(self, monkeypatch):
+        calls = self._install(monkeypatch, session_id=1)
+        assert cua_backend._windows_session_id() == 1
+        assert calls["session"] == 1
+
+    def test_returns_none_when_the_query_fails(self, monkeypatch):
+        self._install(monkeypatch, session_id=0, ok=False)
+        assert cua_backend._windows_session_id() is None
 
 
 # ---------------------------------------------------------------------------
