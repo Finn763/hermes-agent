@@ -332,7 +332,8 @@ export function Loader({
 
   useEffect(() => {
     let animationFrame = 0
-    let hiddenTime = 0
+    let pausedAt: number | null = null
+    let pausedTotal = 0
     const startedAt = performance.now()
     const phaseOffset = Math.random()
     particleRefs.current.length = config.particleCount
@@ -371,16 +372,39 @@ export function Loader({
       return false
     }
 
+    // rAF does not fire while the document is hidden, so the pause branch in
+    // `render` never sees that interval — take the timestamp from the event
+    // that announces it instead.
+    const onVisibilityChange = () => {
+      if (document.hidden && pausedAt === null) {
+        pausedAt = performance.now()
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
     const render = (now: number) => {
       if (shouldPause()) {
-        // Accumulate paused time so progress doesn't jump on resume.
-        hiddenTime += 16
+        // Freeze the animation clock at the timestamp the pause started.
+        // rAF is throttled or stopped outright while paused, so charging one
+        // assumed frame per callback under-counts a long pause by orders of
+        // magnitude and the loader jumps forward on resume.
+        if (pausedAt === null) {
+          pausedAt = now
+        }
+
         animationFrame = window.requestAnimationFrame(render)
 
         return
       }
 
-      const time = now - startedAt - hiddenTime
+      if (pausedAt !== null) {
+        // Charge the measured pause, once, on the frame that resumes.
+        pausedTotal += now - pausedAt
+        pausedAt = null
+      }
+
+      const time = now - startedAt - pausedTotal
       const progress = ((time + phaseOffset * config.durationMs) % config.durationMs) / config.durationMs
       const detailScale = detailScaleFor(time, config, phaseOffset)
       const rotation = rotationFor(time, config, phaseOffset)
@@ -405,7 +429,10 @@ export function Loader({
 
     render(performance.now())
 
-    return () => window.cancelAnimationFrame(animationFrame)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.cancelAnimationFrame(animationFrame)
+    }
   }, [config, pathSteps, strokeScale])
 
   return (
