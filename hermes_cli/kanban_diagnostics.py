@@ -122,6 +122,12 @@ def _log_hint_action(task_id: str) -> DiagnosticAction:
     return _cli_hint(f"Check logs: {cmd}", cmd, suggested=True)
 
 
+def _brief(value: Any, limit: int = 60) -> str:
+    """``repr(value)`` capped for diagnostic prose (board fields can be long)."""
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def _error_snippet(last_err) -> str:
     """First 500 chars of the error (with ellipsis), or "" when absent."""
     err_text = (last_err or "").strip() if last_err else ""
@@ -681,12 +687,13 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
 # ---------------------------------------------------------------------------
 # Tamper detection — writes that went around the kernel (#110080)
 #
-# The kernel is the only writer that should move a task into a terminal status
-# or append to its audit log. A worker process can still run raw SQL against
-# kanban.db (the incident behind #110080 did exactly that after the completion
-# gate refused it), so these rules pair the projected state with its event and
-# verify the chain hashes the kernel wrote. Read-only, no side effects, and
-# silent for boards whose rows predate the chain.
+# The kernel is the only writer that should move board state or append to a
+# task's audit log. A worker process can still run raw SQL against kanban.db
+# (the incident behind #110080 did exactly that after the completion gate
+# refused it, and the amendment that widened the issue was another raw write —
+# `triage -> ready`), so these rules pair the projected row with its events and
+# verify the hashes the kernel wrote. Read-only, no side effects, and silent for
+# boards whose rows predate either commitment.
 # ---------------------------------------------------------------------------
 
 # status -> event the kernel appends in the same transaction as the flip.
@@ -694,20 +701,28 @@ _TERMINAL_STATUS_EVENTS = {"done": "completed", "archived": "archived"}
 
 
 def _rule_out_of_band_transition(task, events, runs, now, cfg) -> list[Diagnostic]:
-    """A terminal status with no kernel event behind it: ``tasks.status`` was
-    flipped by raw SQL. Fires only when the log proves the task was
-    kernel-tracked (≥1 event); ``review`` is left alone — several legitimate
-    paths reach it (see ``_set_status_direct``)."""
+    """Board state that no kernel write produced (#110080).
+
+    Two shapes, both evidence-backed rather than prevention: a terminal status
+    whose matching terminal event never made it to the log (fires even after
+    later events — ``gc_events`` retains terminal anchors, so a missing one is
+    not aging), and any protected board field that disagrees with the state the
+    kernel last committed for the card (the amended all-board-writes scope: the
+    disclosed ``triage -> ready`` write, plus direct priority/title/body/
+    assignee/result writes). ``review`` is left alone — several legitimate paths
+    reach it (see ``_set_status_direct``).
+    """
     status = _task_field(task, "status")
     expected = _TERMINAL_STATUS_EVENTS.get(status or "")
-    if not expected or not events:
-        return []
-    # ``gc_events`` retains terminal transitions, so a missing one is not aging.
-    if any(_event_kind(ev) == expected for ev in events):
-        return []
+    if expected and events and not any(_event_kind(ev) == expected for ev in events):
+        return [_terminal_without_event(task, status, expected, events)]
+    return _divergent_board_state(task, events)
+
+
+def _terminal_without_event(task, status, expected, events) -> Diagnostic:
     task_id = _task_field(task, "id") or "<task_id>"
     latest = max(_event_ts(ev) for ev in events)
-    return [Diagnostic(
+    return Diagnostic(
         kind="out_of_band_transition", severity="critical",
         title=f"Status {status!r} without a {expected!r} event",
         detail=f"This card sits in {status!r} but its event log holds no {expected!r} event, so the "
@@ -721,23 +736,75 @@ def _rule_out_of_band_transition(task, events, runs, now, cfg) -> list[Diagnosti
         ],
         first_seen_at=latest, last_seen_at=latest, count=1,
         data={"status": status, "expected_event": expected, "event_count": len(events)},
+    )
+
+
+def _divergent_board_state(task, events) -> list[Diagnostic]:
+    """``tasks`` disagreeing with the kernel's committed board projection.
+
+    The commitment is refreshed by every kernel mutation (``_append_event`` →
+    ``_commit_task_state``), so a row that diverges from it was written around
+    the kernel with raw SQL. Rows without a commitment (boards that predate it)
+    report nothing.
+    """
+    from hermes_cli import kanban_db  # local: keep this module storage-agnostic
+
+    diverged = kanban_db.board_state_divergence(task)
+    if not diverged:
+        return []
+    status = _task_field(task, "status")
+    task_id = _task_field(task, "id") or "<task_id>"
+    fields = sorted(diverged)
+    shown = "; ".join(
+        f"{name}: kernel committed {_brief(diverged[name]['committed'])}, row holds "
+        f"{_brief(diverged[name]['found'])}" for name in fields[:4]
+    )
+    latest = max((_event_ts(ev) for ev in events), default=0)
+    return [Diagnostic(
+        kind="out_of_band_transition", severity="critical",
+        title=f"Board state written around the kernel ({', '.join(fields)})",
+        detail=f"This card no longer matches the state the kernel last committed for it — {shown}. Every "
+               f"board change is supposed to go through the kanban verbs, each of which records an event, "
+               f"so this row was changed by direct SQL. Treat the state as unverified: inspect the event "
+               f"log and the worker log, then re-drive the card through the CLI.",
+        actions=[
+            _cli_hint(f"Inspect the event log: hermes kanban show {task_id}",
+                      f"hermes kanban show {task_id}", suggested=True),
+            _log_hint_action(task_id),
+        ],
+        first_seen_at=latest, last_seen_at=latest, count=1,
+        data={
+            "status": status,
+            "diverged_fields": fields,
+            "divergence": {
+                name: {
+                    "committed": _brief(diverged[name]["committed"]),
+                    "found": _brief(diverged[name]["found"]),
+                }
+                for name in fields
+            },
+        },
     )]
 
 
 def _rule_event_chain_tampered(task, events, runs, now, cfg) -> list[Diagnostic]:
     """``task_events`` rows that don't match the kernel's per-task hash chain:
-    a raw-SQL INSERT/UPDATE/DELETE against the audit log (#110080)."""
+    a raw-SQL INSERT/UPDATE/DELETE against the audit log (#110080). The card's
+    committed chain tip is checked too, which is what exposes a deleted tail."""
     if not events:
         return []
     from hermes_cli import kanban_db  # local: keep this module storage-agnostic
 
     task_id = _task_field(task, "id") or ""
-    findings = kanban_db.verify_event_chain(task_id, events)
+    findings = kanban_db.verify_event_chain(task_id, events, task=task)
     if not findings:
         return []
     kinds = sorted({f["kind"] for f in findings})
     summary = "; ".join(
-        f"{f['kind']} on event {f['event_id']} ({f['event_kind']})" for f in findings[:5]
+        f"{f['kind']}" + (
+            f" on event {f['event_id']} ({f['event_kind']})" if f.get("event_id") is not None else ""
+        )
+        for f in findings[:5]
     )
     latest = max(_event_ts(ev) for ev in events)
     return [Diagnostic(

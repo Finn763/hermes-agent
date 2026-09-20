@@ -817,6 +817,12 @@ _LATER_TASK_COLUMNS = (
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Tamper-evidence commitment (#110080): the board fields the kernel last
+    # committed for the card, and the head of its event chain. NULL = the row
+    # predates the commitment, which readers treat as "not evidence" rather than
+    # as a divergence.
+    ("board_state_snapshot", "board_state_snapshot TEXT"),
+    ("event_chain_tip", "event_chain_tip TEXT"),
 )
 
 _NOTIFY_SUB_COLUMNS = (
