@@ -48,6 +48,28 @@ class TestComposeUserApiContent:
         fenced = build_memory_context_block("likes tea")
         assert out == "hello" + "\n\n" + fenced + "\n\n" + "PLUGIN-CTX"
 
+    def test_recomposition_over_composed_content_does_not_duplicate(self):
+        """Re-composing over content that already carries this turn's blocks must
+        not append them again (#76806)."""
+        once = compose_user_api_content("hello", "likes tea", "PLUGIN-CTX")
+        assert once is not None
+        twice = compose_user_api_content(once, "likes tea", "PLUGIN-CTX")
+        # None means "send as-is" at both call sites, so the wire bytes are the
+        # unchanged composition either way -- that is the invariant that matters.
+        assert (once if twice is None else twice) == once
+
+    def test_memory_injected_when_user_text_quotes_the_fence_tag(self):
+        """Only the exact fenced block counts as already-injected.
+
+        A user message that merely mentions the literal ``<memory-context>``
+        marker (a pasted log, a question about the tag) must still get this
+        turn's recall -- matching the bare marker silently drops the injection.
+        """
+        ask = "what does a literal <memory-context> tag do?"
+        out = compose_user_api_content(ask, "likes tea", "")
+        assert out is not None
+        assert build_memory_context_block("likes tea") in out
+
 
 
 

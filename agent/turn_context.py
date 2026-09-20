@@ -154,10 +154,12 @@ def compose_user_api_content(
     injections = []
     if ext_prefetch_cache:
         fenced = build_memory_context_block(ext_prefetch_cache)
-        # ponytail: substring guard; a re-composition over already-composed
-        # content (retry/re-entry, bypass-prologue paths) must not duplicate
-        # the block every pass or the wire grows per turn (#76806).
-        if fenced and "<memory-context>" not in content:
+        # Exact-block guard: re-composition over already-composed content
+        # (retry/re-entry, bypass-prologue paths) must not duplicate the
+        # block (#76806). Match the exact fenced bytes, never the bare
+        # marker: a user message that merely quotes "<memory-context>"
+        # must still get this turn's recall instead of a silent drop.
+        if fenced and fenced not in content:
             injections.append(fenced)
     if plugin_user_context and plugin_user_context not in content:
         injections.append(plugin_user_context)
