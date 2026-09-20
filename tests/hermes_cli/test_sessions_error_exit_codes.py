@@ -96,3 +96,63 @@ def test_confirm_prompt_eof_still_aborts_on_tty(monkeypatch):
 
     monkeypatch.setattr(builtins, "input", _raise_eof)
     assert sc._confirm_prompt("Delete 3 session(s)? [y/N] ") is False
+
+
+def test_delete_refusal_advises_only_flags_delete_defines(monkeypatch, capsys):
+    """`sessions delete` accepts --yes but no --dry-run: the non-TTY refusal must
+    not send the user to a flag argparse rejects with exit 2."""
+    import builtins
+    import sys
+
+    from hermes_state import SessionDB
+    db = SessionDB()  # the store cmd_sessions opens (tests/conftest rewires it)
+    db.create_session("sess_del", "cli")
+    db.close()
+
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    def _must_not_block(_prompt=""):
+        raise AssertionError("input() must not be called on non-TTY stdin")
+
+    monkeypatch.setattr(builtins, "input", _must_not_block)
+    sc.cmd_sessions(_args("delete", session_id="sess_del", yes=False))
+    out, err = capsys.readouterr()
+    assert "Cancelled." in out
+    assert "--yes" in err
+    assert "--dry-run" not in err
+
+
+def test_repair_routing_refusal_advises_no_nonexistent_flag(monkeypatch, capsys):
+    """`repair-routing` (prompt reached via --apply) has neither --yes nor
+    --dry-run; on non-TTY it must say so instead of naming flags it lacks."""
+    import builtins
+    import sys
+
+    from hermes_state import SessionDB
+    db = SessionDB()
+    db.create_session(
+        "donor_keyed", "telegram",
+        user_id="u1", session_key="agent:main:telegram:dm:u1",
+        chat_id="u1", chat_type="dm",
+    )
+    db.create_session("orphan", "telegram", user_id="u1",
+                      parent_session_id="donor_keyed")
+    db.append_message("orphan", "user", "hi")
+    db.close()
+
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    def _must_not_block(_prompt=""):
+        raise AssertionError("input() must not be called on non-TTY stdin")
+
+    monkeypatch.setattr(builtins, "input", _must_not_block)
+    sc.cmd_sessions(_args("repair-routing", apply=True))
+    out, err = capsys.readouterr()
+    assert "Aborted — nothing was changed." in out
+    assert "--yes" not in err
+    assert "--dry-run" not in err
+    assert "interactive terminal" in err
+
+    db = SessionDB()
+    assert db.get_session("orphan").get("session_key") is None  # untouched
+    db.close()

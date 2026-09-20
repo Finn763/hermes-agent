@@ -47,19 +47,28 @@ def _size_delta_label(saved_mb):
     return _m()._size_delta_label(saved_mb)
 
 
-def _confirm_prompt(prompt: str) -> bool:
-    """Prompt for y/N confirmation, safe against non-TTY environments."""
+def _confirm_prompt(
+    prompt: str,
+    hint: str = "Re-run with --yes to confirm, or --dry-run to preview.",
+) -> bool:
+    """Prompt for y/N confirmation, safe against non-TTY environments.
+
+    *hint* is what the refusal tells a non-interactive caller to do, so each
+    call site names only flags its own subcommand defines: ``delete`` has no
+    ``--dry-run``, and ``repair-routing`` has neither (its prompt already
+    follows an explicit ``--apply``) — naming them sent users into an
+    argparse error instead of telling them how to proceed.
+    """
     try:
         if not sys.stdin.isatty():
             # Windows service / piped-stdin contexts (#77566): stdin is an
             # inherited pipe that never yields data or EOF, so input()
             # below would block forever (0 CPU, no network, nothing on
             # stderr) instead of failing. Fail fast and point at the
-            # non-interactive flags instead of hanging the caller.
+            # non-interactive way out instead of hanging the caller.
             print(
                 "Refusing to prompt for confirmation: stdin is not "
-                "interactive. Re-run with --yes to confirm or --dry-run "
-                "to preview.",
+                f"interactive. {hint}",
                 file=sys.stderr,
             )
             return False
@@ -894,7 +903,8 @@ def cmd_sessions(args, sessions_parser=None):
         if not args.yes:
             if not _confirm_prompt(
                 f"Delete session '{resolved_session_id}'{_pinned_note} "
-                "and all its messages? [y/N] "
+                "and all its messages? [y/N] ",
+                hint="Re-run with --yes to confirm.",
             ):
                 print("Cancelled.")
                 return
@@ -1431,7 +1441,11 @@ def cmd_sessions(args, sessions_parser=None):
             print("\nStop the gateway before applying — a running gateway "
                   "still holds the old routing mapping in memory.")
             if _confirm_prompt(
-                f"Adopt {len(adoptable)} orphaned session(s)? [y/N] "
+                f"Adopt {len(adoptable)} orphaned session(s)? [y/N] ",
+                hint=(
+                    "Run it in an interactive terminal; this command has "
+                    "no flag that skips the prompt."
+                ),
             ):
                 repaired = 0
                 for record in adoptable:
