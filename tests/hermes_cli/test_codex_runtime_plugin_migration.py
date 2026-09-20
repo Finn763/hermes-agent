@@ -10,6 +10,7 @@ from hermes_cli.codex_runtime_plugin_migration import (
     MIGRATION_END_MARKER,
     _build_hermes_tools_mcp_entry,
     _format_toml_value,
+    _KANBAN_WORKER_ENV_VARS,
     _looks_like_test_tempdir,
     _strip_existing_managed_block,
     _strip_unmanaged_plugin_tables,
@@ -478,28 +479,30 @@ class TestHermesToolsEnvForwarding:
         # (no set-iteration-order drift between migration runs).
         assert _build_hermes_tools_mcp_entry()["env_vars"] == env_vars
 
-    def test_env_vars_forwards_runtime_hermes_vars(self, monkeypatch):
-        """Non-secret HERMES_* vars already present at migration time
-        (launcher-injected session/tenant context, etc.) are forwarded too,
-        so the list doesn't need a code change per variable. HERMES_SESSION_ID
-        is covered by the static set; HERMES_TENANT exercises the runtime
-        snapshot."""
-        monkeypatch.setenv("HERMES_SESSION_ID", "sess-1")
+    def test_env_vars_is_the_declared_edge_scope_only(self, monkeypatch):
+        """env_vars is a declared grant, not a name-shape scan: a non-secret
+        HERMES_* var set at migration time that is not part of the declared
+        dispatcher edge must NOT be forwarded. Review contract — "forward the
+        exact current grant required by this declared edge", never "all
+        safe-looking HERMES_* names"."""
         monkeypatch.setenv("HERMES_TENANT", "acme")
-        entry = _build_hermes_tools_mcp_entry()
-        env_vars = entry.get("env_vars") or []
-        assert "HERMES_SESSION_ID" in env_vars
-        assert "HERMES_TENANT" in env_vars
+        monkeypatch.setenv("HERMES_LAUNCHER_CONTEXT", "whatever")
+        env_vars = _build_hermes_tools_mcp_entry().get("env_vars") or []
+        assert set(env_vars) == set(_KANBAN_WORKER_ENV_VARS), (
+            "env_vars must be exactly the declared edge scope — no "
+            "migrate-time os.environ widening"
+        )
+        assert "HERMES_TENANT" not in env_vars
+        assert "HERMES_LAUNCHER_CONTEXT" not in env_vars
 
-    def test_env_vars_snapshot_excludes_secret_like_names(self, monkeypatch):
-        """The runtime HERMES_* snapshot must honor the repo's strip-by-
-        default spawn hygiene: integration-credential names (~/.hermes/.env
-        values injected via reload_env) are never forwarded into the MCP
-        subprocess env."""
+    def test_env_vars_never_carries_secret_like_hermes_names(self, monkeypatch):
+        """No secret-shaped HERMES_* name (~/.hermes/.env integration
+        credentials injected via reload_env) may reach the MCP child: the
+        declared edge carries no dynamically classified names at all."""
         monkeypatch.setenv("HERMES_CUSTOM_ACME_API_KEY", "sk-secret")
         monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "lfk-secret")
         monkeypatch.setenv("HERMES_GATEWAY_RELAY_SECRET", "relay-secret")
-        monkeypatch.setenv("HERMES_SESSION_ID", "sess-1")  # not secret
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-1")  # declared, not secret
         entry = _build_hermes_tools_mcp_entry()
         env_vars = entry.get("env_vars") or []
         assert "HERMES_CUSTOM_ACME_API_KEY" not in env_vars
