@@ -489,7 +489,13 @@ class TestSession0EndToEnd:
                 stdout=json.dumps({"tree_markdown": "ax-root"})
             )
 
-        monkeypatch.setattr(cua_backend, "resolve_cua_driver_cmd", lambda: "cua-driver")
+        # The CLI transport resolves the binary through cua_backend_driver
+        # (main's decomposition moved resolve_cua_driver_cmd out of the facade),
+        # so patch the seam where _call_tool_via_cli actually reads it.
+        monkeypatch.setattr(
+            "tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
+            lambda: "cua-driver",
+        )
         monkeypatch.setattr("subprocess.run", fake_subprocess_run)
         bridge_mock = MagicMock()
         session._bridge = bridge_mock
