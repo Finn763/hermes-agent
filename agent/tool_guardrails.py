@@ -316,6 +316,19 @@ _LOOP_CAPS: dict[str, tuple[str, str, str]] = {
 # — which defaults to off on the interactive platforms where this bites (#103752).
 _BRIDGE_UNRESOLVED_CAP = 3
 
+# The parser's marker for the shape that never resolved to a tool. Matched against the
+# tool result, which is a JSON string, so the quotes are the JSON escaping.
+_UNRESOLVED_BRIDGE_MARKER = "requires a 'name'"
+
+
+def _is_unresolved_bridge_rejection(result: str | None) -> bool:
+    """True when a ``tool_call`` failed because the bridge could not resolve it at all.
+
+    Distinguished from a well-formed bridge call whose target tool then failed: those
+    reached a tool, so they must not feed the cap.
+    """
+    return bool(result) and _UNRESOLVED_BRIDGE_MARKER in result
+
 
 class ToolCallGuardrailController:
     """Per-turn controller for repeated failed/non-progressing tool calls."""
@@ -404,9 +417,10 @@ class ToolCallGuardrailController:
 
         if failed:
             # An unresolved bridge call never reached a tool: count it toward the cap
-            # that stops the identical-retry loop (#103752). Only FAILURES count, so a
-            # well-formed tool_call is never capped by this.
-            if tool_name == TOOL_CALL_NAME:
+            # that stops the identical-retry loop (#103752). Only the parser's own
+            # "no name" rejection counts, so a well-formed tool_call — including one
+            # whose target tool then failed — is never capped by this.
+            if tool_name == TOOL_CALL_NAME and _is_unresolved_bridge_rejection(result):
                 self._bridge_unresolved_count += 1
             # An identical failing call is only a REPLAY if nothing landed in between;
             # a mutation since the last identical failure restarts the exact-args streak.

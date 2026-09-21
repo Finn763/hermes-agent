@@ -81,7 +81,13 @@ class TestMalformedToolCallRejection:
         _, err = normalize_tool_call_entries(payload)
         assert err.startswith(expected_prefix)
         assert "requires a 'name'" in err
-        assert '"arguments":{"query":"x"}' in err
+        # The echoed correction nests the caller's own arguments, whatever shape
+        # they arrived in. The flat payload carries the issue's real query.
+        expected_args = '"query":' + json.dumps(
+            "weather forecast New York, NY today" if payload is FLAT_PAYLOAD else "x",
+            ensure_ascii=False)
+        assert '"arguments":{' + expected_args + "}" in err
+        assert '"name":"<tool name>"' in err
 
     def test_oversized_echo_collapses_to_a_placeholder(self):
         """A huge flattened payload must not bloat the error (it repeats every turn)."""
@@ -185,10 +191,11 @@ class TestUnresolvedBridgeCallLoopTerminates:
         assert "stopped retrying" in result["final_response"]
 
         tool_results = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
-        # The first `cap` results are the actionable parser rejection...
+        # The first `cap` results are the actionable parser rejection. The tool result
+        # is a JSON-encoded error object, so the message's quotes arrive escaped.
         for content in tool_results[:3]:
             assert "requires a 'name'" in content
-            assert '"arguments":{"query":' in content
+            assert '\\"arguments\\":{\\"query\\":' in content
         # ...and the last one is the block that ends the loop.
         assert "bridge_unresolved_cap" in tool_results[-1]
         assert "never ran" in tool_results[-1]
@@ -203,10 +210,16 @@ class TestUnresolvedBridgeCallLoopTerminates:
         assert agent._tool_guardrails.config.hard_stop_enabled is False
 
         flat = {"query": "x"}
+        # `cap - 1` unresolved calls are still inside the budget...
         for _ in range(_BRIDGE_UNRESOLVED_CAP - 1):
             assert agent._tool_guardrails.before_call("tool_call", flat).action == "allow"
+            agent._tool_guardrails.after_call(
+                "tool_call", flat, json.dumps({"error": "requires a 'name'"}), failed=True)
+            assert agent._tool_guardrails._bridge_unresolved_count <= _BRIDGE_UNRESOLVED_CAP - 1
+        # ...the `cap`-th failure fills the budget, and the next call is blocked.
         agent._tool_guardrails.after_call(
             "tool_call", flat, json.dumps({"error": "requires a 'name'"}), failed=True)
+        assert agent._tool_guardrails._bridge_unresolved_count == _BRIDGE_UNRESOLVED_CAP
         decision = agent._tool_guardrails.before_call("tool_call", flat)
         assert decision.action == "block"
         assert decision.code == "bridge_unresolved_cap"
@@ -232,10 +245,31 @@ class TestUnresolvedBridgeCallLoopTerminates:
         agent = _agent_with_bridge()
         guardrails = agent._tool_guardrails
         flat = {"query": "x"}
+        # The real parser rejection, so the counter sees the shape it must recognize.
+        from tools.tool_search_validation import normalize_tool_call_entries
+        _, err = normalize_tool_call_entries(flat)
+        rejection = json.dumps({"error": err})
         for _ in range(_BRIDGE_UNRESOLVED_CAP + 2):
-            guardrails.after_call("tool_call", flat, json.dumps({"error": "x"}), failed=True)
+            guardrails.after_call("tool_call", flat, rejection, failed=True)
         assert guardrails.before_call("tool_call", flat).action == "block"
 
         guardrails.reset_for_turn()
         assert guardrails._bridge_unresolved_count == 0
         assert guardrails.before_call("tool_call", flat).action == "allow"
+
+    def test_a_failed_tool_call_that_did_resolve_is_not_capped(self):
+        """A well-formed bridge call whose target tool then failed reached a tool, so
+        it must not feed the unresolved cap — otherwise a run of real failures inside
+        one turn would be blocked as if the bridge itself were broken."""
+        from agent.tool_guardrails import _BRIDGE_UNRESOLVED_CAP
+
+        agent = _agent_with_bridge()
+        guardrails = agent._tool_guardrails
+        good = {"name": "todo_list", "arguments": {"todos": []}}
+        # A resolved call that failed: the error names the tool, not the missing name.
+        resolved_failure = json.dumps({"error": "todo_list failed: unknown todo list id"})
+        for _ in range(_BRIDGE_UNRESOLVED_CAP * 2):
+            assert guardrails.before_call("tool_call", good).action == "allow"
+            guardrails.after_call("tool_call", good, resolved_failure, failed=True)
+        assert guardrails._bridge_unresolved_count == 0
+        assert guardrails.before_call("tool_call", good).action == "allow"
