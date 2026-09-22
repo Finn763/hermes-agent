@@ -118,6 +118,9 @@ def _make_runner(tmp_path, dataset_entries, batch_size=2):
     r.checkpoint_file = r.output_dir / "checkpoint.json"
     r.stats_file = r.output_dir / "statistics.json"
     r.num_workers = 2
+    # main's _worker_config forwards every _AGENT_PASSTHROUGH key, which now
+    # includes "platform" (set by __init__, which this fixture bypasses).
+    r.platform = "batch"
     r.distribution = "default"
     r.model = "test-model"
     r.max_iterations = 1
