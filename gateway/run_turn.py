@@ -636,6 +636,16 @@ class GatewayTurnMixin:
             return
         hs.compression_enabled = str(_comp_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
 
+        # The net's ratio is a FLOOR, never a ceiling: follow a widened compression.threshold up so
+        # it cannot pre-empt the agent's own compressor (#118984). Below 0.85 the net keeps its own
+        # default — the ratio is a safety net for sessions that grew between turns, not a mirror of
+        # the agent. A trigger at/above the whole window is unreachable (the provider rejects the
+        # request before usage gets there), so such a value would only disarm the net: keep 0.85.
+        with suppress(TypeError, ValueError):
+            _user_threshold = float(_comp_cfg.get("threshold"))
+            if hs.threshold_pct < _user_threshold < 1.0:
+                hs.threshold_pct = _user_threshold
+
         def _knob(key, current, cast, allow_zero=False):
             raw = _comp_cfg.get(key)
             if raw is None:
@@ -659,8 +669,9 @@ class GatewayTurnMixin:
     async def _hmwa_hygiene_settings(self, source, session_key):
         """Resolve model/provider/context-length + hygiene knobs (fail-soft: errors keep defaults).
 
-        The 0.85 threshold is deliberately HIGHER than the agent's compressor (0.50): a safety net
-        for sessions that grew between turns. ``max_turn_hold_seconds`` bounds the TURN wait
+        The 0.85 threshold is the net's FLOOR: a safety net for sessions that grew between turns,
+        which follows ``compression.threshold`` UP when the user widens it so it never pre-empts the
+        agent's own compressor (#118984). ``max_turn_hold_seconds`` bounds the TURN wait
         (compressor keeps running detached, commit fenced); kept below transport idle-timeouts."""
         from gateway.run import _load_gateway_config
         hs = self._HygieneSettings(
