@@ -95,7 +95,7 @@ export function ConnectorsCard({ locked }: CardProps) {
         </div>
       ) : (
         <>
-          {rows.length > 12 ? <SearchField onChange={setQuery} placeholder="Find an app" value={query} /> : null}
+          {rows.length > 12 ? <SearchField containerClassName="w-full" onChange={setQuery} placeholder="Find an app" value={query} /> : null}
           <div className="grid max-h-72 grid-cols-3 gap-2 overflow-y-auto">
             {shown.map(row => (
               <Chip

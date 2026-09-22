@@ -355,7 +355,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
             <div className="flex shrink-0 items-center gap-2">
               {section === 'sessions' && (
                 <SearchField
-                  containerClassName="max-w-[40vw]"
+                  containerClassName="w-full max-w-[40vw]"
                   onChange={next => setQuery(next)}
                   placeholder={cc.searchPlaceholder}
                   value={query}

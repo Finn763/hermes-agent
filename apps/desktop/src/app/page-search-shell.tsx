@@ -95,7 +95,7 @@ export function PageSearchShell({
             <div className="flex min-w-0 items-center justify-start">
               {!searchHidden && (
                 <SearchField
-                  containerClassName="max-w-[45vw]"
+                  containerClassName="w-full max-w-[45vw]"
                   hints={searchHints}
                   onChange={onSearchChange}
                   placeholder={searchPlaceholder}

@@ -171,7 +171,7 @@ export function SessionImportView({ owner, onClose, onOpenSession }: SessionImpo
               {rows.length > 0 && (
                 <SearchField
                   aria-label={copy.search}
-                  containerClassName="opacity-100"
+                  containerClassName="w-full opacity-100"
                   onChange={setSearch}
                   placeholder={copy.search}
                   value={search}

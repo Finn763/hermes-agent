@@ -70,11 +70,12 @@ export function SearchField({
       <input
         aria-label={ariaLabel ?? placeholder}
         className={cn(
-          // `field-sizing: content` grows the input to fit the placeholder/typed
-          // text; min-w-0 lets it shrink back below content size when the
-          // context is narrower — long queries scroll inside the field.
+          // flex-1: the input takes the remaining row width so the clear
+          // button sits at the row's right edge; min-w-0 lets it shrink
+          // below content size when the context is narrower — long queries
+          // scroll inside the field.
           // text-xs matches the form controls (Input/Select via controlVariants).
-          'h-7 min-w-0 max-w-full bg-transparent text-xs text-foreground [field-sizing:content] placeholder:text-muted-foreground focus:outline-none',
+          'h-7 min-w-0 max-w-full flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none',
           inputClassName
         )}
         onChange={event => onChange(event.target.value)}

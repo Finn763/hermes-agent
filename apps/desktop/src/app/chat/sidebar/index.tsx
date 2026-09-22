@@ -1675,6 +1675,7 @@ export function ChatSidebar({
           <div className="shrink-0 px-2 pb-1 pt-1">
             <SearchField
               aria-label={s.searchAria}
+              containerClassName="w-full"
               inputRef={searchInputRef}
               onChange={setSearchQuery}
               placeholder={s.searchPlaceholder}
