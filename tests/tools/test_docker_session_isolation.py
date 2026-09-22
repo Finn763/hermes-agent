@@ -148,6 +148,34 @@ class TestSessionScopedMountResolution:
             == "/Users/prev/dev/oldrepo"
         )
 
+    def test_shared_mode_uses_attached_workspace(self, monkeypatch, tmp_path):
+        """Shared/persistent mode must honor the session's attached workspace.
+
+        Issue #119170: shared mode returned config host_cwd for every
+        session, so $HOME got bound at /workspace and host keys were
+        readable in the sandbox.
+        """
+        _disable_isolation(monkeypatch)
+        ws = tmp_path / "attached"
+        ws.mkdir()
+        terminal_tool.register_task_env_overrides(
+            "tui:sess-1", {"cwd": str(ws), "cwd_source": "session"}
+        )
+        cfg = self._config()
+        assert terminal_tool._resolve_task_host_cwd(cfg, "tui:sess-1") == str(ws)
+
+    def test_shared_mode_refuses_process_tagged_override(self, monkeypatch, tmp_path):
+        """A process-tagged cwd stays refused in shared mode: legacy mount."""
+        _disable_isolation(monkeypatch)
+        terminal_tool.register_task_env_overrides(
+            "tui:sess-1", {"cwd": str(tmp_path), "cwd_source": "process"}
+        )
+        cfg = self._config()
+        assert (
+            terminal_tool._resolve_task_host_cwd(cfg, "tui:sess-1")
+            == "/Users/prev/dev/oldrepo"
+        )
+
     def test_isolation_refuses_process_global_mount(self, monkeypatch, tmp_path):
         """The reported leak: a fresh session with NO attached workspace must
         not inherit the process-global TERMINAL_CWD-derived mount."""
