@@ -29,6 +29,7 @@ import {
 } from '@/store/gateway-switch'
 import { $notifications, clearNotifications, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile, $profiles, ensureGatewayProfile } from '@/store/profile'
+import { $settingsScopeOverride, $settingsScopeProfile } from '@/store/settings-scope'
 import { $backendRestartRequest } from '@/store/recovery-requests'
 import {
   $activeSessionId,
@@ -412,7 +413,7 @@ describe('default-route profile adoption', () => {
     }
   )
 
-  it('adopts the resolved backend profile rather than the old last-used preference', async () => {
+  it('a bare attach without a startup default keeps the stored preference', async () => {
     const desktop = fakeDesktop()
     desktop.getConnection.mockResolvedValue({ ...primaryConn, profile: 'research' })
     desktop.profile.get.mockResolvedValue({ profile: 'old-last-used' })
@@ -420,7 +421,46 @@ describe('default-route profile adoption', () => {
     render(<Harness />)
     await flushAsync()
     expect($connection.get()?.profile).toBe('research')
-    expect($activeGatewayProfile.get()).toBe('research')
+    // No explicit startup default: the attached backend's registered profile
+    // is the launch home, not intent — the stored working profile wins (#118894).
+    expect($activeGatewayProfile.get()).toBe('old-last-used')
+    expect($desktopBoot.get().running).toBe(false)
+  })
+
+  it('#118894: a bare attach keeps the stored working profile instead of the launch home', async () => {
+    const desktop = fakeDesktop()
+    // Reporter's topology: attached backend registered under `default` (the
+    // launch home), no saved startup default, no window override.
+    desktop.getConnection.mockResolvedValue({ ...primaryConn, profile: 'default' })
+    desktop.profile.get.mockResolvedValue({ profile: 'fiona' })
+    $settingsScopeOverride.set(null)
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    render(<Harness />)
+    await flushAsync()
+    expect($connection.get()?.profile).toBe('default')
+    // The settings scope follows the working profile, so a Model apply
+    // carries ?profile=fiona instead of landing on the launch home.
+    expect($activeGatewayProfile.get()).toBe('fiona')
+    expect($settingsScopeProfile.get()).toBe('fiona')
+    expect($desktopBoot.get().running).toBe(false)
+  })
+
+  it('#118894: an explicit startup default still outranks the stored preference', async () => {
+    const base = fakeDesktop()
+    const desktop = {
+      ...base,
+      profile: {
+        ...base.profile,
+        get: vi.fn(async () => ({ profile: 'fiona' })),
+        getDefault: vi.fn(async () => ({ connectionId: null, profile: 'coder' }))
+      }
+    }
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    render(<Harness />)
+    await flushAsync()
+    expect(desktop.getConnection).toHaveBeenCalledWith('coder')
+    expect($connection.get()?.profile).toBe('coder')
+    expect($activeGatewayProfile.get()).toBe('coder')
     expect($desktopBoot.get().running).toBe(false)
   })
 })
