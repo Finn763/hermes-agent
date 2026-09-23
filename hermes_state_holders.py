@@ -326,9 +326,6 @@ def foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     must not assume quiescence when an old, unlinked SQLite generation may
     still be open by another process.
     """
-    if _IS_WINDOWS:
-        return []
-
     # realpath, not abspath: psutil/libproc report the kernel-resolved pathname, so a symlinked
     # HERMES_HOME would otherwise make every holder invisible and let maintenance proceed.
     db_path_str = os.path.realpath(os.fspath(db_path))
@@ -439,12 +436,23 @@ def foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     if psutil is None:
         return [(-1, "open-file scan unavailable")]
     try:
-        for process in psutil.process_iter(["pid", "open_files"]):
-            info = process.info
-            pid = int(info["pid"])
-            if pid == os.getpid():
+        own_pid = os.getpid()
+        # Fetch handles lazily per process: prefetching ``open_files`` for the
+        # whole table intermittently drops live processes (psutil skips
+        # whatever it cannot prefetch), which a write guard must never read
+        # as an all-clear.
+        for process in psutil.process_iter(["pid"]):
+            try:
+                pid = int(process.info["pid"])
+            except (KeyError, TypeError, ValueError):
                 continue
-            for opened in info.get("open_files") or ():
+            if pid == own_pid:
+                continue
+            try:
+                opened_files = process.open_files()
+            except Exception:
+                continue
+            for opened in opened_files or ():
                 path = getattr(opened, "path", "")
                 if path and canonical_sqlite_path(os.path.realpath(path)) in watched:
                     holders.append((pid, path))
