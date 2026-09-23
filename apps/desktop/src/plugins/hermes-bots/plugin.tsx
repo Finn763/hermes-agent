@@ -32,6 +32,7 @@ import {
   $botsPaneVisible,
   $focusedBotOwner,
   $openBotChat,
+  $pendingBotOpen,
   $selectedBot,
   $selectedRosterHydrated,
   $selectedRosterKey,
@@ -593,6 +594,7 @@ export default {
           // cancellation from showing an error after the user deliberately
           // returned to Sessions.
           bumpBotOpenGeneration()
+          $pendingBotOpen.set(null)
           host.setWorkspaceScope?.('sessions')
         }
 

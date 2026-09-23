@@ -10,7 +10,7 @@
 
 import { ackStoredSessionId, atom, haptic, host, markSessionUnreadFinished } from '@hermes/plugin-sdk'
 
-import { $openBotChat, $selectedBot, lastToastedPreview, rosterWatermarks, saveSelectedRosterBot } from './bot-state'
+import { $openBotChat, $pendingBotOpen, $selectedBot, lastToastedPreview, rosterWatermarks, saveSelectedRosterBot } from './bot-state'
 import { CANONICAL_CHAT_TITLE, notifyBotOpenFailure, openBotCanonicalChat, prepareBotSource } from './canonical-chat'
 import { $botMeta, botActivitySession, botRosterKey, botSelectionKey, newBotChat } from './data'
 import { $groupChats, $groupChatWorkspace } from './group-chat'
@@ -147,6 +147,14 @@ function refreshOpenBotChat(bot: RosterRow, { allowWhileBusy = false }: { allowW
   })
 }
 
+/** Release the pending-open mark, but only for the flight that set it: a
+ *  superseded flight settling late must not clear its successor's mark. */
+function settlePendingBotOpen(generation: number) {
+  if ($pendingBotOpen.get()?.generation === generation) {
+    $pendingBotOpen.set(null)
+  }
+}
+
 /** Front the bot's canonical Bot Chat when it is ALREADY open as a tab —
  *  presentation only, no registry round-trip. Returns the fronted stored id,
  *  or null when the chat is not on screen (or this shell cannot tell) and the
@@ -204,6 +212,10 @@ function focusExistingBotTab(bot: RosterRow): null | { registryId: string; store
 export async function openRosterBot(bot: RosterRow): Promise<boolean> {
   const generation = bumpBotOpenGeneration()
   const key = botRosterKey(bot)
+  // Publish the target BEFORE the cold-start awaits: the focused session
+  // still names the previous bot until host.openSession lands, and the
+  // roster highlight must move on the click, not on the hydration (#120277).
+  $pendingBotOpen.set({ generation, key })
   const meta = botRosterMeta(bot, $botMeta.get())
   // Keep the currently visible group as a fallback until this explicit action
   // has actually fronted a new owner; a failed open must not steal the center
@@ -271,6 +283,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
     // user turn (#99393 class; #95600 only covered the not-yet-open path).
     refreshOpenBotChat(bot, { allowWhileBusy: true })
 
+    settlePendingBotOpen(generation)
     return true
   }
 
@@ -285,10 +298,12 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
       notifyBotOpenFailure(error, bot, 'reach')
     }
 
+    settlePendingBotOpen(generation)
     return false
   }
 
   if (generation !== getBotOpenGeneration()) {
+    settlePendingBotOpen(generation)
     return false
   }
 
@@ -296,6 +311,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
     const opened = await openBotCanonicalChat(bot, () => generation === getBotOpenGeneration())
 
     if (generation !== getBotOpenGeneration()) {
+      settlePendingBotOpen(generation)
       return false
     }
 
@@ -313,6 +329,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
         openedSessionId: opened.openedId
       })
 
+      settlePendingBotOpen(generation)
       return true
     }
   } catch (error) {
@@ -322,6 +339,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
       notifyBotOpenFailure(error, bot, 'open', displayName(bot, meta))
     }
 
+    settlePendingBotOpen(generation)
     return false
   }
 
@@ -331,6 +349,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
     $openBotChat.set(null)
     restorePreviousGroup()
 
+    settlePendingBotOpen(generation)
     return false
   }
 
@@ -340,6 +359,7 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
   })
   newBotChat(bot)
 
+  settlePendingBotOpen(generation)
   return true
 }
 

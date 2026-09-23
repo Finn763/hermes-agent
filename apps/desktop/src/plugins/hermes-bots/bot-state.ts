@@ -52,6 +52,14 @@ export const $botsPaneVisible = atom(false)
  *  canonical chat was resolved). This transient view observation is never an
  *  identity preference. */
 export const $openBotChat = atom<{ key: string; openedRegistryId: string; openedSessionId?: string } | null>(null)
+/** Bot open still hydrating: {generation, key} of the click target, published
+ *  synchronously by openRosterBot and cleared when that flight settles. The
+ *  focused session still names the previous bot until host.openSession lands
+ *  (seconds on a cold backend start), so surfaces that must acknowledge the
+ *  click immediately — the roster highlight — read this, not focus (#120277).
+ *  The generation guards the clear: a superseded flight never releases its
+ *  successor's mark. */
+export const $pendingBotOpen = atom<null | { generation: number; key: string }>(null)
 /** A session owns the main workspace. The roster highlight and the Cronjobs
  *  lifecycle both key off this rather than reading host.state conditionally
  *  from render. */

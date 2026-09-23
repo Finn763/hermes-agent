@@ -39,6 +39,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { isBackfilledFacePng } from './avatar-image'
+import { $pendingBotOpen } from './bot-state'
 import {
   $botMeta,
   $lastRoster,
@@ -1500,6 +1501,7 @@ export function openGroupChat(group: string): void {
   // The in-flight host navigation may complete underneath this workspace,
   // but it may not later close or visually steal the room the user chose.
   bumpBotOpenGeneration()
+  $pendingBotOpen.set(null)
   $groupNeedsYou.set({
     ...$groupNeedsYou.get(),
     [group]: false

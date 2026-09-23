@@ -35,6 +35,7 @@ import { isBackfilledFacePng } from './avatar-image'
 import {
   $botChatFocused,
   $focusedBotOwner,
+  $pendingBotOpen,
   $selectedRosterKey,
   focusedRosterOwner,
   saveSelectedRosterBot
@@ -136,7 +137,14 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
   // highlight to a bot you are not reading). With no focused chat, the
   // source-qualified selection is the owner — and it is the only rule that
   // can highlight a remote row, which has no focusable local chat.
-  const isActive = botRowOwnsWorkspace(bot, activeGroup, botChatFocused, focusedOwner, selectedRosterKey)
+  const pendingOpenKey = useValue($pendingBotOpen)?.key
+  // A cold open hydrates for seconds behind the click: the focused owner
+  // still names the previous bot until host.openSession lands, so while a
+  // target is pending the highlight follows the click, not the stale focus
+  // (#120277). A selected group suppresses this like every bot highlight.
+  const isActive = !activeGroup && pendingOpenKey
+    ? botRosterKey(bot) === pendingOpenKey
+    : botRowOwnsWorkspace(bot, activeGroup, botChatFocused, focusedOwner, selectedRosterKey)
 
   const { shape, color, image } = botAppearance(bot.name, meta)
   // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
