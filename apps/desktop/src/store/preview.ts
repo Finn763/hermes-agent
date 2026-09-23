@@ -1,6 +1,6 @@
 import { atom, computed } from 'nanostores'
 
-import { readJson, readKey, writeKey } from '@/lib/storage'
+import { readJson, writeKey } from '@/lib/storage'
 import { normalize } from '@/lib/text'
 
 import { $rightRailActiveTabId, type RightRailTabId, selectRightRailTab } from './layout'
@@ -210,7 +210,22 @@ let viewKey = 'default'
 
 export const $previewTabs = atom<PreviewTab[]>([])
 
+// Persist CHANGES only — never the creation-time value. nanostores'
+// subscribe fires immediately, and writing what was just read back is a
+// data-loss clobber: a fresh renderer (the popped-out Browser most of all)
+// boots against storage it has not adopted yet, and echoing its empty view
+// back out overwrites the real record before adoption can read it. A legacy
+// single-array store is wiped this way before `pendingLegacyTabs` is ever
+// adopted; a bucket store loses its `default` bucket the same way.
+let previewTabsCreationEmission = true
+
 $previewTabs.subscribe(tabs => {
+  if (previewTabsCreationEmission) {
+    previewTabsCreationEmission = false
+
+    return
+  }
+
   // `subscribe` hands a readonly view; the bucket is a mutable store of its own.
   tabsByProfile[viewKey] = [...tabs]
   persistTabs()
@@ -389,22 +404,36 @@ export function commitBrowserTabLocation(tabId: string, url: string, title?: str
 }
 
 /** Pull one tab from storage into this renderer's atom. A sibling window
- *  (the pop-out) may have committed a newer URL that we never saw. */
+ *  (the pop-out) may have committed a newer URL that we never saw — and a
+ *  fresh pop-out renderer boots with an EMPTY scoped view (no session ever
+ *  pushes a scope there), so without this the shell finds no tab and stays
+ *  black. Reads every profile bucket plus the pre-scoping single-array shape.
+ */
 export function adoptPersistedBrowserTab(tabId: string) {
   if (!tabId) {
     return
   }
 
   try {
-    const raw = readKey(TABS_STORAGE_KEY)
+    const stored = readJson<unknown>(TABS_STORAGE_KEY)
 
-    if (!raw) {
+    if (!stored) {
       return
     }
 
-    const persisted = decodePreviewTabs(raw).find(tab => tab.id === tabId)
+    const candidates = Array.isArray(stored)
+      ? parseTabList(stored)
+      : Object.values(stored as Record<string, unknown>).flatMap(parseTabList)
+
+    const persisted = candidates.find(tab => tab.id === tabId)
 
     if (!persisted || persisted.target.kind !== 'url') {
+      return
+    }
+
+    if (!$previewTabs.get().some(tab => tab.id === tabId)) {
+      $previewTabs.set([...$previewTabs.get(), { id: persisted.id, target: persisted.target }])
+
       return
     }
 
