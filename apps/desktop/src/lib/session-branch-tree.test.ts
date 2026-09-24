@@ -38,6 +38,40 @@ describe('flattenSessionsWithBranches', () => {
     expect(flattenSessionsWithBranches([branch])).toEqual([{ session: branch }])
   })
 
+  it('does not render a compression continuation as a branch (#121148)', () => {
+    const sealed = session('seg-1', { end_reason: 'compression', last_active: 20 })
+    const continuation = session('seg-2', { last_active: 30, parent_session_id: 'seg-1' })
+
+    expect(flattenSessionsWithBranches([sealed, continuation])).toEqual([
+      { session: continuation },
+      { session: sealed }
+    ])
+  })
+
+  it('still nests a marked branch off a compression-sealed parent (#121148)', () => {
+    const sealed = session('seg-1', { end_reason: 'compression', last_active: 20 })
+    const branch = session('branch', {
+      last_active: 10,
+      model_config: JSON.stringify({ _branched_from: 'seg-1' }),
+      parent_session_id: 'seg-1'
+    })
+
+    expect(flattenSessionsWithBranches([sealed, branch])).toEqual([
+      { session: sealed },
+      { branchStem: '└─ ', session: branch }
+    ])
+  })
+
+  it('still nests a legacy branch off a branched parent (#121148)', () => {
+    const parent = session('parent', { ended_at: 10, end_reason: 'branched', last_active: 20 })
+    const branch = session('branch', { last_active: 15, parent_session_id: 'parent', started_at: 11 })
+
+    expect(flattenSessionsWithBranches([parent, branch])).toEqual([
+      { session: parent },
+      { branchStem: '└─ ', session: branch }
+    ])
+  })
+
   it('re-sorts roots by group recency by default (pinned-style jumps without preserveOrder)', () => {
     // Stale important chat first in the caller's array; a recently-active
     // background task second. Default path must lift the fresher root — that

@@ -17,6 +17,41 @@ export interface FlattenSessionsOptions {
 
 const recency = (session: SessionInfo): number => session.last_active || session.started_at || 0
 
+/** The stable `._branched_from` edge marker off raw `model_config` (JSON text
+ *  or parsed object) — the same source the server classifies on
+ *  (`hermes_state_common._BRANCH_CHILD_SQL`). Null when absent/unparseable. */
+const branchedFrom = (session: SessionInfo): null | string => {
+  const raw = session.model_config
+  let config: Record<string, unknown> | null = null
+
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+
+      if (parsed !== null && typeof parsed === 'object') {
+        config = parsed as Record<string, unknown>
+      }
+    } catch {
+      config = null
+    }
+  } else if (raw !== null && raw !== undefined && typeof raw === 'object') {
+    config = raw
+  }
+
+  const marker = config?.['_branched_from']
+
+  return typeof marker === 'string' && marker.trim() ? marker.trim() : null
+}
+
+/** A compression continuation — parent sealed with `end_reason='compression'`
+ *  and no `_branched_from` marker — is an automatic rotation, not a user
+ *  branch, so it must not render with a branch stem (#121148). Mirrors the
+ *  server's `_COMPRESSION_CHILD_SQL` edge; the marker wins (a marked row off
+ *  a sealed parent is still a branch). Rows without any signal keep the old
+ *  nesting so marker-less payloads don't change shape. */
+const isCompressionContinuation = (session: SessionInfo, parent: SessionInfo): boolean =>
+  parent.end_reason === 'compression' && branchedFrom(session) == null
+
 /** Flat list with branch/fork sessions nested visually under their parent. */
 export function flattenSessionsWithBranches(
   sessions: readonly SessionInfo[],
@@ -49,7 +84,7 @@ export function flattenSessionsWithBranches(
 
     const parent = byVisibleId.get(parentId)
 
-    if (!parent || parent.id === session.id) {
+    if (!parent || parent.id === session.id || isCompressionContinuation(session, parent)) {
       continue
     }
 

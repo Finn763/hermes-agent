@@ -525,6 +525,14 @@ export interface SessionInfo {
    *  workspaces and not-yet-backfilled rows. */
   git_repo_root?: null | string
   ended_at: null | number
+  /** How the session ended (`'compression'` | `'branched'` | …). Straight off
+   *  the `sessions` row — present in list payloads (`s.*`), used to tell an
+   *  automatic compression continuation from a deliberate user branch. */
+  end_reason?: null | string
+  /** Raw `sessions.model_config` (JSON text or parsed object). Carries the
+   *  stable `._branched_from` / `._reset_from` edge markers the server
+   *  classifies on (`hermes_state_common._BRANCH_CHILD_SQL`). */
+  model_config?: null | Record<string, unknown> | string
   id: string
   /** Original root id of a compression chain, when this entry is a projected
    *  continuation tip. Stable across compressions — used as the durable id for
