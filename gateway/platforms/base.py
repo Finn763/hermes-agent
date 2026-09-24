@@ -4041,6 +4041,15 @@ class BasePlatformAdapter(ABC):
                     return
             except Exception as e:
                 logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)
+        # The busy-session handler above is this path's only yield before queueing, and the
+        # running turn can finish inside it: its cleanup releases the guard and performs the
+        # final pending-drain with nothing queued yet. Queueing the event now would strand it
+        # in _pending_messages/the debounce store with no owner task ever to drain it - PTB
+        # already acked the update, so the message would be lost silently (no log, no reply,
+        # #121393). The session went idle mid-route: start a fresh turn instead.
+        if session_key not in self._active_sessions:
+            event._gateway_accepted = self._start_session_processing(event, session_key)
+            return
         # Without a runner FIFO, do not merge a wake into an occupied human slot
         # (or collapse distinct wakes into one turn). Its caller can retry admission.
         if event.internal and session_key in self._pending_messages:
