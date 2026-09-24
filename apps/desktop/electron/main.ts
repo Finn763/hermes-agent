@@ -70,7 +70,7 @@ import {
   normalizeHermesHomeRoot,
   profileBackendParentEnv
 } from './backend-env'
-import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
+import { createBackendExitRecoveryLatch, drivePrimaryExitRecovery } from './backend-exit-recovery'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import { backendCommandMatches, createBackendOwnership, createBackendShutdownCoordinator } from './backend-ownership'
 import { canImportHermesCli, PROBE_TIMEOUT_MS, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
@@ -13243,17 +13243,30 @@ function scheduleUnexpectedPrimaryRecovery({
   error = null,
   ready = false
 }: { code?: number | null; error?: string | null; ready?: boolean; signal?: string | null } = {}) {
-  if (!ready) {
+  // `ready === false` means the child died BEFORE its ready transition. The exit
+  // handler cannot tell a user-driven start from the supervisor's own granted
+  // respawn, so the latch decides: with a claim held and the slot empty, this is
+  // that respawn dying pre-ready - which used to be refused before the latch was
+  // consulted and dropped in silence, leaving a no-engine window until relaunch
+  // (#118680). Re-arming spends the same bounded crash-loop budget as every other
+  // supervisor retry; exhaustion is surfaced by reportPrimaryRecoveryCrashLoop.
+  const outcome = drivePrimaryExitRecovery(primaryExitRecovery, ready, primaryRecoveryState())
+
+  if (outcome === 'crash-loop') {
+    reportPrimaryRecoveryCrashLoop(code, signal)
+
+    return true
+  }
+
+  if (outcome === 'ignore') {
     return false
   }
 
-  const claimed = primaryExitRecovery.claim(primaryRecoveryState())
-
-  if (!claimed) {
-    return reportPrimaryRecoveryCrashLoop(code, signal)
-  }
-
-  rememberLog('[supervisor] backend exit left no primary owner and no start in flight; respawning')
+  rememberLog(
+    ready
+      ? '[supervisor] backend exit left no primary owner and no start in flight; respawning'
+      : '[supervisor] recovery respawn died before ready; retrying within crash-loop budget'
+  )
   sendBackendExit({ code, signal, ...(error ? { error } : {}) })
   runPrimaryRecoverySpawn(code, signal)
 

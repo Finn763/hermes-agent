@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'vitest'
 
 import { createBackendConnectionState } from './backend-connection-state'
-import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
+import { createBackendExitRecoveryLatch, drivePrimaryExitRecovery } from './backend-exit-recovery'
 
 type Child = { pid: number }
 
@@ -151,4 +151,57 @@ test('a failed start that owns no recovery claim is not re-armed and spends no b
   clock += 1_000
   assert.equal(latch.claim(empty), false, 'fourth is the real budget exhaustion')
   assert.equal(latch.isCrashLooping(), true)
+})
+
+test('a granted respawn that dies BEFORE ready re-arms instead of latching forever (#118680)', () => {
+  let clock = 1_000
+  const latch = createBackendExitRecoveryLatch({ maxRespawns: 3, windowMs: 120_000, now: () => clock })
+  const empty = { hasCurrentOwner: false, hasPendingStart: false, intentionalTeardown: false }
+
+  // A ready backend dies on the empty slot: the supervisor claims and spawns.
+  assert.equal(drivePrimaryExitRecovery(latch, true, empty), 'respawn')
+
+  // The granted respawn is SIGTERMed before it ever reaches ready (sleep/wake on
+  // macOS). Before the fix the pre-ready exit was refused before the latch was
+  // consulted: the claim stayed held forever, nothing was logged, and the window
+  // ran with no engine until the user relaunched the app.
+  clock += 1_000
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'respawn', 'pre-ready death re-arms the claim')
+})
+
+test('pre-ready recovery spends the same crash-loop budget and reports exhaustion (#118680)', () => {
+  let clock = 1_000
+  const latch = createBackendExitRecoveryLatch({ maxRespawns: 3, windowMs: 120_000, now: () => clock })
+  const empty = { hasCurrentOwner: false, hasPendingStart: false, intentionalTeardown: false }
+
+  assert.equal(drivePrimaryExitRecovery(latch, true, empty), 'respawn')
+  clock += 1_000
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'respawn')
+  clock += 1_000
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'respawn')
+  clock += 1_000
+
+  // Budget spent: the supervisor must surface the explicit state (main.ts reports
+  // the crash loop) instead of dropping into a silent no-engine window.
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'crash-loop')
+  assert.equal(latch.isCrashLooping(), true)
+})
+
+test('a pre-ready exit the latch does not own stays with its caller (#118680)', () => {
+  const latch = createBackendExitRecoveryLatch()
+  const empty = { hasCurrentOwner: false, hasPendingStart: false, intentionalTeardown: false }
+
+  // Fresh latch: a user-driven start that dies pre-ready is not the supervisor's
+  // retry to take (its boot-error path owns the outcome).
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'ignore')
+
+  // Claimed, but a live owner / pending start / intentional teardown keeps the
+  // slot: refuse the retry, preserve the claim, and let that path recover.
+  assert.equal(drivePrimaryExitRecovery(latch, true, empty), 'respawn')
+  assert.equal(drivePrimaryExitRecovery(latch, false, { ...empty, intentionalTeardown: true }), 'ignore')
+  assert.equal(drivePrimaryExitRecovery(latch, false, { ...empty, hasPendingStart: true }), 'ignore')
+  assert.equal(drivePrimaryExitRecovery(latch, false, { ...empty, hasCurrentOwner: true }), 'ignore')
+
+  // None of those refusals consumed the claim: a clean pre-ready exit still retries.
+  assert.equal(drivePrimaryExitRecovery(latch, false, empty), 'respawn')
 })

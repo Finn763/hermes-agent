@@ -383,13 +383,37 @@ export function useGatewayBoot({
     }
 
     const attemptReconnect = async (manual?: { profile: string; activationEpoch: number }) => {
-      if (cancelled || primaryReauthError || reconnecting || gatewayOpen() || $gatewaySwitching.get()) {
+      if (cancelled || primaryReauthError || reconnecting || (gatewayOpen() && !manual) || $gatewaySwitching.get()) {
+        // A manual recovery click must never vanish without a trace: after an
+        // unclean backend death the gateway object can still report 'open', and
+        // the swallowed click used to leave a no-engine window until relaunch
+        // (#118680). The attempt below is allowed through for `manual`; any other
+        // guard that still refuses it explains itself here.
+        if (manual) {
+          console.warn('[gateway] manual reconnect skipped before redial', {
+            cancelled,
+            open: gatewayOpen(),
+            reauth: Boolean(primaryReauthError),
+            reconnecting,
+            switching: $gatewaySwitching.get()
+          })
+        }
+
         return
       }
 
       reconnecting = true
 
       try {
+        if (manual && gatewayOpen()) {
+          // The socket still reports open while its transport is gone (sleep/wake,
+          // unclean backend death). `connect()` no-ops on an OPEN readyState, so the
+          // user's redial would silently dial nothing: force the stale socket down
+          // first (#118680).
+          console.warn('[gateway] manual reconnect forcing a stale open socket down before redial')
+          gateway.close()
+        }
+
         // Drop a stale REMOTE backend cache before re-dialing. After sleep/wake a
         // remote backend can become unreachable, but it has no child process
         // whose 'exit' would clear the main process's cached descriptor — without

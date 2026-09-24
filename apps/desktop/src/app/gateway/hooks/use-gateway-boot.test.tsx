@@ -1994,6 +1994,39 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect($gatewayState.get()).toBe('open')
   })
 
+  it('a manual Reconnect now redials while the gateway still reports open (#118680)', async () => {
+    const desktop = fakeDesktop()
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+
+    render(<Harness />)
+    await flushAsync()
+
+    expect($gatewayState.get()).toBe('open')
+
+    const before = desktop.getConnection.mock.calls.length
+    const gateway = activeGateway()
+
+    expect(gateway).not.toBeNull()
+
+    // The reported race: after an unclean backend death the gateway object may
+    // not yet be closed, so the click arrives with connectionState still 'open'.
+    // That used to swallow the click entirely - no redial, no log, no engine
+    // until the whole app was relaunched.
+    const close = gateway!.close
+
+    gateway!.close = () => {}
+
+    try {
+      await reconnectGateway()
+    } finally {
+      gateway!.close = close
+    }
+
+    expect(desktop.revalidateConnection).toHaveBeenCalled()
+    expect(desktop.getConnection.mock.calls.length).toBeGreaterThan(before)
+  })
+
   it('FIX: post-boot ticket-mint boot-progress errors do not lock the UI', async () => {
     const desktop = fakeDesktop() as ReturnType<typeof fakeDesktop> & {
       emitBootProgress: (payload: Record<string, unknown>) => void

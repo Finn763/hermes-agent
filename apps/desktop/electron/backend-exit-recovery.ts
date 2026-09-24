@@ -30,6 +30,39 @@ export type BackendExitRecoveryOptions = {
   now?: () => number
 }
 
+export type PrimaryExitRecoveryOutcome = 'respawn' | 'crash-loop' | 'ignore'
+
+/**
+ * Drive the latch for one primary-child termination and decide the supervisor's move:
+ *
+ * - `'respawn'` — the supervisor owns a (re-)grant and must spawn;
+ * - `'crash-loop'` — the bounded window is spent, surface the explicit state;
+ * - `'ignore'` — no claim is owned (user-driven start, live owner, pending start,
+ *   intentional teardown): recovery stays with the caller/boot-error path.
+ *
+ * A granted respawn that dies BEFORE ready used to leave the latch `claimed`
+ * forever: `reset()` only runs on the ready transition, so the pre-ready exit
+ * was refused before the claim was even consulted and every later exit was
+ * dropped in silence — no respawn, no log, no engine until the app was relaunched
+ * (#118680, two overnight occurrences). The pre-ready branch now re-arms through
+ * `retryAfterFailedStart`, which spends the same bounded crash-loop budget as any
+ * other supervisor retry, so exhaustion surfaces as `'crash-loop'` instead of
+ * silence.
+ */
+export function drivePrimaryExitRecovery(
+  latch: ReturnType<typeof createBackendExitRecoveryLatch>,
+  ready: boolean,
+  state: BackendExitRecoveryState
+): PrimaryExitRecoveryOutcome {
+  const granted = ready ? latch.claim(state) : latch.retryAfterFailedStart(state)
+
+  if (granted) {
+    return 'respawn'
+  }
+
+  return latch.isCrashLooping() ? 'crash-loop' : 'ignore'
+}
+
 export function createBackendExitRecoveryLatch({
   maxRespawns = 3,
   windowMs = 120_000,
