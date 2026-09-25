@@ -141,7 +141,40 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=120)
 
-        assert "🗜️ 3" in text
+        assert "\U0001F5DC 3" in text
+
+    def test_status_bar_width_matches_vs16_aware_terminal(self):
+        """#120588: prompt_toolkit counts U+1F5DC U+FE0F as 1 cell while VS16-aware
+        terminals (foot, Ghostty, kitty) draw it 2 cells wide, so the diff renderer
+        overwrites the wrong cell and the timer shows impossible values (4m 63s).
+        Every fragment's prompt_toolkit width must equal its terminal width."""
+        def terminal_width(text):
+            cells = 0
+            for ch in text:
+                if ch == "\uFE0F":
+                    cells += 1  # VS16 promotes the base glyph to 2 cells
+                else:
+                    cells += cli_obj._status_bar_display_width(ch)
+            return cells
+
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+            compressions=3,
+        )
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert snapshot["compressions"] == 3
+        for styled in (False, True):
+            segs = cli_obj._status_bar_segments(snapshot, 120, None, False, styled=styled)
+            texts = [text for seg in segs for _, text in seg]
+            assert any("3" in text for text in texts)
+            for text in texts:
+                assert cli_obj._status_bar_display_width(text) == terminal_width(text), repr(text)
 
 
 
@@ -370,7 +403,7 @@ class TestStatusBarFieldConfig:
         text = self._cli_with_fields([])
         assert "claude-sonnet-4-20250514" in text
         assert "12.4K/200K" in text
-        assert "🗜️" in text
+        assert "\U0001F5DC" in text
 
 
 

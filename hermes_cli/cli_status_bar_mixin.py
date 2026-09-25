@@ -1072,7 +1072,11 @@ class CLIStatusBarMixin:
                     label = snapshot.get(key) or ""
                     if label:
                         add(name, _DIM, f"{glyph} {label}")
-            add_count("compressions", "compressions", "🗜️", self._compression_count_style)
+            # No VS16 after the clamp (#120588): prompt_toolkit counts U+1F5DC U+FE0F as
+            # 1 cell while VS16-aware terminals draw 2, so the diff renderer overwrote the
+            # wrong cell and the timer showed impossible values (4m 63s). Bare U+1F5DC
+            # is 1 cell on both sides.
+            add_count("compressions", "compressions", "\U0001F5DC", self._compression_count_style)
             add_count("bg_tasks", "active_background_tasks", "▶")
             add_count("bg_processes", "active_background_processes", "⚙")
             add_count("bg_subagents", "active_background_subagents", "⛓")
