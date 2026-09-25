@@ -2051,7 +2051,13 @@ class GatewayShutdownMixin:
         # Stuck-loop counter: sessions active across 3 consecutive restarts are auto-suspended next boot.
         if ctx.active_agents:
             self._increment_restart_failure_counts(set(ctx.active_agents.keys()))
-        if self._restart_requested and self._restart_command_source is None:
+        # A signal stop (systemd/docker restart) is revived by the supervisor (exit 1 +
+        # gateway_state=running below), so it owes the next boot the online notice too —
+        # otherwise the shutdown goodbye never gets its hello (#121937).
+        signal_revive_expected = (
+            getattr(self, "_signal_initiated_shutdown", False) and not self._restart_requested
+        )
+        if (self._restart_requested and self._restart_command_source is None) or signal_revive_expected:
             with _log_suppressed(logging.DEBUG, "Failed to write planned restart notification marker: %s"):
                 atomic_json_write(
                     _planned_restart_notification_path(),
