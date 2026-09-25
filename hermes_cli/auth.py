@@ -2061,7 +2061,30 @@ def _external_process_spec(
                or str(getattr(profile, "process_command", "") or ""))
     raw_args = os.getenv(args_env_var, "").strip() if args_env_var else ""
     args = shlex.split(raw_args) if raw_args else list(getattr(profile, "process_args", ()) or [])
-    return command, args, base_url, shutil.which(command) if command else None, command_env_vars
+    return command, args, base_url, _resolve_external_process_command(command), command_env_vars
+
+
+def _resolve_external_process_command(command: str) -> Optional[str]:
+    """Resolve an external-process CLI beyond the ambient PATH.
+
+    Desktop SSH backends run under a thin non-login PATH that omits user install dirs
+    (``~/.local/bin``); a bare ``shutil.which`` then hides an otherwise usable CLI, the provider
+    status reads unconfigured, and the model picker drops the row (#120887). Probe the known
+    user-local bin dirs after PATH so backend-process discovery matches login-shell discovery.
+    """
+    # ponytail: known-dir fallback only (~/.local/bin); no login-shell probe — spawning a shell
+    # per status call would re-create the cold-start stall copilot_auth.py avoids.
+    if not command:
+        return None
+    try:
+        from hermes_platform.resolver import locate_command
+        from hermes_platform.resolver.known_dirs import user_local_bin
+        present = locate_command(command, known_dirs=user_local_bin()).present
+        hit = next((c.value for c in present), None)
+        return os.path.normpath(hit) if hit else None
+    except Exception as exc:
+        logger.debug("External-process known-dir resolution failed for %s: %s", command, exc)
+        return None
 
 
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:

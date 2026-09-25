@@ -14,6 +14,7 @@ Covers the copilot-acp fix class:
 """
 
 import os
+import shutil
 
 import pytest
 
@@ -55,6 +56,53 @@ def test_get_auth_status_dispatches_external_process_by_auth_type(
     assert status.get("configured") is True
     assert status.get("resolved_command") == str(fake)
     assert "auth_verified" in status
+
+
+def test_external_process_resolves_user_local_bin_off_path(tmp_path, monkeypatch, _clean_copilot_env):
+    # Desktop SSH backends run with a thin non-login PATH that omits
+    # ~/.local/bin (#120887): a user-installed CLI there must still count
+    # as configured so the model picker keeps the provider row.
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    fake = bindir / "fakey-cli"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HERMES_COPILOT_ACP_COMMAND", "fakey-cli")
+    emptydir = tmp_path / "emptybin"
+    emptydir.mkdir()
+    monkeypatch.setenv("PATH", str(emptydir))
+    assert shutil.which("fakey-cli") is None  # precondition: thin PATH hides it
+
+    status = get_external_process_provider_status("copilot-acp")
+
+    assert status.get("configured") is True
+    assert status.get("resolved_command") == str(fake)
+
+
+def test_external_process_credentials_resolve_user_local_bin_off_path(
+    tmp_path, monkeypatch, _clean_copilot_env
+):
+    # Same thin-PATH backend: inference credential resolution must find the
+    # CLI too instead of raising missing_external_process_cli (#120887).
+    from hermes_cli.auth import resolve_external_process_provider_credentials
+
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    fake = bindir / "fakey-cli"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HERMES_COPILOT_ACP_COMMAND", "fakey-cli")
+    emptydir = tmp_path / "emptybin"
+    emptydir.mkdir()
+    monkeypatch.setenv("PATH", str(emptydir))
+
+    creds = resolve_external_process_provider_credentials("copilot-acp")
+
+    assert creds.get("command") == str(fake)
 
 
 def test_external_process_status_rejects_wrong_auth_type():

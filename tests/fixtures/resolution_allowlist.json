@@ -125,11 +125,6 @@
     "kind": "bare_which"
   },
   {
-    "path": "hermes_cli/auth.py",
-    "symbol": "_external_process_spec",
-    "kind": "bare_which"
-  },
-  {
     "path": "hermes_cli/cli_session_mixin.py",
     "symbol": "CLISessionMixin._clear_terminal_on_exit",
     "kind": "bare_which"
