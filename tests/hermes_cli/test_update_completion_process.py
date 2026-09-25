@@ -38,9 +38,9 @@ def transition(tmp_path):
     # Deliberately incompatible: a cached OLD_API-only PM cannot prepare this tree.
     (root / "pm/__init__.py").write_text(
         "from hermes_cli.probe import event\n"
-        "def sync_venv(*, explicit, project_root, evict_incompatible_plugins):\n"
+        "def sync_venv(extras=None, *, explicit, project_root, evict_incompatible_plugins):\n"
         "    assert explicit and evict_incompatible_plugins\n"
-        "    event('prepare')\n"
+        "    event('prepare', extras=extras)\n"
     )
     (root / "pm/receipt.py").write_text(
         "from contextlib import nullcontext\n"
@@ -77,6 +77,9 @@ def transition(tmp_path):
         "from hermes_cli.probe import event\n"
         "publish_launchers = lambda root: event('launchers')\n"
         "refuse_foreign_owned_venv = lambda root: None\n"
+        # Stands in for the configured-platform extras read; the completion leg must pass
+        # whatever it returns into the sync (proved by the 'prepare' event's extras).
+        "update_sync_extras = lambda root, legacy=None: ['feishu']\n"
         "from pathlib import Path\n"
         "import os\n"
         "def arm_completion(root):\n"
@@ -202,6 +205,9 @@ def test_old_process_new_git_tree_completes_in_fresh_python(transition, tmp_path
     by_name = {event["name"]: event for event in events}
     assert by_name["activate"]["pid"] == by_name["build"]["pid"]
     assert by_name["prepare"]["pid"] != by_name["build"]["pid"]
+    assert by_name["prepare"]["extras"] == ["feishu"], (
+        "the completion leg must carry the configured platforms' extras into the dependency sync"
+    )
     assert Path(by_name["build"]["python"]).is_relative_to(root.parent / "selected-python")
     assert by_name["build"]["pid"] == by_name["maintenance"]["pid"] == by_name["restart"]["pid"]
     assert by_name["maintenance"]["snapshots"] == {"work": "work-before"}
@@ -225,7 +231,9 @@ def test_missing_child_result_fails_boundary_receipt_and_releases_lock(transitio
 
     def complete(args, gateway_mode):
         update_receipt.begin_update_receipt()
-        request["receipt"] = update_receipt._current.get().data
+        state = update_receipt._current.get()
+        assert state is not None
+        request["receipt"] = state.data
         update_cmd._complete_source_update(request)
 
     monkeypatch.setattr(update_cmd, "_cmd_update_impl", complete)
@@ -233,6 +241,7 @@ def test_missing_child_result_fails_boundary_receipt_and_releases_lock(transitio
         main.cmd_update(SimpleNamespace(gateway=True))
     assert error.value.code == (code or 1)
     receipt = update_receipt.read_latest_receipt()
+    assert receipt is not None
     assert receipt["outcome"] == "failed"
     assert receipt["exit_code"] == (code or 1)
     assert receipt["update_id"] == request["receipt"]["update_id"]
@@ -304,7 +313,9 @@ def test_interrupt_after_child_success_demotes_gateway_marker_at_boundary(transi
 
     def complete(args, gateway_mode):
         update_receipt.begin_update_receipt()
-        request["receipt"] = update_receipt._current.get().data
+        state = update_receipt._current.get()
+        assert state is not None
+        request["receipt"] = state.data
         monkeypatch.setattr(subprocess, "Popen", capture_child)
         update_cmd._complete_source_update(request)
 
@@ -319,6 +330,7 @@ def test_interrupt_after_child_success_demotes_gateway_marker_at_boundary(transi
     if cleanup_failure:
         assert error.value.__cause__ is cleanup_error
     receipt = update_receipt.read_latest_receipt()
+    assert receipt is not None
     assert receipt["update_id"] == request["receipt"]["update_id"]
     assert receipt["outcome"] == "failed"
     assert receipt["exit_code"] == 1
@@ -381,7 +393,9 @@ def test_prepare_failure_preserves_correlated_pm_receipt(transition, monkeypatch
 
     def complete(args, gateway_mode):
         update_receipt.begin_update_receipt()
-        request["receipt"] = update_receipt._current.get().data
+        state = update_receipt._current.get()
+        assert state is not None
+        request["receipt"] = state.data
         update_cmd._complete_source_update(request)
 
     monkeypatch.setattr(update_cmd, "_cmd_update_impl", complete)
@@ -389,6 +403,7 @@ def test_prepare_failure_preserves_correlated_pm_receipt(transition, monkeypatch
         main.cmd_update(SimpleNamespace(gateway=True))
     assert error.value.code == 1
     receipt = update_receipt.read_latest_receipt()
+    assert receipt is not None
     assert receipt["update_id"] == request["receipt"]["update_id"]
     assert receipt["pm_sync_outcome"] == "refused"
     assert receipt["pm_refusal"] == {"reason": "dependency refused"}

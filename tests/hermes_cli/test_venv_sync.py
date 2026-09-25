@@ -100,6 +100,154 @@ class TestCheckoutSync:
         assert calls == [(root, True), (root, True)]
 
 
+class TestConfiguredPlatformExtras:
+    def test_source_update_dep_sync_carries_configured_platform_extra(self, tmp_path, monkeypatch):
+        """#122535: the source-update dependency sync must carry the declared extra of a
+        CONFIGURED platform. The recorded ledger unions, but an install whose SDK only ever
+        arrived through the shrinking ``[all]`` selection (or a hand install) recorded it
+        nowhere, so the sync rebuilds without it and the channel is dead after restart."""
+        import pm
+        import pm.features
+        from gateway.config import Platform
+
+        calls = []
+        monkeypatch.setattr(pm, "sync_venv", lambda *args, **kwargs: calls.append((args, kwargs)))
+        monkeypatch.setattr(venv_sync, "refuse_foreign_owned_venv", lambda root: None)
+        monkeypatch.setattr(venv_sync, "collect_superseded_generations", lambda root: None)
+        # A source install: no frozen enabled-features.json beside the byte store.
+        store = tmp_path / "tools"
+        store.mkdir()
+        monkeypatch.setattr("pm.paths.store_root", lambda: store)
+        # An established PM install: runtime facts exist, so no legacy selection runs.
+        facts = tmp_path / "facts.json"
+        facts.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr("pm.environments.runtime_facts_path", lambda root: facts)
+        monkeypatch.setattr("pm.client.ensure_tools_for_sync", lambda: None)
+
+        class _Config:
+            def get_connected_platforms(self):
+                return [Platform.FEISHU]
+
+        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: _Config())
+
+        venv_sync._sync_source_dependencies(REPO_ROOT, arm=False)
+
+        assert calls, "the source-update dependency sync never ran"
+        args, kwargs = calls[0]
+        extras = args[0] if args else kwargs.get("extras")
+        assert "feishu" in (extras or []), (
+            "a configured Feishu platform must reach the source-update dependency sync "
+            f"as the 'feishu' extra, got {extras!r} -- without it the rebuilt venv has no "
+            "lark-oapi and the channel fails to load after the restart"
+        )
+
+    def test_frozen_bundle_drops_configured_platform_extras_the_sync_would_refuse(self, tmp_path, monkeypatch):
+        """#122535: a frozen bundle (lazy installs off) must not fail the update for a
+        configured backend whose extra sits outside ``enabled-features.json`` -- the extras
+        handed to the sync have to be ones the real policy accepts."""
+        import pm.install
+        from gateway.config import Platform
+
+        store = tmp_path / "tools"
+        store.mkdir()
+        monkeypatch.setattr("pm.paths.store_root", lambda: store)
+        pm.features.write_features(["all", "slack"], store.parent)
+        monkeypatch.setattr(pm.install, "lazy_installs_allowed", lambda: False)
+
+        class _Config:
+            def get_connected_platforms(self):
+                return [Platform.FEISHU, Platform.SLACK]
+
+        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: _Config())
+
+        extras = venv_sync.configured_platform_extras(REPO_ROOT)
+
+        assert "feishu" not in extras, "a frozen bundle cannot carry an extra it does not ship"
+        assert "slack" in extras, "an extra the bundle does ship must still ride along"
+        pm.install._feature_policy(extras, repair=False)  # the update sync accepts these
+
+    def test_source_install_without_a_feature_file_carries_the_configured_extra(self, tmp_path, monkeypatch):
+        """No frozen declaration (a source install): the configured platform's extra rides along."""
+        from gateway.config import Platform
+
+        store = tmp_path / "tools"
+        store.mkdir()
+        monkeypatch.setattr("pm.paths.store_root", lambda: store)
+
+        class _Config:
+            def get_connected_platforms(self):
+                return [Platform.FEISHU]
+
+        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: _Config())
+
+        assert venv_sync.configured_platform_extras(REPO_ROOT) == ["feishu"]
+
+
+class TestUpdateTakeoverCarriesConfiguredPlatformExtras:
+    """The takeover leg: `hermes update` hands the configured platforms to the sync too."""
+
+    def _wire(self, tmp_path, monkeypatch, *, venv_current=False):
+        from contextlib import nullcontext
+        from gateway.config import Platform
+
+        root = tmp_path / "co"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            "[project]\nname='x'\n[project.optional-dependencies]\nfeishu = ['lark-oapi==1.6.8']\n",
+            encoding="utf-8")
+        state = tmp_path / "installs"
+        state.mkdir()
+        store = tmp_path / "tools"
+        store.mkdir()
+        # No enabled-features.json here: a source install unions extras freely.
+        monkeypatch.setattr("pm.paths.store_root", lambda: store)
+        monkeypatch.setattr("pm.environments.install_state_dir", lambda root: state)
+        monkeypatch.setattr("pm.environments.runtime_facts_path", lambda root: state / "facts.json")
+        monkeypatch.setattr("pm.environments.activation_environment", lambda root: {"ACTIVE": str(root)})
+        monkeypatch.setattr("pm.extras.legacy_selection", lambda root: None)
+        monkeypatch.setattr("pm.client.ensure_tools_for_sync", lambda: None)
+        monkeypatch.setattr("pm.client.venv_is_current", lambda *, project_root: venv_current)
+        monkeypatch.setattr("pm.receipt.worker_context", lambda correlation: nullcontext())
+        monkeypatch.setattr("pm.receipt.last_for_update", lambda update_id: {"update_id": update_id})
+        monkeypatch.setattr("hermes_cli.update_stage.ensure_panel", lambda root: None)
+        monkeypatch.setattr("hermes_cli.update_stage.publish_stage", lambda message: None)
+        monkeypatch.setattr("hermes_cli.venv_sync.publish_launchers", lambda root: None)
+        monkeypatch.setattr("hermes_cli._launchers.resolve_store_python", lambda root: tmp_path / "python.exe")
+
+        class _Config:
+            def get_connected_platforms(self):
+                return [Platform.FEISHU]
+
+        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: _Config())
+
+        syncs = []
+        monkeypatch.setattr("pm.client.sync_venv", lambda *args, **kwargs: syncs.append((args, kwargs)))
+        return root, state, syncs
+
+    def test_takeover_preparation_carries_configured_platform_extras(self, tmp_path, monkeypatch):
+        from hermes_cli import _update_takeover
+
+        root, _state, syncs = self._wire(tmp_path, monkeypatch)
+
+        _update_takeover.prepare({"root": str(root), "update_id": "u" * 32})
+
+        assert syncs, "the takeover never synced dependencies"
+        assert syncs[0][0][0] == ["feishu"], syncs[0]
+        assert syncs[0][1]["repair"] is False
+
+    def test_repair_takeover_adds_no_features(self, tmp_path, monkeypatch):
+        """Repair restores the recorded graph; carrying extras into it would change the graph."""
+        from hermes_cli import _update_takeover
+
+        root, state, syncs = self._wire(tmp_path, monkeypatch, venv_current=True)
+        (state / ".repair-incomplete").write_text("{}", encoding="utf-8")
+
+        _update_takeover.prepare({"root": str(root), "update_id": "u" * 32})
+
+        assert syncs and syncs[0][0] == (None,), syncs[0]
+        assert syncs[0][1]["repair"] is True
+
+
 class TestSealedTrees:
     def test_a_sealed_tree_is_a_clean_noop(self, tmp_path, monkeypatch):
         """The desktop payload and nix bundle must not fail, must not sync."""

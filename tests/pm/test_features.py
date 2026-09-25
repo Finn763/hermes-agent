@@ -59,6 +59,29 @@ def test_sync_venv_refuses_outside_frozen_extras(rooted, monkeypatch):
     assert "hermes pm install" in saved["steps"][-1]["detail"]
 
 
+def test_carryable_extras_drops_exactly_what_a_sync_would_refuse(rooted, monkeypatch):
+    """`venv_sync.configured_platform_extras` filters with this. Anything it keeps must be
+    accepted by the sync it feeds, and anything it drops must be one the sync would refuse --
+    otherwise a configured platform turns a working update into a hard InstallError (#122535)."""
+    import pm.install as ensure_mod
+    from pm.package import InstallError
+
+    feats.write_features(["web", "acp"])
+    monkeypatch.setattr(ensure_mod, "lazy_installs_allowed", lambda: False)
+
+    for requested in (["web"], ["slack"], ["web", "slack"], ["web", "acp"], [], ["matrix"]):
+        kept = ensure_mod.carryable_extras(requested)
+        assert kept == sorted(set(requested) & {"web", "acp"}), (requested, kept)
+        ensure_mod._feature_policy(kept, repair=False)  # what we keep, the sync accepts
+        if kept != sorted(set(requested)):
+            with pytest.raises(InstallError):
+                ensure_mod._feature_policy(requested, repair=False)
+
+    # Lazy installs ON: the file is a baseline, so nothing is dropped.
+    monkeypatch.setattr(ensure_mod, "lazy_installs_allowed", lambda: True)
+    assert ensure_mod.carryable_extras(["slack", "web"]) == ["slack", "web"]
+
+
 def test_sync_venv_allows_frozen_extras_when_lazy_off(rooted, monkeypatch):
     feats.write_features(["web"])
 

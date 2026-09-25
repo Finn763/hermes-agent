@@ -564,31 +564,55 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
     return _runtime_state_matches(fact, stamp, project_root=root)
 
 
+def _carriable_extra(extra: str, *, frozen: Optional[list[str]]) -> bool:
+    """May this extra join the environment right now? The policy predicate, as a question."""
+    from pm.extras import extra_supported
+
+    return extra_supported(extra, importable=lambda _anchor: False) and (frozen is None or extra in frozen)
+
+
+def _frozen_features(shipped: Optional[list[str]], *, repair: bool) -> Optional[list[str]]:
+    """The frozen feature set this sync must stay inside, or None when extras union freely."""
+    # Without a frozen declaration, explicit source setup needs no policy
+    # read: the config loader initializes/chmods unrelated user state.
+    if shipped is not None and not repair and lazy_installs_allowed():
+        return None
+    return shipped
+
+
+def carryable_extras(extras: Optional[list[str]], *, repair: bool = False) -> list[str]:
+    """The requested extras this platform and the frozen feature set would accept.
+
+    ``_feature_policy`` refuses; this filters with the same two gates, for a caller
+    supplying extras on a configured backend's behalf (the update's configured-platform
+    extras, #122535): what a sync would refuse is dropped instead of turning a working
+    update into a hard failure -- and refused all the same if the caller passes it anyway.
+    """
+    from pm.features import read_features
+
+    frozen = _frozen_features(read_features(), repair=repair)
+    return sorted(extra for extra in set(extras or []) if _carriable_extra(extra, frozen=frozen))
+
+
 def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:
     """Refuse extras this platform or a frozen bundle cannot carry; return (shipped, frozen)."""
     from pm.features import read_features
 
+    shipped = read_features()
+    frozen = _frozen_features(shipped, repair=repair)
     if extras:
-        from pm.extras import extra_supported
-        unsupported = [extra for extra in extras
-                       if not extra_supported(extra, importable=lambda _: False)]
+        unsupported = [extra for extra in extras if not _carriable_extra(extra, frozen=None)]
         if unsupported:
             raise InstallError("venv", f"extras {unsupported} are not supported by this Python/platform",
                                "choose a supported provider; no dependency environment was changed")
-    shipped = read_features()
-    frozen = shipped
-    # Without a frozen declaration, explicit source setup needs no policy
-    # read: the config loader initializes/chmods unrelated user state.
-    if frozen is not None and not repair and lazy_installs_allowed():
-        frozen = None
-    if frozen is not None and extras:
-        outside = sorted(set(extras) - set(frozen))
-        if outside:
-            raise _refuse_lazy(
-                "venv",
-                f"extras {outside} are outside this bundle's frozen feature "
-                "set (security.allow_lazy_installs is false)",
-            )
+        if frozen is not None:
+            outside = sorted(set(extras) - set(frozen))
+            if outside:
+                raise _refuse_lazy(
+                    "venv",
+                    f"extras {outside} are outside this bundle's frozen feature "
+                    "set (security.allow_lazy_installs is false)",
+                )
     return shipped, frozen
 
 
