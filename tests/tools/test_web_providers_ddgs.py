@@ -8,6 +8,7 @@ Covers:
 - _is_backend_available("ddgs") / _get_backend() integration
 - web_extract returns a search-only error when ddgs is active
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,9 @@ import pytest
 from tests.tools.conftest import register_all_web_providers
 
 
-def _install_fake_ddgs(monkeypatch, *, text_results=None, text_raises=None, text_sleep=None):
+def _install_fake_ddgs(
+    monkeypatch, *, text_results=None, text_raises=None, text_sleep=None
+):
     """Install a stub ``ddgs`` module in sys.modules for the duration of a test.
 
     ``text_results``: iterable of dicts to yield from DDGS().text(...).
@@ -37,16 +40,19 @@ def _install_fake_ddgs(monkeypatch, *, text_results=None, text_raises=None, text
             # Accept timeout= (and any other constructor kwargs) — the provider
             # now passes DDGS(timeout=10).
             pass
+
         def __enter__(self):
             return self
+
         def __exit__(self, *_a):
             return False
+
         def text(self, query, max_results=5):
             if text_sleep is not None:
                 _time.sleep(text_sleep)
             if text_raises is not None:
                 raise text_raises
-            for hit in (text_results or []):
+            for hit in text_results or []:
                 yield hit
 
     fake.DDGS = _FakeDDGS
@@ -80,19 +86,22 @@ class TestDDGSProviderIsConfigured:
         # Drop any cached ``plugins.web.ddgs.provider`` so is_configured re-imports ddgs fresh
         monkeypatch.delitem(sys.modules, "plugins.web.ddgs.provider", raising=False)
         from plugins.web.ddgs.provider import DDGSWebSearchProvider
+
         assert DDGSWebSearchProvider().is_available() is True
-
-
 
 
 class TestDDGSProviderSearch:
     def test_happy_path_normalizes_results(self, monkeypatch):
-        _install_fake_ddgs(monkeypatch, text_results=[
-            {"title": "A", "href": "https://a.example.com", "body": "desc A"},
-            {"title": "B", "href": "https://b.example.com", "body": "desc B"},
-            {"title": "C", "href": "https://c.example.com", "body": "desc C"},
-        ])
+        _install_fake_ddgs(
+            monkeypatch,
+            text_results=[
+                {"title": "A", "href": "https://a.example.com", "body": "desc A"},
+                {"title": "B", "href": "https://b.example.com", "body": "desc B"},
+                {"title": "C", "href": "https://c.example.com", "body": "desc C"},
+            ],
+        )
         import plugins.web.ddgs.provider as prov
+
         _force_inprocess_search(monkeypatch, prov)
 
         result = prov.DDGSWebSearchProvider().search("q", limit=5)
@@ -100,13 +109,18 @@ class TestDDGSProviderSearch:
         assert result["success"] is True
         web = result["data"]["web"]
         assert len(web) == 3
-        assert web[0] == {"title": "A", "url": "https://a.example.com", "description": "desc A", "position": 1}
+        assert web[0] == {
+            "title": "A",
+            "url": "https://a.example.com",
+            "description": "desc A",
+            "position": 1,
+        }
         assert web[2]["position"] == 3
-
 
     def test_empty_results(self, monkeypatch):
         _install_fake_ddgs(monkeypatch, text_results=[])
         import plugins.web.ddgs.provider as prov
+
         _force_inprocess_search(monkeypatch, prov)
 
         result = prov.DDGSWebSearchProvider().search("nothing", limit=5)
@@ -142,6 +156,7 @@ class TestDDGSProviderSearch:
             text_results=[{"title": "T", "href": "https://e.com", "body": "B"}],
         )
         import plugins.web.ddgs.provider as prov
+
         _force_inprocess_search(monkeypatch, prov)
 
         result = prov.DDGSWebSearchProvider().search("q", limit=5)
@@ -182,7 +197,9 @@ class TestDDGSProcessIsolation:
 
         assert result["success"] is False
         assert "timed out" in result["error"].lower()
-        assert elapsed < 5.0, f"GIL-hold search did not time out promptly ({elapsed:.1f}s)"
+        assert elapsed < 5.0, (
+            f"GIL-hold search did not time out promptly ({elapsed:.1f}s)"
+        )
         _assert_worker_reaped(prov)
 
     def test_interrupt_terminates_worker_promptly(self, monkeypatch):
@@ -211,7 +228,6 @@ class TestDDGSProcessIsolation:
         assert elapsed < 5.0, f"interrupt did not return promptly ({elapsed:.1f}s)"
         _assert_worker_reaped(prov)
 
-
     def test_no_orphan_after_successful_search(self, monkeypatch):
         _install_fake_ddgs(monkeypatch)
         import plugins.web.ddgs.provider as prov
@@ -222,6 +238,7 @@ class TestDDGSProcessIsolation:
         result = prov.DDGSWebSearchProvider().search("q", limit=5)
         assert result["success"] is True
         _assert_worker_reaped(prov)
+
 
 # ---------------------------------------------------------------------------
 # Frozen launcher (#123399)
@@ -288,6 +305,11 @@ class TestDDGSFrozenLauncher:
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
         monkeypatch.setattr(prov, "_test_hook", "empty", raising=True)
+        # Local-dev guard: _sanitize_subprocess_env probes the real install
+        # bin dir, which the home_io_guard refuses. Neutralize it (CI uses an
+        # isolated home, so this is a local-only shim).
+        import tools.environments.local as local_env
+        monkeypatch.setattr(local_env, "_resolve_hermes_bin_dir", lambda: None)
 
         emulator = _FrozenExeEmulator(prov.subprocess.Popen, sys.executable)
         monkeypatch.setattr(prov.subprocess, "Popen", emulator)
@@ -305,15 +327,23 @@ class TestDDGSFrozenLauncher:
 class TestDDGSBackendWiring:
     def test_is_backend_available_true_when_package_importable(self, monkeypatch):
         from tools import web_tools
+
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         assert web_tools._is_backend_available("ddgs") is True
 
-
     def test_auto_detect_picks_ddgs_as_last_resort(self, monkeypatch):
         from tools import web_tools
+
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
-        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "PARALLEL_API_KEY",
-                    "EXA_API_KEY", "SEARXNG_URL", "BRAVE_SEARCH_API_KEY", "KEENABLE_API_KEY"):
+        for key in (
+            "FIRECRAWL_API_KEY",
+            "FIRECRAWL_API_URL",
+            "PARALLEL_API_KEY",
+            "EXA_API_KEY",
+            "SEARXNG_URL",
+            "BRAVE_SEARCH_API_KEY",
+            "KEENABLE_API_KEY",
+        ):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
@@ -321,6 +351,7 @@ class TestDDGSBackendWiring:
 
     def test_check_web_api_key_true_when_ddgs_configured(self, monkeypatch):
         from tools import web_tools
+
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         assert web_tools.check_web_api_key() is True
@@ -339,6 +370,7 @@ class TestDDGSSearchOnlyErrors:
         self._register_providers()
         yield
         from agent.web_search_registry import _reset_for_tests
+
         _reset_for_tests()
 
     def test_web_extract_returns_search_only_error(self, monkeypatch):
@@ -348,11 +380,14 @@ class TestDDGSSearchOnlyErrors:
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+
         async def _allow_ssrf(_url: str) -> bool:
             return True
 
         monkeypatch.setattr(web_tools, "async_is_safe_url", _allow_ssrf)
-        monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False, raising=False)
+        monkeypatch.setattr(
+            "tools.interrupt.is_interrupted", lambda: False, raising=False
+        )
 
         result_str = asyncio.get_event_loop().run_until_complete(
             web_tools.web_extract_tool(["https://example.com"])
@@ -360,4 +395,6 @@ class TestDDGSSearchOnlyErrors:
         result = json.loads(result_str)
         assert result["success"] is False
         assert "search-only" in result["error"].lower()
-        assert "duckduckgo" in result["error"].lower() or "ddgs" in result["error"].lower()
+        assert (
+            "duckduckgo" in result["error"].lower() or "ddgs" in result["error"].lower()
+        )
