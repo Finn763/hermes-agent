@@ -3076,6 +3076,39 @@ class TestAuxiliaryAuthRefreshRetry:
         assert model is None
 
 
+    def test_refresh_provider_credentials_copilot_skips_when_not_configured(self):
+        """``GITHUB_TOKEN=ghp_*`` in the env but no copilot provider configured
+        should not call ``resolve_copilot_token`` (which logs a WARNING for
+        classic PATs and a noisy ValueError for any other unsupported prefix);
+        the same explicit-config gate that already protects
+        ``_resolve_api_key_provider`` must also protect this refresh path
+        (#114740, #35946)."""
+        with (
+            patch("hermes_cli.auth.is_provider_explicitly_configured", return_value=False),
+            patch("hermes_cli.copilot_auth.resolve_copilot_token") as mock_resolve,
+        ):
+            from agent.auxiliary_client import _refresh_provider_credentials
+
+            assert _refresh_provider_credentials("copilot") is False
+
+        mock_resolve.assert_not_called()
+
+
+    def test_refresh_provider_credentials_copilot_runs_when_configured(self):
+        """Counter-test: when the user has actually configured copilot, the
+        refresh path must still consult ``resolve_copilot_token`` and return
+        its result -- the gate must not blanket-skip on the configured path."""
+        with (
+            patch("hermes_cli.auth.is_provider_explicitly_configured", return_value=True),
+            patch("hermes_cli.copilot_auth.resolve_copilot_token", return_value=("", "")) as mock_resolve,
+        ):
+            from agent.auxiliary_client import _refresh_provider_credentials
+
+            assert _refresh_provider_credentials("copilot") is False  # empty token -> False
+
+        mock_resolve.assert_called_once()
+
+
 
 class TestAuxiliaryPoolRotationRetry:
     def test_call_llm_rotates_explicit_codex_pool_on_429(self):

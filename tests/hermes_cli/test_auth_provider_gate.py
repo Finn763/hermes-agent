@@ -52,6 +52,31 @@ def test_ambient_pool_source_does_not_count_as_explicit(tmp_path, monkeypatch):
     assert is_provider_explicitly_configured("copilot") is False
 
 
+def test_ambient_gh_cli_env_tokens_do_not_count_as_explicit_for_copilot(tmp_path, monkeypatch):
+    """GH_TOKEN / GITHUB_TOKEN are exported by the gh CLI and by every GitHub Actions run, so
+    either one alone must not read as a configured copilot — that gate is what keeps an ambient
+    classic PAT from reaching resolve_copilot_token() and logging a WARNING (#35946). The
+    Hermes-scoped COPILOT_GITHUB_TOKEN still counts."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}, "active_provider": None})
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+
+    for ambient in ("GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.setenv(ambient, "gho_16C7e42F292c6912E7710c838347Ae178B4a")
+        assert is_provider_explicitly_configured("copilot") is False
+        monkeypatch.delenv(ambient)
+
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_16C7e42F292c6912E7710c838347Ae178B4a")
+    assert is_provider_explicitly_configured("copilot") is True
+
+    # The namespaced var must still win when an ambient gh export sits next to it: the shared-set
+    # change drops the row only when NOTHING Hermes-scoped names copilot.
+    monkeypatch.setenv("GITHUB_TOKEN", "ghu_ambientSiblingToken1234")
+    assert is_provider_explicitly_configured("copilot") is True
+
+
 def test_vertex_adc_counts_as_explicit_when_config_present(tmp_path, monkeypatch):
     """A keyless Vertex provider is explicitly configured when the user pointed
     Hermes at it (VERTEX_PROJECT_ID / vertex.project_id / VERTEX_CREDENTIALS_PATH),

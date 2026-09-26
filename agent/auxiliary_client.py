@@ -3744,6 +3744,13 @@ def _creds_have_api_key(creds: Dict[str, Any]) -> bool:
 
 
 def _refresh_copilot_credentials() -> bool:
+    # Explicit-config gate: ambient gh-CLI credentials must not silently trigger a token resolve
+    # (which logs a WARNING for classic PATs and a noisy ValueError for any other unsupported
+    # prefix); match the same gate that ``_resolve_api_key_provider`` already uses (#114740, #35946).
+    with contextlib.suppress(ImportError):
+        from hermes_cli.auth import is_provider_explicitly_configured
+        if not is_provider_explicitly_configured("copilot"):
+            return False
     from hermes_cli.copilot_auth import _jwt_cache, _token_fingerprint, exchange_copilot_token, resolve_copilot_token
     raw_token, _source = resolve_copilot_token()
     if not str(raw_token or "").strip():

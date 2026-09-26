@@ -1118,7 +1118,9 @@ def _explicit_pool_entry_present(normalized: str) -> bool:
 
 
 # Set by Claude Code itself, not by the user explicitly configuring anthropic in Hermes.
-_IMPLICIT_ENV_VARS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# GH_TOKEN / GITHUB_TOKEN are the same shape for copilot: the gh CLI and every GitHub Actions run
+# export them, and credential_pool already classifies both as borrowed copilot sources.
+_IMPLICIT_ENV_VARS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"})
 _EXPLICIT_POOL_SOURCES = frozenset({"device_code", "loopback_pkce", "hermes_pkce", "manual"})
 _VERTEX_PROVIDER_IDS = ("vertex", "google-vertex", "vertex-ai", "gcp-vertex", "vertexai")
 
