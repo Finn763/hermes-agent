@@ -89,6 +89,25 @@ def _terminate_and_reap(proc: Optional[subprocess.Popen], *, grace: float = _TER
         logger.debug("DDGS worker reap error: %s", exc)
 
 
+def _is_frozen_app() -> bool:
+    """True inside a frozen bundle (e.g. PyInstaller desktop build), where
+    ``sys.executable`` is the app exe rather than a Python interpreter."""
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+
+def _worker_cmd(worker_path: str) -> list[str]:
+    """Argv that executes ``worker_path`` as a Python script (#123399).
+
+    A frozen exe re-enters the app CLI for ``[exe, worker_path]`` and rejects
+    the script path as an invalid subcommand (exit 2); frozen builds expose an
+    internal ``__run-script`` entry that executes a script file instead."""
+    # ponytail: relies on the frozen bundle exposing a `__run-script` entry;
+    # builds without one need an equivalent worker entry or an external python.
+    if _is_frozen_app():
+        return [sys.executable, "__run-script", worker_path]
+    return [sys.executable, worker_path]
+
+
 def _spawn_worker(env: dict[str, str]) -> subprocess.Popen:
     """Start ``_search_worker.py`` as a script with ``plugins`` importable. Running as a
     script puts ``plugins/web/ddgs/`` on ``sys.path[0]``, breaking ``import plugins...``,
@@ -114,7 +133,7 @@ def _spawn_worker(env: dict[str, str]) -> subprocess.Popen:
     # stdin/stdout/stderr stay explicit keyword args so scripts/check_subprocess_stdin.py sees them
     # (TUI gateway inherits stdin). stderr=DEVNULL: a chatty child would deadlock a stdout-only drain.
     return subprocess.Popen(
-        [sys.executable, worker_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        _worker_cmd(worker_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env=env, text=True, encoding="utf-8", errors="replace", **extra_kwargs,
     )
 

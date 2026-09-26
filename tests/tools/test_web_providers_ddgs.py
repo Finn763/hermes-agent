@@ -224,6 +224,80 @@ class TestDDGSProcessIsolation:
         _assert_worker_reaped(prov)
 
 # ---------------------------------------------------------------------------
+# Frozen launcher (#123399)
+# ---------------------------------------------------------------------------
+
+
+class _FrozenCliRejectingProc:
+    """Emulates a frozen app exe given ``[exe, worker_path]``: the exe is not a
+    Python interpreter, so it re-enters the app CLI, rejects the script path as
+    an invalid subcommand, and exits 2 with empty stdout (stderr is DEVNULL)."""
+
+    returncode = 2
+    pid = -1
+
+    def communicate(self, *args, **kwargs):
+        return ("", None)
+
+    def poll(self):
+        return 2
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+class _FrozenExeEmulator:
+    """Stands in for ``subprocess.Popen`` when ``sys.executable`` is a frozen app
+    exe: plain ``[exe, worker_path]`` re-enters the CLI (exit 2), while the
+    ``__run-script`` entry executes the worker file with a real interpreter."""
+
+    def __init__(self, real_popen, real_python):
+        self._real_popen = real_popen
+        self._real_python = real_python
+        self.seen_argv: list = []
+
+    def __call__(self, argv, **kwargs):
+        import subprocess as _sp
+
+        self.seen_argv.append(list(argv))
+        if len(argv) >= 3 and argv[1] == "__run-script":
+            return self._real_popen(
+                [self._real_python, argv[2]],
+                stdin=_sp.PIPE,
+                stdout=_sp.PIPE,
+                stderr=_sp.DEVNULL,
+                env=kwargs.get("env"),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        return _FrozenCliRejectingProc()
+
+
+@pytest.mark.live_system_guard_bypass
+class TestDDGSFrozenLauncher:
+    def test_frozen_exe_runs_worker_via_run_script_entry(self, monkeypatch):
+        """#123399: a frozen exe is not an interpreter — the worker must go through
+        the bundle's ``__run-script`` entry, not ``[exe, worker_path]`` (the CLI
+        rejects the script path as an invalid subcommand → exit 2, empty stdout)."""
+        import plugins.web.ddgs.provider as prov
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+        monkeypatch.setattr(prov, "_test_hook", "empty", raising=True)
+
+        emulator = _FrozenExeEmulator(prov.subprocess.Popen, sys.executable)
+        monkeypatch.setattr(prov.subprocess, "Popen", emulator)
+
+        assert prov._run_ddgs_search_bounded("q", 1) == []
+        assert emulator.seen_argv[0][1] == "__run-script"
+        _assert_worker_reaped(prov)
+
+
+# ---------------------------------------------------------------------------
 # Integration: _is_backend_available / _get_backend / check_web_api_key
 # ---------------------------------------------------------------------------
 
