@@ -42,6 +42,23 @@ export function messagesIfTranscriptBehind(
     return remoteChat
   }
 
+  // A local view that shares no durable row with the refreshed page never
+  // anchored on this transcript: its initial reads 404'd because a new
+  // session row is only persisted after the first turn (#123622), or a
+  // compaction rewrite replaced every row. Length alone cannot prove another
+  // window moved it, so do not report behind. Hydrated ids are
+  // `${timestamp}-${index}-${role}` (read-local, not durable), hence rowId.
+  // ponytail: a partial load that kept >=1 durable row still length-compares
+  // and can refuse once (installing the refresh); full catch-up-and-send is
+  // #123248's path.
+  const localRowIds = new Set(
+    localMessages.flatMap(message => (message.rowId === undefined ? [] : [message.rowId]))
+  )
+
+  if (!remoteChat.some(message => message.rowId !== undefined && localRowIds.has(message.rowId))) {
+    return null
+  }
+
   const grafted = graftRefreshedTailOntoBackfill(remoteChat, localMessages)
 
   if (grafted === remoteChat) {
