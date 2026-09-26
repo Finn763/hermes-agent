@@ -185,6 +185,69 @@ def install_hint(extra: str) -> str:
     return f"hermes pm install --extra {extra}"
 
 
+def _pep685(name: str) -> str:
+    """PEP 685 spelling (the rule ``pm.install._still_declared`` uses): a plugin
+    platform's value is its DIRECTORY name (``plugins/platforms/google_chat`` →
+    ``google_chat``), extras are hyphen-spelled (``google-chat``), and so are
+    ANCHORS keys."""
+    import re
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _platforms_by_home() -> list[list]:
+    """Connected platforms of every home that feeds this venv.
+
+    The generation is shared by all homes (``pm.plugins_state.dependency_homes``:
+    ``<root>/installs/<key>``, profiles folded into the root), so an explicit
+    install run from one profile must still carry another profile's platform
+    SDKs — the gateway that needs them may never run the install. Never raises:
+    a home whose config is unreadable reads as no platforms."""
+    try:
+        from gateway.config import load_gateway_config
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from pm.plugins_state import dependency_homes
+    except Exception:
+        return []
+    try:
+        homes = dependency_homes()
+    except Exception:
+        return []
+    out = []
+    for home in homes:
+        token = set_hermes_home_override(str(home))
+        try:
+            out.append(load_gateway_config().get_connected_platforms())
+        except Exception:
+            pass
+        finally:
+            reset_hermes_home_override(token)
+    return out
+
+
+def configured_platform_extras() -> list[str]:
+    """PM extras for the connected gateway platforms (enabled + configured) of
+    every home sharing this venv.
+
+    Explicit environment builds union these in: ``[all]`` deliberately
+    excludes messaging SDKs, so without this a Telegram-configured home
+    rebuilds a venv without python-telegram-bot (#124228). Never raises:
+    unreadable config reads as no platforms, never a broken install."""
+    found = []
+    for platforms in _platforms_by_home():
+        for platform in platforms or []:
+            name = getattr(platform, "value", platform)
+            if not isinstance(name, str):
+                continue
+            name = _pep685(name)
+            # An umbrella extra shares its anchor with one member; selecting it
+            # would install every sibling the user never chose.
+            if (name in ANCHORS and name not in {"messaging", "voice", "wake"}
+                    and extra_supported(name, importable=lambda _anchor: False)):
+                found.append(name)
+    return sorted(set(found))
+
+
 def ensure_import(extra: str) -> None:
     """Make an extra available: no-op when the anchor imports, otherwise
     sync the venv with the extra enabled. Raises InstallError on failure
