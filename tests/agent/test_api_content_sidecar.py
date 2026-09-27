@@ -43,10 +43,22 @@ class TestComposeUserApiContent:
         assert compose_user_api_content("hello", "", "") is None
 
 
-    def test_composes_memory_block_and_plugin_context(self):
+    def test_plugin_context_only_no_memory_in_user_message(self):
+        # #8893: prefetched memory MUST NOT be appended to the active user
+        # message. Only the explicit plugin pre_llm_call context (target=
+        # user_message) belongs there.
         out = compose_user_api_content("hello", "likes tea", "PLUGIN-CTX")
-        fenced = build_memory_context_block("likes tea")
-        assert out == "hello" + "\n\n" + fenced + "\n\n" + "PLUGIN-CTX"
+        assert out == "hello" + "\n\n" + "PLUGIN-CTX"
+        # Belt-and-braces: the memory fence is never user-bound.
+        assert "<memory-context>" not in out
+        assert "likes tea" not in out
+
+
+    def test_memory_prefetch_alone_returns_none(self):
+        # No plugin injection + prefetch present = nothing user-bound.
+        # The prefetch is still computed by the prologue for system-prompt
+        # / tool delivery, but never reaches the user channel.
+        assert compose_user_api_content("hello", "likes tea", "") is None
 
 
 

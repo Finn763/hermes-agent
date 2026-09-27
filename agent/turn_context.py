@@ -40,7 +40,6 @@ from agent.conversation_compression import (
 )
 from agent.context_engine import automatic_compaction_status_message
 from agent.iteration_budget import IterationBudget
-from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.model_metadata import (
@@ -58,32 +57,32 @@ def compose_user_api_content(
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
-    Sources: memory-manager prefetch + ``pre_llm_call`` plugin context with
-    target="user_message" (the default). Both are appended to the *API copy*
-    of the user message only — the stored content stays clean.
+    Source: ``pre_llm_call`` plugin context with target="user_message" (the
+    default). That is the ONLY thing that belongs in the user channel.
 
-    This is the single source of that composition. The prologue stamps the
-    result onto the live message as ``api_content`` (persisted alongside the
-    clean content) and the ``api_messages`` build in ``conversation_loop``
-    sends the same helper's output, so the persisted sidecar can never drift
-    from the bytes on the wire — which is the whole prompt-cache invariant:
-    what turn N sends must be what turn N+1 replays.
+    External-memory prefetch is intentionally NOT appended here (#8893).
+    Wrapping recalled memory in a fence did not stop LLMs from drifting
+    toward recalled context instead of responding to the actual question,
+    because the fence still lives inside the user-message channel. The
+    provider's ``system_prompt_block`` and its memory tools remain the
+    delivery surface; ``ext_prefetch_cache`` is kept as an input so callers
+    that route through this helper do not need to change their call sites,
+    and is still computed by the prologue for those other delivery paths.
+
+    The ``api_content`` sidecar (persisted alongside the clean content) is
+    the single source of the user-channel composition — the prologue stamps
+    it onto the live message and the ``api_messages`` build in
+    ``conversation_loop`` reuses it, so persisted and wire bytes cannot
+    drift.
 
     Returns ``None`` when nothing is injected (multimodal/non-string content,
-    or no ephemeral context), meaning the message is sent as-is.
+    or no plugin context), meaning the message is sent as-is.
     """
     if not isinstance(content, str):
         return None
-    injections = []
-    if ext_prefetch_cache:
-        fenced = build_memory_context_block(ext_prefetch_cache)
-        if fenced:
-            injections.append(fenced)
-    if plugin_user_context:
-        injections.append(plugin_user_context)
-    if not injections:
+    if not plugin_user_context:
         return None
-    return content + "\n\n" + "\n\n".join(injections)
+    return content + "\n\n" + plugin_user_context
 
 
 def substitute_api_content(api_msg: Dict[str, Any]) -> Optional[str]:

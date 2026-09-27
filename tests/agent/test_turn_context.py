@@ -250,6 +250,27 @@ def test_prefetch_runs_for_substantive_user_message():
     assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
 
 
+def test_prefetch_result_not_injected_into_user_message():
+    """#8893: prefetched memory MUST NOT land in the user-message channel,
+    even though ``ext_prefetch_cache`` is populated. Plugin-context injection
+    is a separate, opt-in path (target=user_message); raw provider prefetch
+    is delivered via system prompt / memory tools instead.
+    """
+    agent, mm = _agent_with_memory_manager()
+    ctx = _build(
+        agent,
+        user_message="what did we decide about the deploy pipeline?",
+    )
+    # Prefetch still ran — the result is available on the context for any
+    # system-prompt / tool path. It just isn't stamped onto the user message.
+    assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
+    msg = ctx.messages[ctx.current_turn_user_idx]
+    assert msg["content"] == "what did we decide about the deploy pipeline?"
+    # No api_content sidecar — the clean content is the wire content.
+    assert "api_content" not in msg
+    assert "<memory-context>" not in msg["content"]
+
+
 def test_turn_start_replaces_stale_parent_history_with_compression_child():
     agent = _FakeAgent()
     stale_history = [{"role": "user", "content": "stale parent"}]
