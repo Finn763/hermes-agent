@@ -33,6 +33,8 @@ class CommandDef:
     # while busy (normal handler or the ``busy_handler`` variant); "reject" = refuse mid-run
     # (generic "Agent is running" unless ``busy_handler`` names a reject message);
     # "interrupt_then_dispatch" = interrupt first (/stop, /new, /reset; Guard 1, platforms/base.py).
+    # "defer_until_idle" = record as a typed deferred command and run it after the active
+    # turn commits, delivers, and releases the guard (#116290).
     busy_policy: str = "reject"
     busy_handler: str | None = None  # key of a special mid-run handler in Guard-2 table
     # Key in ``hermes_cli.slash_exec.EXECUTORS`` (a string, not a callable: keeps this module
@@ -43,7 +45,7 @@ class CommandDef:
     desktop: str | None = None
 
 
-VALID_BUSY_POLICIES: frozenset[str] = frozenset({"dispatch", "reject", "interrupt_then_dispatch"})
+VALID_BUSY_POLICIES: frozenset[str] = frozenset({"dispatch", "reject", "interrupt_then_dispatch", "defer_until_idle"})
 
 
 COMMAND_REGISTRY: list[CommandDef] = [
@@ -62,12 +64,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("history", "Show conversation history", "Session",
                cli_only=True, desktop="terminal"),
     CommandDef("save", "Export the current conversation (bare /save shows usage)", "Session",
-               args_hint="<json|md|html> [filename] [redact]"),
-    CommandDef("retry", "Retry the last message (resend to agent)", "Session"),
+               args_hint="<json|md|html> [filename] [redact]", busy_policy="defer_until_idle"),
+    CommandDef("retry", "Retry the last message (resend to agent)", "Session",
+               busy_policy="defer_until_idle"),
     CommandDef("prompt", "Compose your next prompt in $EDITOR (markdown), then send it", "Session",
                cli_only=True, args_hint="[initial text]", aliases=("compose",)),
     CommandDef("undo", "Back up N user turns and re-prompt (default 1)", "Session",
-               args_hint="[N]"),
+               args_hint="[N]", busy_policy="defer_until_idle"),
     CommandDef("title", "Set a title for the current session", "Session", args_hint="[name]"),
     CommandDef("handoff", "Hand off this session to a messaging platform (Telegram, Discord, etc.)", "Session",
                args_hint="<platform>", cli_only=True, argument_mode="options"),
@@ -77,7 +80,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="[new [name]|list|prune [--dry-run]]",
                subcommands=("new", "list", "prune")),
     CommandDef("compress", "Compress conversation context (add 'here [N]' to keep recent N turns; --preview shows what would happen)", "Session",
-               aliases=("compact",), args_hint="[here [N] | focus topic | --preview|--dry-run]"),
+               aliases=("compact",), args_hint="[here [N] | focus topic | --preview|--dry-run]",
+               busy_policy="defer_until_idle"),
     CommandDef("rollback", "List or restore filesystem checkpoints (restores keep your hand-edits; --all overrides)", "Session",
                args_hint="[number] [--all]"),
     CommandDef("snapshot", "Create or restore state snapshots of Hermes config/state", "Session",
@@ -408,6 +412,9 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     would silently interrupt the agent AND get discarded — a zero-char response. See issue
     #5057 / PRs #6252, #10370, #4665. ACTIVE_SESSION_BYPASS_COMMANDS remains the subset with
     explicit Level-2 handlers; the rest fall through to the catch-all.
+
+    (Deferred commands — /retry, /undo, /compress, /save — bypass the same way but
+    record for post-turn execution instead of rejecting; see #116290.)
 
     See #10370, #4665, #5057, #6252.
     """

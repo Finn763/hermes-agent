@@ -44,6 +44,7 @@ class ConversationState:
     service_tier_override: Any = _UNSET_TIER  # /fast: "priority" or None; _UNSET_TIER = absent
     last_resolved_model: str = ""  # last successfully-resolved non-empty model
     queued_events: List[Any] = field(default_factory=list)  # /queue overflow FIFO (head in adapter)
+    deferred_commands: List[Dict[str, Any]] = field(default_factory=list)  # defer_until_idle queue (#116290)
     sidecar_notes: List[str] = field(default_factory=list)  # one-shot must-deliver notes
     ephemeral_pin: Optional[Tuple[Any, ...]] = None  # pinned session-context (change_key, text)
     vc_last: Optional[str] = None  # last voice-channel context delivered

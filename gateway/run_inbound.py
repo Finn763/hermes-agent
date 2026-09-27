@@ -1284,6 +1284,10 @@ class GatewayInboundMixin:
             # and the old sentinel-only check here missed the leftover real agent — locking the session out
             # forever (#28686).
             self._release_turn_lease(_quick_key, _run_generation)
+            # Deferred idle commands (defer_until_idle, #116290) run here: the turn has
+            # committed and delivered, and the guard above is released. Never masks the return.
+            with suppress(Exception):
+                await self._drain_deferred_commands(_quick_key)
 
     def _restore_moa_one_shot(self, event: "MessageEvent", quick_key: str) -> None:
         """Revert a ``/moa <prompt>`` one-shot model override after its turn (called from the

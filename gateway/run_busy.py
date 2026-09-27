@@ -744,9 +744,10 @@ class GatewayBusySessionMixin:
         """Dispatch a recognized slash command while an agent is running.
 
         Order: ``busy_handler`` (mid-run variant) → ``busy_policy == "dispatch"`` (normal handler)
+        → ``busy_policy == "defer_until_idle"`` (record for post-turn execution)
         → catch-all reject text. Rejecting is required rather than falling through to
         interrupt + discard: commands like /model, /reasoning, /voice, /insights, /title,
-        /resume, /retry, /undo, /compress, /usage, /reload-mcp, /sethome, /reset (all
+        /resume, /usage, /reload-mcp, /sethome, /reset (all
         registered as Discord slash commands) would interrupt the agent AND get silently
         discarded by the slash-command safety net, producing a zero-char response.
         See #5057, #6252, #10370.
@@ -764,6 +765,8 @@ class GatewayBusySessionMixin:
             reject_text = self._BUSY_REJECT_TEXT.get(handler_key)
             if reject_text is not None:
                 return reject_text
+        if policy == "defer_until_idle":
+            return await self._defer_command_for_idle(event, cmd_def, quick_key, source)
         if policy in ("dispatch", "interrupt_then_dispatch"):
             plain = self._gateway_plain_command_handlers().get(name)
             if plain is not None:
@@ -777,6 +780,111 @@ class GatewayBusySessionMixin:
             f"⏳ Agent is running — `/{name}` can't run "
             f"mid-turn. Wait for the current response or `/stop` first."
         )
+
+    async def _defer_command_for_idle(self, event: MessageEvent, cmd_def, session_key: str, source):
+        """Record a busy-window slash command to run after the active turn finishes (#116290).
+
+        The running turn is never touched: no interrupt, no steer, no transcript write.
+        Execution happens in ``_drain_deferred_commands`` once the turn has committed,
+        delivered, and released the session guard. Repeated identical requests coalesce.
+        """
+        name = cmd_def.name
+        if getattr(self, "_draining", False):
+            what = "restarting" if getattr(self, "_restart_requested", False) else "shutting down"
+            return (
+                f"⏳ Gateway is {what} — `/{name}` was not scheduled; "
+                f"please re-run it afterwards."
+            )
+        args = (event.get_command_args() or "").strip()
+        deferred = self._session_state(session_key).conversation.deferred_commands
+        if any(e.get("command") == name and e.get("args") == args for e in deferred):
+            return (
+                f"`/{name}` is already scheduled — "
+                f"it will run when the current turn finishes."
+            )
+        deferred.append({"command": name, "args": args, "event": event, "source": source})
+        # ponytail: in-memory FIFO only; a crash loses entries exactly like queued text in
+        # interrupt mode. Graceful restart/shutdown surfaces them via drain notices, never silently.
+        logger.info("Deferred /%s until idle for session %s (args=%r)", name, session_key, args)
+        return (
+            f"⏳ Agent is running — `/{name}` scheduled; "
+            f"it will run when the current turn finishes."
+        )
+
+    async def _drain_deferred_commands(self, session_key: str) -> None:
+        """Run deferred idle commands FIFO after the turn committed, delivered, and released.
+
+        Called from ``_handle_message``'s ``finally`` (guard already released), so handlers
+        observe the settled transcript. Never raises: failures are delivered honestly.
+        """
+        state = self._peek_session_state(session_key)
+        if state is None:
+            return
+        entries = list(state.conversation.deferred_commands or ())
+        state.conversation.deferred_commands = []
+        if not entries:
+            return
+        if getattr(self, "_draining", False):
+            await self._notify_deferred_dropped(entries)
+            return
+        if self._is_session_running(session_key):
+            # A newer turn claimed the session already: park behind it for the next idle window.
+            state.conversation.deferred_commands = entries + list(
+                state.conversation.deferred_commands or ())
+            return
+        for i, entry in enumerate(entries):
+            if getattr(self, "_draining", False) or self._is_session_running(session_key):
+                state.conversation.deferred_commands = entries[i:] + list(
+                    state.conversation.deferred_commands or ())
+                return
+            await self._run_one_deferred_command(session_key, entry)
+
+    async def _run_one_deferred_command(self, session_key: str, entry: dict) -> None:
+        """Execute one deferred command through its idle handler; deliver the result."""
+        name = entry.get("command", "")
+        event = entry.get("event")
+        source = entry.get("source") or getattr(event, "source", None)
+        adapter = self._adapter_for_source(source) if source is not None else None
+        handler = self._gateway_idle_command_handlers().get(name)
+        if handler is None and event is not None:
+            # e.g. /undo has an idle handler but is not in the idle dispatch table.
+            handler = getattr(self, f"_handle_{name.replace('-', '_')}_command", None)
+        if handler is None or event is None:
+            await self._send_deferred_result(
+                adapter, source,
+                f"⚠️ `/{name}` was scheduled but has no idle handler — please re-run it.")
+            return
+        try:
+            result = await handler(event)
+        except Exception as exc:
+            logger.warning("Deferred /%s for session %s failed: %s", name, session_key, exc)
+            await self._send_deferred_result(
+                adapter, source, f"⚠️ `/{name}` ran after the turn but failed: {exc}")
+            return
+        await self._send_deferred_result(adapter, source, result if isinstance(result, str) else "")
+
+    async def _notify_deferred_dropped(self, entries: list) -> None:
+        """Honestly surface deferred commands lost to a graceful restart/shutdown."""
+        what = "restarting" if getattr(self, "_restart_requested", False) else "shutting down"
+        for entry in entries:
+            name = entry.get("command", "")
+            source = entry.get("source") or getattr(entry.get("event"), "source", None)
+            adapter = self._adapter_for_source(source) if source is not None else None
+            await self._send_deferred_result(
+                adapter, source,
+                f"⚠️ `/{name}` was scheduled but the gateway is {what} — "
+                f"it did not run. Please re-run it.")
+
+    async def _send_deferred_result(self, adapter, source, text: str) -> None:
+        """Best-effort delivery of a deferred result to the original thread; never raises."""
+        if not text or adapter is None or source is None:
+            logger.info("Deferred result dropped (no adapter/source/text): %r", text[:80] if text else text)
+            return
+        try:
+            metadata = self._thread_metadata_for_source(source)
+            await adapter.send(str(source.chat_id), text, metadata=metadata)
+        except Exception as exc:
+            logger.warning("Deferred result send failed: %s", exc)
 
     async def _handle_pause_command(self, event: MessageEvent):
         """`/pause [reason]` engages the global emergency stop; `/pause off` lifts it (the estop gate
