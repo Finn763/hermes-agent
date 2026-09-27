@@ -1622,6 +1622,15 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
     # The one place request_overrides are consumed: static /fast values are already pinned
     # in agent.request_overrides; auto/cold windows layer the fast override per request.
     request_overrides = effective_request_overrides(agent)
+    # ponytail: chat_completions only; codex_responses/anthropic wires keep their own choice handling.
+    if (
+        agent.api_mode == "chat_completions"
+        and tools_for_api
+        and str(getattr(agent, "_tool_choice", "auto") or "auto").strip().lower() == "required"
+        and "tool_choice" not in request_overrides
+    ):
+        request_overrides = dict(request_overrides)
+        request_overrides["tool_choice"] = "required"
     if agent.api_mode == "anthropic_messages":
         return _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides)
     if agent.api_mode == "bedrock_converse":

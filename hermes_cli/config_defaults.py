@@ -121,6 +121,9 @@ DEFAULT_CONFIG = {
         # "auto" = gpt/codex models; true/false = force for all models; or a list of model-name
         # substrings (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Wire-level tool enforcement for OpenAI-compatible chat_completions: "required"
+        # sends tool_choice="required" whenever tools are present; "auto" changes nothing.
+        "tool_choice": "auto",
         # Execution-discipline prompt block (tool persistence, tools for arithmetic/system facts,
         # read-back after external writes, count reconciliation, literal identifiers,
         # verification-gated completion). Chosen once per session by model name (byte-stable).
