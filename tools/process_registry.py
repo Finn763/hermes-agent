@@ -761,7 +761,10 @@ class ProcessRegistry:
         sourced, user tools on PATH), wrapped in a transient systemd scope when we are
         the supervised gateway (own cgroup: an OOM kills only the worker, not the
         gateway and its messaging control plane)."""
-        argv = [_find_shell(), "-lic", f"set +m; {safe_command}"]
+        # ponytail: macOS/other POSIX use non-login -c (avoid .zprofile/.zshrc alias
+        # rewrite, parity with foreground non-login + #67200); Linux/Windows keep -lic.
+        login_flag = "-c" if (not _IS_LINUX and not _IS_WINDOWS) else "-lic"
+        argv = [_find_shell(), login_flag, f"set +m; {safe_command}"]
         # This applies to both pipe mode and the PTY path above. See #70716.
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()
         if in_supervised_gateway and _systemd_run_user_scope_available():
