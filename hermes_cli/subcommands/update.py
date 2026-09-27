@@ -111,4 +111,17 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         default=False,
         help="Windows: mutate the venv even while other processes are running from its interpreter (desktop backend, gateway, terminals). Those processes keep native .pyd files locked, so the dependency sync will likely fail partway and strand the install half-updated. Use only if you know the detected holders are false positives.",
     )
+    update_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the automatic gateway restart after a successful update. "
+            "Useful when an external scheduler (cron job inside the gateway, "
+            "systemd timer, CI pipeline, orchestration script) wants to "
+            "coordinate the restart itself to avoid killing its own host "
+            "process or to defer the restart until a safe moment. The code "
+            "update still lands; restart later with: hermes gateway restart"
+        ),
+    )
     update_parser.set_defaults(func=cmd_update)

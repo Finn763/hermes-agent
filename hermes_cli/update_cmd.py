@@ -1220,6 +1220,32 @@ def _print_update_completion(message: str) -> None:
         print(f"=== hermes-update completed {action_id} ===")
 
 
+def _no_restart_guard(args, *, windows_token: "dict | None") -> bool:
+    """Return True iff `--no-restart` opts out of the auto-restart phase.
+
+    Solves #6702: when `hermes update` runs INSIDE the gateway's own
+    process tree (a cron worker thread, an in-gateway scheduled task),
+    the auto-restart SIGTERMs the gateway and kills the worker
+    mid-flight before it can write completion bookkeeping. With
+    ``--no-restart``, the operator coordinates the restart themselves
+    (``hermes gateway restart`` runs it on their schedule) and the
+    update pipeline still lands the code change.
+
+    The ``windows_token`` parameter flips ``resume_needed=False`` so
+    the atexit Windows resume no-ops (a paused Windows gateway would
+    otherwise respawn on PRE-update code the moment this process exits,
+    hiding the deferred-restart contract the user just asked for).
+    """
+    if not getattr(args, "no_restart", False):
+        return False
+    if windows_token:
+        windows_token["resume_needed"] = False
+    print()
+    print("  ℹ Skipping gateway restart (--no-restart).")
+    print("    Restart later with: hermes gateway restart")
+    return True
+
+
 def _called_process_error_cmd_parts(exc: subprocess.CalledProcessError) -> list[str]:
     """Normalize ``CalledProcessError.cmd`` into argv-style tokens."""
     cmd = exc.cmd
@@ -7586,6 +7612,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # /update watcher (gateway/run.py) polls this file.
         if gateway_mode:
             _write_gateway_update_exit_code(desktop_build_ok)
+
+        # `--no-restart`: skip the auto-restart phase (and the post-restart
+        # verification + Windows resume that hangs off it). The code update
+        # still lands; the operator coordinates the restart themselves via
+        # `hermes gateway restart`. Solves #6702 (cron worker killed mid-flight
+        # when `hermes update` runs inside the gateway's own process tree).
+        if _no_restart_guard(args, windows_token=_windows_gateway_resume):
+            return
 
         gateway_fleet_restart_incomplete = False
         # Snapshot of gateways running before we touch anything. Stays empty
