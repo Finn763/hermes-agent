@@ -116,6 +116,9 @@ def _dispatch_display(dispatch: dict) -> Optional[str]:
     lateness = _format_lateness(dispatch.get("lateness_seconds", 0))
     if kind == "on_time":
         return color(f"on time (scheduled {scheduled})", Colors.DIM)
+    if kind == "skipped_stale":
+        return (color("⚠ stale occurrence skipped: ", Colors.YELLOW) + f"scheduled {scheduled}, skipped {actual} "
+                + color(f"({lateness} late)", Colors.YELLOW))
     label = "catch-up after missed fire" if kind == "catch_up" else "late"
     return (color(f"⚠ {label}: ", Colors.YELLOW) + f"scheduled {scheduled}, ran {actual} "
             + color(f"({lateness} late)", Colors.YELLOW))

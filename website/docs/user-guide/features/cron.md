@@ -848,6 +848,10 @@ cron:
 
 Local (built-in ticker) deployments don't need this — the ticker already picks up past-due jobs on its next tick.
 
+Per-job opt-out: time-sensitive jobs (a weekday 7am brief is useless at 4pm) can set `catch_up: false` (cronjob tool `create`/`update`, stored on the job record). A `catch_up: false` occurrence missed past its grace window (half the schedule period, clamped to 2m–2h) is skipped, never late-fired: `next_run_at` re-anchors forward and the skip is stamped on the job's `last_dispatch` (`kind: skipped_stale`), shown by `hermes cron list` as "stale occurrence skipped". Default `catch_up: true` keeps today's behavior (fire once now, `kind: catch_up`).
+
+The `catch_up_occurrences` file in `~/.hermes/cron/` counts stale-window catch-up fires (accumulated misses collapsed into one run) since the profile was created — a monotonic counter, not per-job. A nonzero count means the host slept (or the gateway was down) through scheduled fires.
+
 ## Schedule formats
 
 The agent's final response is automatically delivered to the job's `deliver:` target — the agent no longer fires messages itself, so the user-facing content simply goes in the final response. To deliver to **additional or different** targets, list multiple `deliver:` targets on the cron job (comma-separated, e.g. `deliver: "telegram,discord"`) rather than having the agent send them.

@@ -248,7 +248,7 @@ def fire_overdue_jobs(
         return 0
 
     from cron.jobs import (
-        ONESHOT_GRACE_SECONDS, _ensure_aware, _hermes_now, is_job_runnable, load_jobs,
+        ONESHOT_GRACE_SECONDS, _compute_grace_seconds, _ensure_aware, _hermes_now, is_job_runnable, load_jobs,
     )
 
     if now is None:
@@ -284,6 +284,20 @@ def fire_overdue_jobs(
                 next_run_at,
                 overdue_seconds / 60,
                 ONESHOT_GRACE_SECONDS,
+            )
+            continue
+        # Per-job opt-out (#111212): a time-sensitive job past its own grace window must not
+        # be late-fired by the sweep either; the built-in tick re-anchors and stamps the skip.
+        if (job.get("catch_up", True) is False
+                and str(schedule.get("kind") or "") != "once"
+                and overdue_seconds > _compute_grace_seconds(schedule)):
+            logger.warning(
+                "Misfire catch-up: job %s (%s) was due %s (%.0f min overdue) and catch_up "
+                "is disabled — not firing the stale occurrence.",
+                job_id,
+                job.get("name") or "unnamed",
+                next_run_at,
+                overdue_seconds / 60,
             )
             continue
         logger.warning(

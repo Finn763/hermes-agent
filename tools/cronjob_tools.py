@@ -568,6 +568,7 @@ def _action_create(a: Dict[str, Any]) -> str:
             script=_normalize_optional_job_value(script), context_from=context_from,
             enabled_toolsets=a["enabled_toolsets"] or None, workdir=_normalize_optional_job_value(a["workdir"]),
             no_agent=_no_agent, attach_to_session=a["attach_to_session"],
+            catch_up=True if a["catch_up"] is None else bool(a["catch_up"]),
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
@@ -780,6 +781,8 @@ def _update_run_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[str
                 "Cannot set no_agent=True on a job without a script. "
                 "Set `script` in the same update, or on the job first.")
         updates["no_agent"] = target_no_agent
+    if a["catch_up"] is not None:
+        updates["catch_up"] = bool(a["catch_up"])
     if a["repeat"] is not None:
         # Shared chokepoint coerces string forms ('forever'/'once'/'3') and 0/negative.
         from cron.jobs import normalize_repeat_value
@@ -867,6 +870,7 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    catch_up: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -955,6 +959,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "default": False,
                 "description": "True = no LLM: the scheduler runs `script` (required) on schedule and delivers its stdout verbatim; empty stdout sends nothing (watchdog pattern). Use for script-only pings with fixed output; keep False for anything needing reasoning."
             },
+            "catch_up": {
+                "type": "boolean",
+                "default": True,
+                "description": "False = skip (never late-fire) a scheduled occurrence missed past the grace window, e.g. host sleep: the miss is re-anchored forward and stamped last_dispatch kind=skipped_stale instead of firing hours/days late. Use for time-sensitive jobs (morning briefs); leave True (default) for jobs that must run even if late."
+            },
             "context_from": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1000,7 +1009,7 @@ def check_cronjob_requirements() -> bool:
 # different model. Programmatic callers of cronjob() itself retain the parameters.
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
-    "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session")
+    "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session", "catch_up")
 
 
 def _cronjob_handler(args, **kw):

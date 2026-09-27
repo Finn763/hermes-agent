@@ -1593,6 +1593,7 @@ _UPDATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    "catch_up": bool,
 }
 
 
@@ -1703,6 +1704,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    catch_up: bool = True,
 ) -> Dict[str, Any]:
     """Create a new cron job and return the stored record.
 
@@ -1796,6 +1798,9 @@ def create_job(
     ):
         if value is not None:
             job[key] = value
+    # Absent key = catch up (pre-feature behavior); only a False opt-out is stored.
+    if catch_up is False:
+        job["catch_up"] = False
 
     with _jobs_lock():
         save_jobs(load_jobs() + [job])
@@ -2810,6 +2815,37 @@ def _reanchor_stale_cron(d: _DueJob) -> bool:
     return False
 
 
+def _skip_stale_no_catchup(d: _DueJob, grace: int) -> bool:
+    """Stale-skip guard for a ``catch_up: false`` job; True when skipped without firing.
+
+    Past the grace window the missed occurrence is dropped (not fired late): next_run_at is
+    re-anchored forward and the skip is stamped on last_dispatch so it stays visible (#111212).
+    """
+    # ponytail: opt-out only; default jobs keep catch-up behavior, no per-job grace tuning.
+    if d.job.get("catch_up", True) is not False:
+        return False
+    lateness = (d.scan.now - d.next_run_dt).total_seconds()
+    if lateness <= grace:
+        return False
+    new_next = d.recompute_next()
+    if not new_next:
+        return False
+    logger.warning(
+        "Job '%s' missed its scheduled time (%s, grace=%ds) and catch_up is disabled. "
+        "Skipping the stale occurrence; next run: %s",
+        d.label, d.next_run, grace, new_next)
+    d.scan.persist(d.job["id"], next_run_at=new_next)
+    stamp = {
+        "scheduled_at": d.next_run,
+        "dispatched_at": d.scan.now.isoformat(),
+        "lateness_seconds": round(lateness, 1),
+        "kind": "skipped_stale",
+    }
+    d.job["last_dispatch"] = stamp
+    d.scan.persist(d.job["id"], last_dispatch=stamp)
+    return True
+
+
 def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> None:
     """Recurring job past its grace window: skip the accumulated misses, fire once now.
 
@@ -2924,6 +2960,8 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         return False
     grace = _compute_grace_seconds(d.schedule)
     if not manual_run and recurring:
+        if _skip_stale_no_catchup(d, grace):
+            return False
         _fast_forward_missed_recurring(d, grace)
     if kind == "once":
         if _retire_expired_oneshot(d) or _oneshot_dispatch_limit_reached(job, scan):
