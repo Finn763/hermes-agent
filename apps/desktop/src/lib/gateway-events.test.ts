@@ -1,8 +1,38 @@
 import { describe, expect, it } from 'vitest'
 
-import { approvalReplaySessionId, gatewayEventRequiresSessionId, resolveGatewayEventSessionId } from './gateway-events'
+import {
+  approvalReplaySessionId,
+  gatewayEventRequiresSessionId,
+  resolveGatewayEventSessionId,
+  type GatewayEventSessionRoute
+} from './gateway-events'
 
 describe('gateway event routing', () => {
+  // Tiny runner that threads the next-pin state between calls, so the test
+  // expresses a real session lifecycle instead of a stack of snapshots.
+  const runScenario = (
+    steps: ReadonlyArray<{
+      activeSessionId: null | string
+      eventType: string
+      explicitSessionId?: string
+    }>
+  ): readonly GatewayEventSessionRoute[] => {
+    const out: GatewayEventSessionRoute[] = []
+    let pins: readonly string[] = []
+
+    for (const step of steps) {
+      const r = resolveGatewayEventSessionId({
+        activeSessionId: step.activeSessionId,
+        eventType: step.eventType,
+        explicitSessionId: step.explicitSessionId ?? '',
+        unscopedStreamSessionIds: pins
+      })
+      pins = r.nextUnscopedStreamSessionIds
+      out.push(r)
+    }
+
+    return out
+  }
   it('rehydrates pending approvals on reconnect ready and resumed session info', () => {
     expect(approvalReplaySessionId('gateway.ready', 'active-1', null)).toBe('active-1')
     expect(approvalReplaySessionId('session.info', 'active-1', 'routed-1')).toBe('routed-1')
@@ -37,12 +67,12 @@ describe('gateway event routing', () => {
       activeSessionId: 'session-a',
       eventType: 'message.start',
       explicitSessionId: '',
-      unscopedStreamSessionId: null
+      unscopedStreamSessionIds: []
     })
 
     expect(started).toEqual({
       drop: false,
-      nextUnscopedStreamSessionId: 'session-a',
+      nextUnscopedStreamSessionIds: ['session-a'],
       pinned: false,
       sessionId: 'session-a'
     })
@@ -51,12 +81,12 @@ describe('gateway event routing', () => {
       activeSessionId: 'session-b',
       eventType: 'message.delta',
       explicitSessionId: '',
-      unscopedStreamSessionId: started.nextUnscopedStreamSessionId
+      unscopedStreamSessionIds: started.nextUnscopedStreamSessionIds
     })
 
     expect(delta).toEqual({
       drop: false,
-      nextUnscopedStreamSessionId: 'session-a',
+      nextUnscopedStreamSessionIds: ['session-a'],
       pinned: true,
       sessionId: 'session-a'
     })
@@ -65,15 +95,38 @@ describe('gateway event routing', () => {
       activeSessionId: 'session-b',
       eventType: 'message.complete',
       explicitSessionId: '',
-      unscopedStreamSessionId: delta.nextUnscopedStreamSessionId
+      unscopedStreamSessionIds: delta.nextUnscopedStreamSessionIds
     })
 
     expect(completed).toEqual({
       drop: false,
-      nextUnscopedStreamSessionId: null,
+      nextUnscopedStreamSessionIds: [],
       pinned: true,
       sessionId: 'session-a'
     })
+  })
+
+  it('does not let a second chat message.start clobber a concurrent stream pin', () => {
+    // #108045 — the regression. A starts a turn, the user switches to B mid
+    // stream, B's message.start arrives. The single shared pin was overwritten
+    // to B and A's subsequent deltas painted onto B. Per-stream pins keep both.
+    const [, bStart, aDeltaAfterClobber, aThinkingAfterClobber] = runScenario([
+      { activeSessionId: 'session-a', eventType: 'message.start' },
+      { activeSessionId: 'session-b', eventType: 'message.start' },
+      { activeSessionId: 'session-b', eventType: 'message.delta' },
+      { activeSessionId: 'session-b', eventType: 'thinking.delta' }
+    ])
+
+    // After B starts, both streams are pinned — neither owns the slot.
+    expect(bStart.nextUnscopedStreamSessionIds).toEqual(['session-a', 'session-b'])
+    expect(bStart.sessionId).toBe('session-b')
+
+    // The focused chat (B) is in the pin set so unscoped events from its own
+    // mid-stream turn route to B; but A's pin survives so A-tagged explicit
+    // events (end events, sub-tagged deltas) keep working.
+    expect(aDeltaAfterClobber.pinned).toBe(true)
+    expect(aThinkingAfterClobber.pinned).toBe(true)
+    expect(bStart.nextUnscopedStreamSessionIds).toContain('session-a')
   })
 
   it('routes a new unscoped stream start to the currently active session', () => {
@@ -81,12 +134,14 @@ describe('gateway event routing', () => {
       activeSessionId: 'session-b',
       eventType: 'message.start',
       explicitSessionId: '',
-      unscopedStreamSessionId: 'session-a'
+      unscopedStreamSessionIds: ['session-a']
     })
 
+    // Session B owns its own start, but A's stream is still running and keeps
+    // its pin — the second start adds, it does not take over.
     expect(routed).toEqual({
       drop: false,
-      nextUnscopedStreamSessionId: 'session-b',
+      nextUnscopedStreamSessionIds: ['session-a', 'session-b'],
       pinned: false,
       sessionId: 'session-b'
     })
@@ -101,30 +156,50 @@ describe('gateway event routing', () => {
       activeSessionId: 'session-b',
       eventType: 'thinking.delta',
       explicitSessionId: '',
-      unscopedStreamSessionId: null
+      unscopedStreamSessionIds: []
     })
 
     expect(routed).toEqual({
       drop: false,
-      nextUnscopedStreamSessionId: null,
+      nextUnscopedStreamSessionIds: [],
       pinned: false,
       sessionId: 'session-b'
     })
   })
 
-  it('keeps explicit events scoped and clears a matching pinned stream on completion', () => {
+  it('keeps explicit events scoped and retires only the matching pin on completion', () => {
     const routed = resolveGatewayEventSessionId({
       activeSessionId: 'session-b',
       eventType: 'message.complete',
       explicitSessionId: 'session-a',
-      unscopedStreamSessionId: 'session-a'
+      unscopedStreamSessionIds: ['session-a', 'session-b']
+    })
+
+    // A's pin retires (its turn ended), B's pin survives.
+    expect(routed).toEqual({
+      drop: false,
+      nextUnscopedStreamSessionIds: ['session-b'],
+      pinned: true,
+      sessionId: 'session-a'
+    })
+  })
+
+  it('drops an unscoped event when several streams are live and the focused chat is idle', () => {
+    // A and B are mid-stream in the background. C is focused but idle. An
+    // unscoped delta arrived: nothing in the event says which stream owns it.
+    // Guessing is what grafts A's output onto B, so drop. (#108045 / #77826.)
+    const routed = resolveGatewayEventSessionId({
+      activeSessionId: 'session-c',
+      eventType: 'message.delta',
+      explicitSessionId: '',
+      unscopedStreamSessionIds: ['session-a', 'session-b']
     })
 
     expect(routed).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: null,
-      pinned: true,
-      sessionId: 'session-a'
+      drop: true,
+      nextUnscopedStreamSessionIds: ['session-a', 'session-b'],
+      pinned: false,
+      sessionId: null
     })
   })
 })
