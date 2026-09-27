@@ -50,6 +50,7 @@ import {
   $sidebarProfileFilter,
   $sidebarProjectFilter,
   $sidebarProjectOrderIds,
+  $sidebarRecencyFilter,
   $sidebarRecentsOpen,
   $sidebarSessionOrderIds,
   $sidebarSessionOrderManual,
@@ -178,6 +179,7 @@ import {
   useRepoWorktreeMap
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
+import { sessionMatchesRecencyFilter } from './recency-filter'
 import {
   SidebarBlankState,
   SidebarLoadErrorState,
@@ -457,6 +459,7 @@ export function ChatSidebar({
   const persistedProjectFilter = useStore($sidebarProjectFilter)
   const profileFilter = useStore($sidebarProfileFilter)
   const prFilter = useStore($sidebarPrFilter)
+  const recencyFilter = useStore($sidebarRecencyFilter)
   const prDataWanted = useStore($sidebarPrDataWanted)
   const prBranchOverrides = useStore($prBranchBySession)
   const pullRequests = useStore($pullRequestsByBranch)
@@ -631,6 +634,12 @@ export function ChatSidebar({
         }
       }
 
+      // Narrowed to when the session was last worked on — the same recency the
+      // rows sort by, so "1 day" means the last 24 hours everywhere it shows.
+      if (recencyFilter.length && !sessionMatchesRecencyFilter(session, recencyFilter, Date.now() / 1000)) {
+        return false
+      }
+
       // Same membership the sidebar groups and colors by (backend owner first,
       // cwd walk otherwise), so a filtered row lands in the lane the user
       // picked it from.
@@ -645,7 +654,8 @@ export function ChatSidebar({
       pullRequests,
       projects,
       projectOwners,
-      dotStates
+      dotStates,
+      recencyFilter
     ]
   )
 
@@ -653,6 +663,7 @@ export function ChatSidebar({
     statusFilter.length > 0 ||
     projectFilter.length > 0 ||
     prFilter.length > 0 ||
+    recencyFilter.length > 0 ||
     (showAllProfiles && profileFilter.length > 0)
 
   const visibleSessions = useMemo(
