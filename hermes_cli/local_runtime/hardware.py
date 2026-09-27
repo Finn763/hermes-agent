@@ -394,8 +394,17 @@ def probe_budget(*, planning: bool = False) -> HardwareBudget:
                            gpu_pci_id=vram[3] if vram else None)
 
     if vram is None:
-        # No NVIDIA device visible: Metal/Vulkan/CPU paths budget from RAM as UMA (Apple
-        # Silicon) — conservative for discrete AMD until a vendor probe lands.
+        # No NVIDIA device visible: Apple Silicon budgets its real shared pool
+        # from RAM as UMA; anywhere else with no allocator pool in sight either
+        # (pure CPU, discrete AMD until a vendor probe lands) must not relabel
+        # host RAM as GPU memory — that priced CPU inference at unified
+        # bandwidth and recommended GPU-sized models onto the CPU (#105389).
+        # ponytail: CPU-only ceiling is usable_vram=0 with no dedicated-VRAM
+        # signal; revisit when _device_pool_view covers AMD/iGPU pools.
+        if sys.platform != "darwin" and _device_pool_view() is None:
+            host = ram_total if planning else ram_avail
+            return HardwareBudget(usable_vram_bytes=0, total_device_bytes=0,
+                                  ram_available_bytes=host, uma=False)
         return _uma_budget(ram_total if planning else ram_avail, ram_total)
 
     total, free, gpu_name, gpu_pci_id = vram
