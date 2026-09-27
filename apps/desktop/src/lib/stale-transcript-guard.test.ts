@@ -92,4 +92,42 @@ describe('messagesIfTranscriptBehind', () => {
     expect(messagesIfTranscriptBehind(toChatMessages(rows), [])).toBeNull()
     expect(messagesIfTranscriptBehind([], toChatMessages(rows))).toEqual(toChatMessages(rows))
   })
+
+  it('is current when retention released the head but the live tail matches (#123909)', () => {
+    const rows = [
+      userTurn(1, 'first'),
+      assistantTurn(2, 'first reply'),
+      userTurn(3, 'second'),
+      assistantTurn(4, 'second reply'),
+      userTurn(5, 'third'),
+      assistantTurn(6, 'third reply'),
+      userTurn(7, 'fourth'),
+      assistantTurn(8, 'fourth reply')
+    ]
+    // `boundRetainedTranscript` keeps the live window plus slack and releases
+    // the head: the store holds fewer messages than the latest page, but the
+    // durable tail is the same. That is a current view, not a stale one.
+    const page = toChatMessages(rows)
+    const trimmedStore = toChatMessages(rows.slice(4))
+
+    expect(page.length).toBeGreaterThan(trimmedStore.length)
+    expect(messagesIfTranscriptBehind(trimmedStore, page)).toBeNull()
+  })
+
+  it('still refuses when a trimmed window misses a genuinely new tail row (#123909)', () => {
+    const rows = [
+      userTurn(1, 'first'),
+      assistantTurn(2, 'first reply'),
+      userTurn(3, 'second'),
+      assistantTurn(4, 'second reply'),
+      userTurn(5, 'third'),
+      assistantTurn(6, 'third reply'),
+      userTurn(7, 'fourth'),
+      assistantTurn(8, 'fourth reply')
+    ]
+    const trimmedStore = toChatMessages(rows.slice(4))
+    const pageWithNewTurn = toChatMessages([...rows, userTurn(9, 'sent from another window')])
+
+    expect(messagesIfTranscriptBehind(trimmedStore, pageWithNewTurn)).not.toBeNull()
+  })
 })

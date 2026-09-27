@@ -32,6 +32,26 @@ function authoredMessageCount(messages: ChatMessage[]): number {
 }
 
 /**
+ * Durable tip of a rendered transcript: the last row the backend persisted.
+ * Retention (`boundRetainedTranscript`) releases the store's HEAD once a heavy
+ * transcript outgrows its budget but never the live tail, so a trimmed window
+ * ends on the same durable row as the latest page while being shorter than it
+ * (#123909). Rows without a `rowId` (page-local folds, unstored live rows)
+ * carry no tip — walking past them keeps a fold from reading as content.
+ */
+function durableTipRowId(messages: ChatMessage[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const rowId = messages[index].rowId
+
+    if (rowId !== undefined) {
+      return rowId
+    }
+  }
+
+  return undefined
+}
+
+/**
  * Chat messages to install when the authoritative latest page is ahead of the
  * local view. Null when the local view is current.
  *
@@ -40,6 +60,10 @@ function authoredMessageCount(messages: ChatMessage[]): number {
  * notice. A backfilled prefix is kept when the refreshed tail anchors inside
  * it. Live stream ids that do not anchor still use the count, so the window
  * that just finished the turn is not blocked when the counts match.
+ *
+ * Retention only releases the HEAD, so equal durable tips mean the view is
+ * current even when the page is longer (#123909). The count stays the fallback
+ * when either side has no durable tip.
  */
 export function messagesIfTranscriptBehind(
   localMessages: ChatMessage[],
@@ -51,6 +75,12 @@ export function messagesIfTranscriptBehind(
 
   if (localMessages.length === 0) {
     return remoteChat
+  }
+
+  const localTip = durableTipRowId(localMessages)
+
+  if (localTip !== undefined && durableTipRowId(remoteChat) === localTip) {
+    return null
   }
 
   const grafted = graftRefreshedTailOntoBackfill(remoteChat, localMessages)
