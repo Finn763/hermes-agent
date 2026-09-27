@@ -27,9 +27,21 @@ def _stop_reason(result):
     (camelCase survives only as the serialization alias, which pydantic does
     not expose to attribute access).
     """
-    from tools.mcp_tool import mcp_field
+    from tools.mcp_tool import mcp_field as _mcp_field_for_stop_reason
 
-    return mcp_field(result, "stop_reason", "stopReason")
+    return _mcp_field_for_stop_reason(result, "stop_reason", "stopReason")
+
+
+# Read the tool's ``outputSchema`` field tolerating the mcp 1.x -> 2.x rename
+# (``outputSchema`` -> ``output_schema``).  Centralized so the discriminator
+# relaxation tests can read whichever alias the helper will see at runtime.
+
+
+def _mcp_output_schema(tool):
+    """Read the tool's output schema via the same alias ``mcp_field`` uses."""
+    from tools.mcp_tool import mcp_field as _mcp_field
+
+    return _mcp_field(tool, "output_schema", "outputSchema")
 
 
 def _make_mcp_tool(name="read_file", description="Read a file", input_schema=None):
@@ -2939,3 +2951,276 @@ class TestRedirectHeaderStripper:
         asyncio.run(hook(response))
         assert next_request.headers["authorization"] == "Bearer x"
         assert next_request.headers["x-tenant"] == "t"
+
+
+# ---------------------------------------------------------------------------
+# outputSchema discriminator relaxation (issue #9075)
+# ---------------------------------------------------------------------------
+
+
+def _make_mcp_tool_with_output_schema(name, output_schema):
+    """Build a fake MCP Tool carrying an outputSchema.
+
+    The ``outputSchema`` may be passed via either ``output_schema`` (snake,
+    mcp 2.0+) or ``outputSchema`` (camel, mcp 1.x). ``_relax_*`` reads via
+    ``mcp_field``, so either alias works.
+    """
+    tool = SimpleNamespace()
+    tool.name = name
+    tool.description = f"Tool {name}"
+    tool.inputSchema = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"],
+    }
+    tool.outputSchema = output_schema
+    tool.output_schema = output_schema
+    return tool
+
+
+class TestDiscriminatorSchemaRelaxation:
+    """Issue #9075: MCP servers return harmless discriminator fields (``type``)
+    inside otherwise-valid structured objects, while advertising schemas with
+    ``additionalProperties: false``.  The MCP SDK's ``ClientSession.call_tool``
+    validates ``structured_content`` against the cached ``outputSchema`` and
+    rejects the call before Hermes can adapt the payload.  The only safe place
+    to relax the schema is at listing time, where the cached schema lives both
+    on the tool object and on ``session._tool_output_schemas``.
+    """
+
+    def _server_with_session(self, tools):
+        from tools.mcp_tool import MCPServerTask
+
+        server = MCPServerTask("issue9075")
+        # Stand in for the live MCP ClientSession; the relaxation helper only
+        # reads/writes the schema cache, so a MagicMock is enough.
+        server.session = MagicMock()
+        server.session._tool_output_schemas = {
+            t.name: _mcp_output_schema(t) for t in tools
+        }
+        server.session._tool_output_validators = {}
+        server._tools = tools
+        return server
+
+    def test_relation_shape_relaxes_for_known_discriminator(self):
+        """Relation-shaped items with ``additionalProperties: false`` must
+        tolerate the server's harmless ``type: "relation"`` discriminator."""
+        from tools.mcp_tool import _relax_known_discriminator_schemas
+
+        rel_items_schema = {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "relationType": {"type": "string"},
+            },
+            "required": ["from", "to", "relationType"],
+            "additionalProperties": False,
+        }
+        out_schema = {
+            "type": "object",
+            "properties": {"relations": {"type": "array", "items": rel_items_schema}},
+            "required": ["relations"],
+        }
+        tool = _make_mcp_tool_with_output_schema("memory_search", out_schema)
+        server = self._server_with_session([tool])
+
+        _relax_known_discriminator_schemas(server)
+
+        relaxed = _mcp_output_schema(tool)
+        item_schema = relaxed["properties"]["relations"]["items"]
+        assert item_schema.get("additionalProperties") is True
+
+        # Same payload that triggered the bug must now validate cleanly.
+        from jsonschema import Draft202012Validator
+
+        v = Draft202012Validator(relaxed)
+        payload = {
+            "relations": [
+                {"type": "relation", "from": "A", "to": "B", "relationType": "depends_on"}
+            ]
+        }
+        assert not list(v.iter_errors(payload)), [
+            e.message for e in v.iter_errors(payload)
+        ]
+
+        # The session-side schema cache must reflect the relaxed schema,
+        # otherwise the MCP SDK's call_tool() validator would still reject.
+        cached = server.session._tool_output_schemas["memory_search"]
+        assert cached is relaxed
+        assert (
+            cached["properties"]["relations"]["items"].get("additionalProperties")
+            is True
+        )
+
+    def test_entity_shape_relaxes_for_known_discriminator(self):
+        """Entity-shaped objects must also tolerate ``type: "entity"``."""
+        from tools.mcp_tool import _relax_known_discriminator_schemas
+
+        ent_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "entityType": {"type": "string"},
+                "observations": {"type": "array"},
+            },
+            "required": ["name", "entityType", "observations"],
+            "additionalProperties": False,
+        }
+        out_schema = {
+            "type": "object",
+            "properties": {"entities": {"type": "array", "items": ent_schema}},
+            "required": ["entities"],
+        }
+        tool = _make_mcp_tool_with_output_schema("memory_search", out_schema)
+        server = self._server_with_session([tool])
+
+        _relax_known_discriminator_schemas(server)
+
+        item_schema = _mcp_output_schema(tool)["properties"]["entities"]["items"]
+        assert item_schema.get("additionalProperties") is True
+        assert server.session._tool_output_schemas["memory_search"] is _mcp_output_schema(
+            tool
+        )
+
+    def test_unknown_shape_is_untouched(self):
+        """Schemas that don't match entity/relation must pass through verbatim."""
+        from tools.mcp_tool import _relax_known_discriminator_schemas
+
+        out_schema = {
+            "type": "object",
+            "properties": {
+                "metrics": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["metrics"],
+        }
+        before = {"type": "object", "properties": {"x": {"type": "string"}}}
+        tool = _make_mcp_tool_with_output_schema("metrics_view", out_schema)
+        server = self._server_with_session([tool])
+
+        _relax_known_discriminator_schemas(server)
+
+        metrics_schema = _mcp_output_schema(tool)["properties"]["metrics"]
+        assert metrics_schema.get("additionalProperties") is False, (
+            "schemas without the entity/relation shape must not be rewritten"
+        )
+        assert before != _mcp_output_schema(tool)
+
+    def test_defs_ref_presentation_relaxes(self):
+        """pydantic v2 hoists nested models into ``$defs`` and points at them
+        with ``$ref``; the walk has to follow that indirection or the strict
+        validator survives and the SDK still rejects the call."""
+        from tools.mcp_tool import _relax_known_discriminator_schemas
+
+        relation = {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "relationType": {"type": "string"},
+            },
+            "required": ["from", "to", "relationType"],
+            "additionalProperties": False,
+        }
+        out_schema = {
+            "type": "object",
+            "properties": {
+                "relations": {"type": "array", "items": {"$ref": "#/$defs/Relation"}}
+            },
+            "required": ["relations"],
+            "$defs": {"Relation": relation},
+        }
+        tool = _make_mcp_tool_with_output_schema("memory_search", out_schema)
+        server = self._server_with_session([tool])
+        # A compiled validator is present: the fix has to evict it.
+        server.session._tool_output_validators = {"memory_search": object()}
+
+        _relax_known_discriminator_schemas(server)
+
+        assert relation["additionalProperties"] is True, (
+            "the $defs entry behind the $ref must be widened"
+        )
+        assert server.session._tool_output_schemas["memory_search"] is out_schema
+        assert "memory_search" not in server.session._tool_output_validators
+
+        from jsonschema import Draft202012Validator
+
+        payload = {
+            "relations": [
+                {"type": "relation", "from": "A", "to": "B", "relationType": "depends_on"}
+            ]
+        }
+        assert not list(Draft202012Validator(out_schema).iter_errors(payload)), [
+            e.message for e in Draft202012Validator(out_schema).iter_errors(payload)
+        ]
+
+    def test_combinator_branch_relaxes(self):
+        """A shape nested under ``anyOf`` is reached as well."""
+        from tools.mcp_tool import _relax_known_discriminator_schemas
+
+        entity = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "entityType": {"type": "string"},
+                "observations": {"type": "array"},
+            },
+            "required": ["name", "entityType", "observations"],
+            "additionalProperties": False,
+        }
+        out_schema = {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {"anyOf": [entity, {"type": "null"}]},
+                }
+            },
+            "required": ["entities"],
+        }
+        tool = _make_mcp_tool_with_output_schema("memory_search", out_schema)
+        server = self._server_with_session([tool])
+
+        _relax_known_discriminator_schemas(server)
+
+        assert entity["additionalProperties"] is True
+        # The unrelated sibling branch stays strict.
+        assert out_schema["properties"]["entities"]["items"]["anyOf"][1] == {"type": "null"}
+
+    def test_register_server_tools_invokes_relaxation(self):
+        """End-to-end: the relaxation must run from both initial discovery
+        and dynamic refresh, which both go through ``_register_server_tools``."""
+        from tools.registry import ToolRegistry
+        from tools.mcp_tool import _register_server_tools
+
+        rel_items = {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "relationType": {"type": "string"},
+            },
+            "required": ["from", "to", "relationType"],
+            "additionalProperties": False,
+        }
+        out_schema = {
+            "type": "object",
+            "properties": {"relations": {"type": "array", "items": rel_items}},
+            "required": ["relations"],
+        }
+        tool = _make_mcp_tool_with_output_schema("query", out_schema)
+        server = self._server_with_session([tool])
+        mock_registry = MagicMock(spec=ToolRegistry)
+        # ``_register_server_tools`` reads server._tools; mocking the registry
+        # with a spec keeps attribute access strict.
+        mock_registry.get_toolset_for_tool.return_value = "mcp-issue9075"
+        with patch("tools.registry.registry", mock_registry):
+            _register_server_tools("issue9075", server, {})
+
+        item_schema = _mcp_output_schema(tool)["properties"]["relations"]["items"]
+        assert item_schema.get("additionalProperties") is True

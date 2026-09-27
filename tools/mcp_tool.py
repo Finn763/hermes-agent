@@ -7097,6 +7097,119 @@ def _existing_tool_names() -> List[str]:
     return names
 
 
+# Required-key signatures for the structuredContent shapes (#9075) we know
+# some real MCP servers emit with a harmless ``type`` discriminator on each
+# object.  An object subschema is treated as the matching shape iff its
+# ``required`` keys equal the tuple below (order ignored).  When matched and
+# ``additionalProperties`` is ``false``, the object is widened to accept the
+# server's discriminator field.
+_DISCRIMINATOR_SHAPES: tuple[frozenset[str], ...] = (
+    frozenset({"from", "to", "relationType"}),       # knowledge-graph relation
+    frozenset({"name", "entityType", "observations"}),  # knowledge-graph entity
+)
+
+
+def _is_known_discriminator_shape(node: Any) -> bool:
+    """True if ``node`` is an object subschema with one of the known required
+    key signatures and ``additionalProperties`` set to ``False``."""
+    if not isinstance(node, dict) or node.get("type") != "object":
+        return False
+    if node.get("additionalProperties") is not False:
+        return False
+    required = node.get("required")
+    if not isinstance(required, list) or not required:
+        return False
+    required_set = frozenset(str(r) for r in required)
+    return required_set in _DISCRIMINATOR_SHAPES
+
+
+def _relax_known_discriminator_schemas(server: "MCPServerTask") -> None:
+    """Widen ``outputSchema`` for the entity/relation shapes issue #9075 calls
+    out, on both the tool object and the SDK's ``session._tool_output_schemas``
+    cache. Mutating the existing dict reference keeps the tool-side and
+    session-side schemas in lock-step; the SDK validator reads from the
+    session-side cache, so a copy here would re-introduce the bug.
+
+    Compiled validators are evicted for any tool whose schema changed; the
+    SDK will lazily rebuild from the relaxed schema on the next ``call_tool``.
+
+    ponytail: shape signatures are a closed allow-list (two shapes today).
+    Add a new ``frozenset`` to ``_DISCRIMINATOR_SHAPES`` when a real server
+    emits a third discriminant-bearing shape — keep the schema walk narrow so
+    unrelated objects with ``additionalProperties: false`` stay strict.
+    """
+    session = getattr(server, "session", None)
+    schemas_attr = getattr(session, "_tool_output_schemas", None)
+    validators_attr = getattr(session, "_tool_output_validators", None)
+
+    for tool in getattr(server, "_tools", ()) or ():
+        output_schema = mcp_field(tool, "output_schema", "outputSchema")
+        if not isinstance(output_schema, dict):
+            continue
+        if not _relax_discriminator_in_schema(output_schema):
+            continue
+        # Keep the session cache pointing at the same (now relaxed) dict.
+        if isinstance(schemas_attr, dict):
+            schemas_attr[tool.name] = output_schema
+        # Drop the compiled validator so the SDK rebuilds from the relaxed
+        # schema on the next call_tool.
+        if isinstance(validators_attr, dict):
+            validators_attr.pop(tool.name, None)
+
+
+# Containers that hold *subschemas* rather than data.  ``$defs``/``definitions``
+# matter because pydantic v2 hoists nested models there and refers to them with
+# ``$ref``: the shape only exists behind that indirection, so a walk limited to
+# ``properties``/``items`` never reaches it and the strict validator survives
+# (#9075 review follow-up).  The combinators are the other spelling of the same
+# nesting; ``items`` may also be a list in the draft-04 tuple form.
+_SCHEMA_CHILD_MAPS: tuple[str, ...] = (
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+)
+_SCHEMA_CHILD_LISTS: tuple[str, ...] = ("anyOf", "oneOf", "allOf", "prefixItems")
+
+
+def _iter_child_schemas(node: dict):
+    """Yield every subschema reachable from the schema ``node``."""
+    for key in _SCHEMA_CHILD_MAPS:
+        container = node.get(key)
+        if isinstance(container, dict):
+            yield from container.values()
+    for key in _SCHEMA_CHILD_LISTS:
+        container = node.get(key)
+        if isinstance(container, list):
+            yield from container
+    items = node.get("items")
+    if isinstance(items, dict):
+        yield items
+    elif isinstance(items, list):  # draft-04 tuple form
+        yield from items
+    extra = node.get("additionalProperties")
+    if isinstance(extra, dict):  # dict form is itself a subschema
+        yield extra
+
+
+def _relax_discriminator_in_schema(node: Any) -> bool:
+    """Recurse into ``node``, widening known discriminant-bearing object
+    subschemas. Returns True iff at least one subschema was rewritten.
+
+    Relaxing a ``$defs`` entry is sufficient for a ``$ref`` aimed at it: the
+    reference resolves against the same document on every validation.
+    """
+    changed = False
+    if isinstance(node, dict):
+        if _is_known_discriminator_shape(node):
+            node["additionalProperties"] = True
+            changed = True
+        for child in _iter_child_schemas(node):
+            if _relax_discriminator_in_schema(child):
+                changed = True
+    return changed
+
+
 def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> List[str]:
     """Register tools from an already-connected server into the registry.
 
@@ -7115,6 +7228,13 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         List of registered prefixed tool names.
     """
     from tools.registry import registry
+
+    # Relax ``outputSchema`` for the structuredContent discriminator shapes
+    # issue #9075 describes, on both the tool object and the SDK's per-session
+    # schema cache.  Doing it here covers both initial discovery and dynamic
+    # refresh (notifications/tools/list_changed), which both funnel through
+    # this function.
+    _relax_known_discriminator_schemas(server)
 
     registered_names: List[str] = []
     toolset_name = f"mcp-{name}"
