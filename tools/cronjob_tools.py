@@ -95,15 +95,49 @@ def _notify_provider_jobs_changed_safe() -> None:
 # header exemption.
 
 # Strict patterns — applied to the user prompt only.
+#
+# #8886: literal-only patterns (`cat ... .env`) were trivially bypassable with
+# natural-language reformulations ("Read ... .env", "POST contents to ...",
+# "scan 10.0.0.0/24"). Each *intent* gets a regex that catches both the literal
+# command shape and the prose shape that names the same target/action. Scope
+# stays narrow — these patterns run on small, directive user prompts (not on
+# security-doc prose), so prose-trip risk is low; the prose-safe equivalent
+# still lives in `_CRON_SKILL_ASSEMBLED_PATTERNS` (see comment there).
+#
+# ponytail: prose-side false-positive risk is bounded to cron user prompts
+# (small, directive). The skill-assembled scanner keeps the narrow baseline.
+# Each pattern targets a single named intent so adding a new bypass class
+# stays a one-line edit.
 _CRON_THREAT_PATTERNS = [
     (r'ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions', "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
-    (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets"),
+    # Secret-read intent: cat literal OR prose verb+target pair where the
+    # target is a credential path. ``\s*[(\s]`` after the verb lets ``open(``
+    # / ``read_file`` style invocations through; the trailing credential-path
+    # alternation is the same set the literal pattern already used.
+    (r'\bcat\b\s+[^\n]*?(?:\.env|/\.hermes/|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_literal"),
+    (r'\b(?:read|show|open|reveal|expose|dump|get|extract|fetch|send|post|forward|push|upload|transmit|leak|exfiltrate|print|display|cat)\b\s*[(\s][^\n]{0,80}?(?:\.env|/\.hermes/|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_prose"),
+    # Web exfil of secrets/configs to an arbitrary external host. Catches
+    # "POST contents to https://...", "send data over https://...", and
+    # the bare presence of an http(s) URL ending in a credential extension
+    # when paired with an exfil verb nearby on the same line.
+    (r'\b(?:post|send|upload|push|submit|exfiltrate|transmit|leak|forward|ship|webhook)\b\s+(?:\w+\s+){0,8}?(?:contents?|file|data|secrets?|keys?|creds?|configs?|configuration)\s+[^\n]{0,40}?https?://(?!(?:api\.github\.com|github\.com)/)', "secrets_to_external_host"),
+    (r'https?://[^\s"\'`]*\.(?:env|credentials|config|yaml|yml|json)', "secrets_url_reference"),
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
+    # Cloud metadata SSRF (instance credentials, IAM tokens). #8886 PoC.
+    (r'169\.254\.169\.254', "cloud_metadata_ssrf"),
+    # Internal network recon. CIDR-shaped prompt intent ("scan X.X.X.X/X",
+    # port-scan language, "scan the X.X.X.X subnet/range"). Hosts strictly
+    # inside the user's own machine do not match (no /X mask).
+    (r'\b(?:scan|scans|scanned|scanning|probe|probes|probed|probing|recon(?:noitre)?|enumerate|enumerates|sweep|sweeps)\b\s+[^\n]{0,80}?\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?', "internal_network_recon"),
+    (r'\bport[\s-]*scan\b\s+[^\n]{0,40}?\d{1,3}(?:\.\d{1,3}){3}', "port_scan_intent"),
+    # Directed sub-agent credential/config extraction via delegate_task.
+    # Matches "delegate_task ... read/fetch/dump ... ~/.hermes/|.env|..."
+    (r'\bdelegate[_ ]?tasks?\b\s+[^\n]{0,200}?\b(?:read|fetch|dump|extract|summarize|exfiltrate|leak|send|collect|gather)s?\b\s+[^\n]{0,80}?(?:\.hermes|\.env|credentials|configs?|secrets?|keys?|yaml|json)', "delegate_credential_exfil"),
 ]
 
 # Looser pattern set — applied to the assembled prompt when skills are
