@@ -525,6 +525,58 @@ def _swap_node_tree(target: Path, staged: Path) -> bool | None:
     return True
 
 
+# Win32_Processor.Architecture values (winnt.h / MSDN) used by both install.ps1's
+# Get-WindowsArch and the Python heal path. Read via PowerShell CIM to keep parity
+# with install.ps1 and stay emulation-invariant on Windows ARM64 (#108893): Prism
+# x64 emulation lies about PROCESSOR_ARCHITEW6432/PROCESSOR_ARCHITECTURE but
+# Win32_Processor.Architecture reports the real host.
+_WINDOWS_CIM_ARCH = {0: "x86", 9: "amd64", 12: "arm64"}
+
+
+def _query_windows_native_arch() -> int | None:
+    """Return the Win32_Processor.Architecture int for the real host, or None.
+
+    Mirrors install.ps1's Get-WindowsArch: spawn ``powershell.exe -NoProfile`` and
+    ask CIM for ``Win32_Processor`` (emulation-invariant on ARM64). Falls back to
+    ``None`` when powershell/CIM is unavailable (locked-down container, missing
+    binary, timeout) so the caller can fall back to the env-var pair.
+
+    Ponytail: spawns a fresh PowerShell per call (~150 ms cold start on Windows
+    Server 2022; measure on Win11 ARM64 before optimizing). The heal runs at most
+    once per process and only on a missing/broken tree, so the cost is acceptable.
+    Upgrade path: cache the result for the process lifetime, or switch to a
+    pywin32 / WMI binding if a dependency is added.
+    """
+    if sys.platform != "win32":
+        return None
+    import subprocess
+
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).Architecture",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _windows_native_arch() -> str | None:
+    """Emulation-invariant host arch (``"x86"``/``"amd64"``/``"arm64"``) per
+    ``install.ps1``'s ``Get-WindowsArch``; ``None`` when CIM is unavailable."""
+    code = _query_windows_native_arch()
+    return _WINDOWS_CIM_ARCH.get(code) if code is not None else None
+
+
 def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     """Redownload the portable Node zip into ``%HERMES_HOME%\\node`` on Windows.
 
@@ -543,7 +595,12 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     """
     import time
 
-    arch = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")).lower()
+    # Prefer the emulation-invariant Win32_Processor.Architecture query over the
+    # env-var pair, which reports the emulated view (AMD64) under Prism x64
+    # emulation on real ARM64 hosts and causes #108893's wrong-arch Node download.
+    native = _windows_native_arch()
+    env_arch = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")).lower()
+    arch = native or env_arch
     node_arch = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "x86": "x86"}.get(arch)
     if node_arch is None:
         return False
@@ -622,8 +679,24 @@ def heal_hermes_managed_node() -> bool:
     return bool(result)
 
 
+def _windows_node_arch_mismatched(node_path: Path) -> bool:
+    """True when an existing Windows managed-node binary's compiled arch doesn't match the
+    real host arch (#108893). ``node -p process.arch`` reflects how the binary was built,
+    not the emulated view ``PROCESSOR_ARCHITECTURE`` reports under Prism, so a wrong-arch
+    Node from an older heal is caught even though it runs fine under emulation."""
+    expected = _windows_native_arch()
+    if expected is None:
+        return False  # CIM unavailable — skip the check rather than false-positive
+    expected_node_arch = {"amd64": "x64", "arm64": "arm64", "x86": "x86"}[expected]
+    result = _run_version_probe([str(node_path), "-p", "process.arch"])
+    if result is None:
+        return False
+    return result.stdout.decode().strip() != expected_node_arch
+
+
 def _managed_node_tree_outdated(home: Path | None = None) -> bool:
-    """True when the managed node runs but is below the target major (heals like a broken tree)."""
+    """True when the managed node runs but is below the target major, is a pre-release, or
+    (Windows only) was provisioned for the wrong CPU arch (#108893)."""
     for candidate in _iter_managed_node_candidates(_candidate_node_command_names("node"), home):
         result = _run_version_probe([str(candidate), "--version"])
         if result is None:
@@ -637,7 +710,14 @@ def _managed_node_tree_outdated(home: Path | None = None) -> bool:
         # final releases, so node-gyp cannot build node-pty. Mirrors node_satisfies_build() in install.sh.
         if "-" in version:
             return True
-        return major < _HERMES_NODE_TARGET_MAJOR
+        if major < _HERMES_NODE_TARGET_MAJOR:
+            return True
+        # Windows-only wrong-arch check: a pre-existing x64 Node on a real ARM64 host
+        # runs fine under Prism so version checks miss it, but desktop rebuilds under
+        # that Node emit win-unpacked (x64) instead of win-arm64-unpacked.
+        if sys.platform == "win32" and _windows_node_arch_mismatched(candidate):
+            return True
+        return False
     return False
 
 

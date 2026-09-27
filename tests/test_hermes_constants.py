@@ -1152,3 +1152,181 @@ class TestHealAttemptFlagSemantics:
         # The flag is set, so the once-per-process budget is spent.
         assert heal_hermes_managed_node() is False
         assert calls["n"] == 1
+
+
+class TestWindowsNodeArchDetection:
+    """The managed-Node download arch must track the real host CPU, not the emulated
+    view ``PROCESSOR_ARCHITEW6432`` / ``PROCESSOR_ARCHITECTURE`` report under Prism x64
+    emulation on Windows ARM64 (#108893). Mirrors ``install.ps1``'s ``Get-WindowsArch``
+    which already reads ``Win32_Processor.Architecture`` as the emulation-invariant
+    source, falling back to the env-var pair only when WMI/CIM is unavailable."""
+
+    def _stub_heal_env(self, monkeypatch, home):
+        monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(hermes_constants, "managed_node_tree_in_use", lambda _home=None: False)
+        monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+        monkeypatch.setattr(hermes_constants, "_managed_node_in_use_notice_printed", False)
+
+    def test_heal_uses_native_arch_when_prism_reports_amd64(self, tmp_path, monkeypatch):
+        """Prism on ARM64 leaves ``PROCESSOR_ARCHITEW6432`` / ``PROCESSOR_ARCHITECTURE``
+        at ``AMD64`` (the emulated view). A native-arch query that reports ``arm64``
+        must win, so the heal downloads the arm64 Node — not an x64 Node that will
+        emit ``win-unpacked`` on every subsequent desktop rebuild (#108893)."""
+        home = tmp_path / "hermes"
+        home.mkdir()
+        self._stub_heal_env(monkeypatch, home)
+        # Emulated x64 view in both env vars (Prism):
+        monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+        monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+        # Native arch query resolves to arm64 (the real host):
+        monkeypatch.setattr(hermes_constants, "_windows_native_arch", lambda: "arm64")
+
+        captured = {}
+
+        def fake_stage(_home, node_arch):
+            captured["node_arch"] = node_arch
+            return None
+
+        monkeypatch.setattr(hermes_constants, "_stage_windows_node_zip", fake_stage)
+
+        hermes_constants._heal_managed_node_windows()
+        assert captured["node_arch"] == "arm64"
+
+    def test_heal_falls_back_to_env_vars_when_native_query_unavailable(self, tmp_path, monkeypatch):
+        """When WMI/CIM is unavailable (locked-down, container, etc.), the heal must
+        still pick a sensible arch from the env-var pair — same fallback ``install.ps1``'s
+        ``Get-WindowsArch`` uses."""
+        home = tmp_path / "hermes"
+        home.mkdir()
+        self._stub_heal_env(monkeypatch, home)
+        monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "ARM64")
+        monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+        monkeypatch.setattr(hermes_constants, "_windows_native_arch", lambda: None)
+
+        captured = {}
+
+        def fake_stage(_home, node_arch):
+            captured["node_arch"] = node_arch
+            return None
+
+        monkeypatch.setattr(hermes_constants, "_stage_windows_node_zip", fake_stage)
+
+        hermes_constants._heal_managed_node_windows()
+        assert captured["node_arch"] == "arm64"
+
+    def test_heal_falls_back_to_env_vars_amd64(self, tmp_path, monkeypatch):
+        """Symmetric: when the native query is unavailable and env vars say AMD64, the
+        heal must still produce x64 — non-arm64 hosts must keep working."""
+        home = tmp_path / "hermes"
+        home.mkdir()
+        self._stub_heal_env(monkeypatch, home)
+        monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+        monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+        monkeypatch.setattr(hermes_constants, "_windows_native_arch", lambda: None)
+
+        captured = {}
+
+        def fake_stage(_home, node_arch):
+            captured["node_arch"] = node_arch
+            return None
+
+        monkeypatch.setattr(hermes_constants, "_stage_windows_node_zip", fake_stage)
+
+        hermes_constants._heal_managed_node_windows()
+        assert captured["node_arch"] == "x64"
+
+    def test_outdated_flags_wrong_arch_node_on_arm64(self, tmp_path, monkeypatch):
+        """A managed Node from an older (unpatched) heal on a real ARM64 host is x64;
+        it runs fine under Prism emulation so version+pre-release checks miss it, but
+        ``process.arch`` (baked in at build time) reports ``x64`` and must trigger a
+        re-provision so future desktop rebuilds emit ``win-arm64-unpacked``."""
+        home = tmp_path / "hermes"
+        node_dir = home / "node"
+        node_dir.mkdir(parents=True)
+        (node_dir / "node.exe").write_text("fake-x64-node", encoding="utf-8")
+        monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        # Real ARM64 host per the native query; env vars would lie.
+        monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+        monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+        monkeypatch.setattr(hermes_constants, "_windows_native_arch", lambda: "arm64")
+
+        def fake_probe(argv, **_kw):
+            # The first probe in _managed_node_tree_outdated is ``--version`` (must succeed
+            # with a valid final release so we reach the new arch check). The second probe
+            # is the new ``-p process.arch`` — an x64 binary on arm64 reports ``x64``.
+            class _R:
+                pass
+            r = _R()
+            if "--version" in argv:
+                r.stdout = f"v{hermes_constants._HERMES_NODE_TARGET_MAJOR}.5.1\n".encode()
+            else:
+                r.stdout = b"x64"
+            return r
+
+        monkeypatch.setattr(hermes_constants, "_run_version_probe", fake_probe)
+
+        assert hermes_constants._managed_node_tree_outdated() is True
+
+    def test_outdated_does_not_flag_correct_arch_on_arm64(self, tmp_path, monkeypatch):
+        """A correctly-provisioned arm64 Node on an arm64 host must NOT be flagged —
+        the new arch check must only heal wrong-arch trees, never healthy ones."""
+        home = tmp_path / "hermes"
+        node_dir = home / "node"
+        node_dir.mkdir(parents=True)
+        (node_dir / "node.exe").write_text("fake-arm64-node", encoding="utf-8")
+        monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+        monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+        monkeypatch.setattr(hermes_constants, "_windows_native_arch", lambda: "arm64")
+
+        def fake_probe(argv, **_kw):
+            class _R:
+                pass
+            r = _R()
+            if "--version" in argv:
+                r.stdout = f"v{hermes_constants._HERMES_NODE_TARGET_MAJOR}.5.1\n".encode()
+            else:
+                r.stdout = b"arm64"
+            return r
+
+        monkeypatch.setattr(hermes_constants, "_run_version_probe", fake_probe)
+
+        assert hermes_constants._managed_node_tree_outdated() is False
+
+
+class TestWindowsNativeArchQuery:
+    """``_windows_native_arch()`` must consult an emulation-invariant source first
+    (``Win32_Processor.Architecture`` via PowerShell CIM, mirroring ``install.ps1``'s
+    ``Get-WindowsArch``), and fall back to ``None`` — not an emulated-view default —
+    when that source is unavailable. The fallback ``None`` triggers the env-var
+    fallback in ``_heal_managed_node_windows``."""
+
+    def test_returns_arm64_when_cim_reports_12(self, monkeypatch):
+        """Architecture value 12 = ARM64 per Win32_Processor spec."""
+        monkeypatch.setattr(hermes_constants, "_query_windows_native_arch", lambda: 12)
+        assert hermes_constants._windows_native_arch() == "arm64"
+
+    def test_returns_x64_when_cim_reports_9(self, monkeypatch):
+        """Architecture value 9 = AMD64/x64. ``_windows_native_arch`` returns the canonical
+        CIM-style name (``amd64``); downstream helpers translate to Node's ``x64``."""
+        monkeypatch.setattr(hermes_constants, "_query_windows_native_arch", lambda: 9)
+        assert hermes_constants._windows_native_arch() == "amd64"
+
+    def test_returns_x86_when_cim_reports_0(self, monkeypatch):
+        """Architecture value 0 = x86."""
+        monkeypatch.setattr(hermes_constants, "_query_windows_native_arch", lambda: 0)
+        assert hermes_constants._windows_native_arch() == "x86"
+
+    def test_returns_none_when_cim_unavailable(self, monkeypatch):
+        """WMI locked / container / powershell missing — caller must fall back to env vars."""
+        monkeypatch.setattr(hermes_constants, "_query_windows_native_arch", lambda: None)
+        assert hermes_constants._windows_native_arch() is None
+
+    def test_returns_none_for_unmapped_cim_value(self, monkeypatch):
+        """Unknown Architecture int (e.g. 5=ARM 32-bit, future values) — caller falls back
+        rather than guessing wrong. ARM 32-bit hosts can't run modern Node anyway."""
+        monkeypatch.setattr(hermes_constants, "_query_windows_native_arch", lambda: 5)
+        assert hermes_constants._windows_native_arch() is None
