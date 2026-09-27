@@ -159,6 +159,58 @@ def test_prefer_api_key_honors_hermes_xai_base_url_with_validation(monkeypatch):
     assert creds["base_url"] == "https://api.x.ai/v1"
 
 
+def test_xai_tts_requirements_probe_prefers_api_key(monkeypatch):
+    """Sibling site of #87045: tools.tts_tool._xai_requirements() is the
+    provider check the text_to_speech_tool dispatch consults. When an explicit
+    XAI_API_KEY is configured it must short-circuit on the key — mirroring
+    _generate_xai_tts — instead of round-tripping through the OAuth pool for
+    an availability probe that the metered /v1/tts endpoint rejects anyway.
+    Asserting on pool select/refresh calls keeps the test honest about the
+    real defect (truthiness was already True).
+    """
+    from tools.tts_tool import _xai_requirements
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "tools.xai_http.get_env_value",
+        lambda name, default=None: {"XAI_API_KEY": "paid-key-x1"}.get(name, default),
+    )
+    calls = {"pool_select": 0, "pool_refresh": 0}
+
+    def _recording_load_pool(provider_id):
+        from types import SimpleNamespace
+
+        class _RecordingPool:
+            def select(self):
+                calls["pool_select"] += 1
+                return SimpleNamespace(
+                    access_token="oauth-token-x1",
+                    runtime_api_key=None,
+                    runtime_base_url=None,
+                    base_url="https://api.x.ai/v1",
+                )
+
+            def try_refresh_matching(self, _hint):
+                calls["pool_refresh"] += 1
+                return None
+
+        if provider_id == "xai-oauth":
+            return _RecordingPool()
+        raise KeyError(provider_id)
+
+    monkeypatch.setattr("agent.credential_pool.load_pool", _recording_load_pool)
+
+    assert _xai_requirements() is True
+    assert calls["pool_select"] == 0, (
+        "configured XAI_API_KEY must short-circuit the availability probe; "
+        "OAuth pool was consulted for a credential the metered endpoint rejects"
+    )
+    assert calls["pool_refresh"] == 0, (
+        "configured XAI_API_KEY must short-circuit the availability probe; "
+        "OAuth pool refresh was triggered"
+    )
+
+
 def test_prefer_api_key_honors_profile_scope_only_key(tmp_path, monkeypatch):
     """A key present only in the active profile's secret scope (not in
     os.environ / .env) is honored on the preferred path — the read goes
