@@ -10111,6 +10111,7 @@ def _install_python_dependencies_with_optional_fallback(
     try:
         _install(["install", "-e", f".[{group}]"])
         _verify_console_scripts_installed(install_cmd_prefix, env=env)
+        _reconcile_venv_with_lockfile(install_cmd_prefix, env=env, extras=[group])
         return
     except subprocess.CalledProcessError:
         print(
@@ -10149,6 +10150,91 @@ def _install_python_dependencies_with_optional_fallback(
     # downstream.
     _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
+    # Lockfile reconciliation runs on every successful path, including the
+    # individual-extras fallback above, so the next `uv run hermes` always
+    # validates against an already-synced venv (#8744). Only the extras that
+    # actually landed are synced: the fallback path deliberately skipped the
+    # ones that failed to build here (e.g. Android extras), and a sync that
+    # asked for them again would undo that.
+    _reconcile_venv_with_lockfile(
+        install_cmd_prefix, env=env, extras=installed_extras
+    )
+
+
+def _reconcile_venv_with_lockfile(
+    install_cmd_prefix: list[str],
+    *,
+    env: dict[str, str] | None,
+    extras: list[str],
+) -> None:
+    """Run ``uv sync --locked`` against the venv hermes actually runs from (#8744).
+
+    ``uv pip install -e .[all]`` writes the package but does not enforce
+    lockfile pinning, so the next ``uv run hermes`` is free to re-validate
+    and re-resolve — which means a network round-trip for git-pinned
+    extras (tinker / yc-bench / atropos) and an offline launch dies with
+    "Could not resolve host: github.com". A locked sync that runs after
+    the install pins the venv to the lockfile state so subsequent
+    ``uv run hermes`` validates against an already-synced venv.
+
+    The sync must be pointed at that venv explicitly: ``uv sync`` operates on
+    the *project* environment (``PROJECT_ROOT/.venv``) and ignores a
+    ``VIRTUAL_ENV`` that does not match it — it warns
+    (``VIRTUAL_ENV=... does not match the project environment path .venv and
+    will be ignored``) and creates ``.venv`` instead. Installers here write
+    ``venv/``, so the drift this exists to remove would survive the sync
+    entirely, and the lock would be pinned into an environment nothing runs.
+    ``UV_PROJECT_ENVIRONMENT`` (the same lever ``managed_uv`` uses) redirects
+    the sync at the real venv; ``--active`` would work too but errors out
+    when no venv is active. No target venv (site-packages / pip install) means
+    there is nothing to reconcile, and a bare sync would only strand a new
+    ``.venv``, so it is skipped.
+
+    ``extras`` are the optional-dependency groups the install actually asked
+    for — syncing a hardcoded ``all`` would drag the full set into a curated
+    Termux profile (and uninstall the deps its extras pinned instead).
+
+    Failures are logged but not raised: the install itself succeeded, and a
+    drifted lockfile is recoverable on the next update / doctor run. Skipped
+    when uv isn't the install tool or uv.lock isn't present (e.g. ZIP-swap /
+    bare checkout — uv would refuse --locked).
+    """
+    if not _is_uv_command(install_cmd_prefix):
+        return
+    if not (PROJECT_ROOT / "uv.lock").is_file():
+        return
+
+    target: str | None = None
+    if env and env.get("VIRTUAL_ENV") and Path(env["VIRTUAL_ENV"]).is_dir():
+        target = env["VIRTUAL_ENV"]
+    if target is None:
+        from hermes_constants import project_venv_dir
+
+        venv_dir = project_venv_dir(PROJECT_ROOT)
+        target = str(venv_dir) if venv_dir else None
+    if target is None:
+        logger.debug("post-install uv sync skipped: no project venv to reconcile")
+        return
+
+    sync_env = dict(env) if env is not None else dict(os.environ)
+    sync_env["UV_PROJECT_ENVIRONMENT"] = target
+    sync_env["VIRTUAL_ENV"] = target
+    sync_cmd = [install_cmd_prefix[0], "sync"]
+    for extra in extras:
+        sync_cmd += ["--extra", extra]
+    sync_cmd.append("--locked")
+    try:
+        result = subprocess.run(sync_cmd, cwd=PROJECT_ROOT, env=sync_env, check=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("post-install uv sync skipped: %s", exc)
+        return
+    if result.returncode != 0:
+        # A stale lockfile refuses --locked and changes nothing; say so
+        # instead of leaving the venv silently un-reconciled (#8744).
+        logger.warning(
+            "post-install uv sync failed (rc=%d); venv left as-is",
+            result.returncode,
+        )
 
 
 def _load_console_script_names() -> list[str]:
