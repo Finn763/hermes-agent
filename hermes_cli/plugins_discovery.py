@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -162,9 +163,10 @@ def scan_directory(
 
 
 def collect_directory_manifests() -> List[PluginManifest]:
-    """Read directory manifests in full-discovery order (bundled top-level, bundled/platforms, user, opt-in
-    project) without loading or mutating anything, so startup probes share the exact precedence/containment
-    rules of the real discovery sweep."""
+    """Read directory manifests in full-discovery order (bundled top-level, bundled/platforms, shared,
+    user, opt-in project) without loading or mutating anything, so startup probes share the exact
+    precedence/containment rules of the real discovery sweep. Per-profile ``plugins/`` still wins on key
+    collision (scanned last), so existing per-profile overrides are preserved (#87238)."""
     from hermes_cli import plugins as _origin  # patched names resolve through the origin
     manifests: List[PluginManifest] = []
 
@@ -181,6 +183,12 @@ def collect_directory_manifests() -> List[PluginManifest]:
     logger.debug("Scanning bundled plugins: %s", repo_plugins)
     _scan("bundled (top-level)", repo_plugins, "bundled",
           {"memory", "context_engine", "model-providers", "cron_providers"})
+    # Shared plugins dir for per-directory profiles (#87238): env wins over config so the same plugin
+    # installed once is visible from any profile without per-profile reinstall.
+    shared_dir = _get_shared_plugins_dir()
+    if shared_dir is not None and shared_dir != get_hermes_home() / "plugins":
+        logger.debug("Scanning shared plugins: %s", shared_dir)
+        _scan("shared", shared_dir, "shared")
     user_dir = get_hermes_home() / "plugins"
     logger.debug("Scanning user plugins: %s", user_dir)
     _scan("user", user_dir, "user")
@@ -191,6 +199,25 @@ def collect_directory_manifests() -> List[PluginManifest]:
     else:
         logger.debug("Project plugins disabled (set HERMES_ENABLE_PROJECT_PLUGINS=1 to enable)")
     return manifests
+
+
+def _get_shared_plugins_dir() -> Optional[Path]:
+    """Resolve the cross-profile shared plugins directory.
+
+    ``HERMES_SHARED_PLUGINS`` env var wins over ``plugins.shared_dir`` in config.yaml; an empty or
+    unparseable config entry is treated as unset. Returns ``None`` when neither is configured, or when the
+    resolved path is the same as the per-profile ``plugins/`` dir (no point double-scanning)."""
+    env_override = os.getenv("HERMES_SHARED_PLUGINS", "").strip()
+    if env_override:
+        return Path(env_override)
+    try:
+        from hermes_cli.config import load_config
+        cfg_value = cfg_get(load_config(), "plugins", "shared_dir", default="")
+    except Exception:
+        cfg_value = ""
+    if isinstance(cfg_value, str) and cfg_value.strip():
+        return Path(cfg_value.strip())
+    return None
 
 
 def resolve_manifest_winners(manifests: List[PluginManifest]) -> Dict[str, PluginManifest]:
