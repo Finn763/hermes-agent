@@ -1099,6 +1099,15 @@ def kanban_command(args: argparse.Namespace) -> int:
         # without ever reaching the repair path.
         if action == "repair":
             return _cmd_repair(args)
+        # Install-time safety warning (#87283): the first command that creates
+        # state on a fresh HERMES_HOME is the one after which the next
+        # `hermes gateway start` auto-dispatches every 'ready' card, so every
+        # entry point that creates state has to say so — not just `init`.
+        # `init` prints the same helper itself and does so unconditionally
+        # (see `_cmd_init`), so only the other actions warn here, and only on
+        # the call that actually creates the DB.
+        if action != "init":
+            _warn_new_state()
         try:
             kb.init_db()
         except Exception as exc:
@@ -1332,6 +1341,10 @@ def _cmd_boards_create(args: argparse.Namespace) -> int:
         print("kanban boards create: slug is required", file=sys.stderr)
         return 2
     already = kb.board_exists(normed) and normed != kb.DEFAULT_BOARD
+    # `boards create` can land on a fresh HERMES_HOME that never ran
+    # `kanban init` — it creates the board DB, so it is the moment the
+    # gateway gains something to dispatch (#87283).
+    _warn_new_state(kb.kanban_db_path(board=normed))
     meta = kb.create_board(
         normed,
         name=args.name,
@@ -1471,6 +1484,57 @@ def _parse_duration(val) -> Optional[int]:
     raise ValueError(f"malformed duration {val!r} (expected 30s, 5m, 2h, 1d, or a number)")
 
 
+def _install_time_dispatch_warning() -> str:
+    """Install-time warning shared by ``kanban init`` and any future
+    entry point that creates state on disk (#87283).
+
+    One helper so the wording stays consistent across every place a user
+    can land after install — copy-pasting the same text into multiple
+    commands is how the symptom drifts back in. Surface the three
+    properties the issue calls out: gateway is a hard dependency, dispatch
+    is automatic once it runs, and there is no global concurrency cap.
+
+    Returns the warning as a single ready-to-print string (one trailing
+    newline). Caller is expected to ``print(...)`` it; we do not print
+    here so the helper stays pure and unit-testable.
+    """
+    return (
+        "WARNING: starting the gateway makes dispatch automatic — every\n"
+        "task already in 'ready' (including any you create now) will be\n"
+        "spawned on the next dispatcher tick (default 60s) without per-card\n"
+        "opt-in. The gateway is required for any task to run, so the\n"
+        "install is non-functional without it, but it is also the only\n"
+        "step needed to begin fan-out. There is no global cap on\n"
+        "concurrent workers beyond the per-task spawn budget — destructive\n"
+        "card titles (rm, remove, clean up, delete, ...) execute with full\n"
+        "tool authority the moment dispatch picks them up.\n"
+        "Mitigations: set kanban.dispatch_in_gateway=false in config.yaml\n"
+        "before `hermes gateway start`, or only place cards in 'triage'\n"
+        "/'todo' until you have reviewed each title. See docs/user-guide/\n"
+        "features/kanban.md for the full safety checklist."
+    )
+
+
+def _warn_new_state(db_path: Optional[Path] = None) -> bool:
+    """Warn iff ``db_path`` does not exist yet — i.e. this command is the
+    one creating kanban state on a fresh ``HERMES_HOME`` (#87283).
+
+    Shared by the auto-init in :func:`kanban_command` and ``boards create``
+    so every entry point that can create state says the same thing, without
+    duplicating the wording (see :func:`_install_time_dispatch_warning`).
+    Only on creation: repeating a 15-line block on every ``kanban list`` is
+    noise. Goes to *stderr* so ``--json`` on stdout stays parseable.
+
+    Returns whether it printed, so a caller that wants the notice
+    unconditionally (``kanban init``) can tell the difference.
+    """
+    if (db_path if db_path is not None else kb.kanban_db_path()).exists():
+        return False
+    print(_install_time_dispatch_warning(), file=sys.stderr)
+    print(file=sys.stderr)
+    return True
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     path = kb.init_db()
     print(f"Kanban DB initialized at {path}")
@@ -1493,6 +1557,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     else:
         print("No profiles found under ~/.hermes/profiles/.")
         print("Create one with `hermes -p <name> setup` before assigning tasks.")
+    print()
+    # Install-time safety warning (#87283). Print before the "next step"
+    # block so the user reads the consequence of starting the gateway
+    # in the same breath as the command that triggers it. The helper is
+    # shared (see `_install_time_dispatch_warning`) so the wording can
+    # be reused by future install hooks without copy-paste drift.
+    print(_install_time_dispatch_warning())
     print()
     print("Next step: start the gateway so ready tasks actually get picked up.")
     print("  hermes gateway start")
