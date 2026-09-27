@@ -1263,18 +1263,20 @@ writeKey('hermes.desktop.paneDockHeals.v1', null)
 
 // Panes already enforced THIS boot: the invariant re-asserts at boot, not
 // against a live user — a mid-session drag out of the anchor strip sticks
-// until the next launch, so there is never a tug-of-war.
+// until the next launch, so there is never a tug-of-war. A pane the user
+// has explicitly dragged (recorded in $userPlacedPanes via moveTreePane /
+// moveTreePanes / mergeTreeZones) is exempt: re-homing it would silently
+// undo the persisted layout on every boot (issue #107925).
 const enforcedDocksThisBoot = new Set<string>()
 
 /**
  * A `panes` contribution whose dock hint carries `enforce: true` is re-homed
  * onto the hint's anchor at every boot's first adoption pass when it isn't
- * already docked there. Unlike the retired one-time heal, nothing
- * exempts the pane — not a burned token, not $userPlacedPanes — because the
- * hint is the owner's standing invariant about where the pane lives
- * (Bot Mode's Bots pane IS the SESSIONS | BOTS tab strip), not a one-shot
- * migration. Center hints consolidate panes into their anchor's tab strip;
- * edge hints restore the declared split beside their anchor.
+ * already docked there AND the user hasn't explicitly dragged it. The drag
+ * record (in $userPlacedPanes) wins — otherwise the persisted layout
+ * silently rolls back on every boot and the drag affordance is a lie
+ * (issue #107925). Center hints consolidate panes into their anchor's tab
+ * strip; edge hints restore the declared split beside their anchor.
  *
  * Silent like adoption — the anchor zone keeps its active tab. The center
  * insert pins the zone's header shown, which is the point: the strip is how
@@ -1289,7 +1291,15 @@ function enforceDockedPanes(
   for (const pane of registry.getArea('panes')) {
     const dock = dataOf(pane.id)?.dock
 
-    if (!dock?.enforce || !allPaneIds(next).includes(pane.id)) {
+    // The user's drag wins: $userPlacedPanes already records explicit drag
+    // moves via moveTreePane / moveTreePanes / mergeTreeZones. Re-homing here
+    // would silently undo the persisted layout on the very next boot — the
+    // affordance is a lie if a recorded user placement can't override it.
+    if (
+      !dock?.enforce ||
+      !allPaneIds(next).includes(pane.id) ||
+      $userPlacedPanes.get().has(pane.id)
+    ) {
       continue
     }
 

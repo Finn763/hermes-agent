@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Enforced dock invariants: a pane whose dock hint carries `enforce: true`
 // (Bot Mode's Bots pane) re-homes onto its center anchor at EVERY boot's
-// first adoption pass — persisted layouts otherwise pin the stale stacked
-// arrangement forever, because adoption only ever places panes MISSING from
-// the tree. Unlike the retired one-time heal, nothing exempts the pane: not
-// a previously burned heal token, not $userPlacedPanes. The invariant is
-// boot-scoped, so an intra-session drag sticks until the next launch.
+// first adoption pass when it isn't already docked there — unless the user
+// has explicitly dragged it (recorded in $userPlacedPanes), in which case
+// the drag wins. Re-homing an explicitly dragged pane makes the drag
+// affordance a lie and silently undoes the persisted layout on the next
+// boot (issue #107925). The invariant is boot-scoped, so an intra-session
+// drag sticks until the next launch.
 
 const TREE_KEY = 'hermes.desktop.layoutTree.v2'
 const USER_PLACED_KEY = 'hermes.desktop.userPlacedPanes.v1'
@@ -109,7 +110,7 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
     expect(JSON.stringify(persisted)).toContain('"panes":["sessions","hermes-bots:pane"]')
   })
 
-  it('re-homes even a USER-PLACED pane — the owner invariant beats the drag record', async () => {
+  it('respects a USER-PLACED pane — the drag record beats the owner invariant', async () => {
     window.localStorage.setItem(USER_PLACED_KEY, JSON.stringify(['hermes-bots:pane']))
 
     const { model, tree } = await setup()
@@ -118,7 +119,10 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
 
     const group = model.findGroupOfPane(tree.$layoutTree.get()!, 'hermes-bots:pane')!
 
-    expect(group.panes).toEqual(['sessions', 'hermes-bots:pane'])
+    // A pane the user has explicitly dragged is exempt from the enforce —
+    // otherwise the drag affordance is a lie and the persisted layout rolls
+    // back silently on every boot. See issue #107925.
+    expect(group.panes).not.toContain('sessions')
   })
 
   it('re-homes even when the retired heal token was already burned, and clears the stale ledger', async () => {
@@ -135,7 +139,7 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
     expect(window.localStorage.getItem(LEGACY_HEAL_KEY)).toBeNull()
   })
 
-  it('is idempotent within a boot and does not fight an intra-session drag', async () => {
+  it('is idempotent within a boot and respects an intra-session drag as a user override', async () => {
     const { model, tree, registry } = await setup()
 
     tree.watchContributedPanes()
@@ -143,11 +147,12 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
     // Sanity: enforced into the strip.
     expect(model.findGroupOfPane(tree.$layoutTree.get()!, 'hermes-bots:pane')!.panes).toContain('sessions')
 
-    // The user drags the pane back out into its own zone below sessions.
-    tree.$layoutTree.set(JSON.parse(JSON.stringify(stackedTree)))
+    // The user drags the pane out of the strip — goes through the real move
+    // API, which marks the pane user-placed.
+    tree.moveTreePane('hermes-bots:pane', { groupId: 'g-main', pos: 'right' })
 
     // A later registry mutation re-runs the adoption pass (the enforce's
-    // caller) — same boot, so the drag sticks until the next launch.
+    // caller) — same boot, so the recorded drag sticks.
     registry.register({
       id: 'other',
       area: 'panes',
@@ -158,17 +163,22 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
 
     const group = model.findGroupOfPane(tree.$layoutTree.get()!, 'hermes-bots:pane')!
 
+    // Pane is now alone — sessions isn't dragged along with it.
     expect(group.panes).toEqual(['hermes-bots:pane'])
+    // The drag was recorded as a user override (moveTreePane calls markPaneUserPlaced).
+    expect(window.localStorage.getItem(USER_PLACED_KEY)).toContain('hermes-bots:pane')
   })
 
-  it('re-homes again on the NEXT boot after a drag persisted the stacked shape', async () => {
+  it('does NOT re-home on the NEXT boot when the user dragged the pane (issue #107925)', async () => {
     const first = await setup()
 
     first.tree.watchContributedPanes()
-    first.tree.$layoutTree.set(JSON.parse(JSON.stringify(stackedTree)))
+
+    // Simulate a real drag out of the sessions strip into a free placement.
+    first.tree.moveTreePane('hermes-bots:pane', { groupId: 'g-main', pos: 'right' })
     first.tree.persistTree()
 
-    // Simulate the next launch: fresh module graph, persisted stacked tree.
+    // Simulate the next launch: fresh module graph, persisted user-placed set.
     vi.resetModules()
 
     const second = await setup()
@@ -177,7 +187,11 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
 
     const group = second.model.findGroupOfPane(second.tree.$layoutTree.get()!, 'hermes-bots:pane')!
 
-    expect(group.panes).toEqual(['sessions', 'hermes-bots:pane'])
+    // The drag persists across the reboot — that's the whole fix. The pane
+    // does NOT get re-homed into the sessions strip on the next boot.
+    expect(group.panes).toEqual(['hermes-bots:pane'])
+    expect(group.panes).not.toContain('sessions')
+    expect(window.localStorage.getItem(USER_PLACED_KEY)).toContain('hermes-bots:pane')
   })
 
   it('shows the tab strip when already co-located but hidden with bots active (community "only Bots shows" regression)', async () => {
