@@ -446,6 +446,7 @@ from hermes_cli.subcommands.sync import build_sync_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
 from hermes_cli.subcommands.profile import build_profile_parser
 from hermes_cli.subcommands.model import build_model_parser
+from hermes_cli.subcommands.models import build_models_parser
 from hermes_cli.subcommands.setup import build_setup_parser
 
 from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
@@ -3754,6 +3755,40 @@ def cmd_model(args):
         lambda: select_provider_and_model(args=args),
         cancelled_message="No change.",
     )
+
+
+def cmd_models(args):
+    """Noninteractive provider-scoped model discovery (``hermes models --json``)."""
+    import json as _json
+
+    if not getattr(args, "json", False):
+        print("hermes models: --json is required for machine-readable output; "
+              "human output is not implemented.", file=sys.stderr)
+        return 2
+    try:
+        from hermes_cli.models_discovery import discover_models
+
+        response, code = discover_models(
+            provider=getattr(args, "provider", None),
+            refresh=getattr(args, "refresh", False),
+            offline=getattr(args, "offline", False),
+        )
+        print(_json.dumps(response))
+        return code
+    except Exception as exc:  # noqa: BLE001 — envelope must survive internal failure
+        print(_json.dumps({
+            "schema_version": "1",
+            "request": {
+                "provider": getattr(args, "provider", None),
+                "refresh": bool(getattr(args, "refresh", False)),
+                "offline": bool(getattr(args, "offline", False)),
+            },
+            "providers": [],
+            "errors": [{"code": "internal",
+                        "message": f"unexpected failure: {type(exc).__name__}"}],
+        }))
+        print(f"hermes models: internal failure ({type(exc).__name__})", file=sys.stderr)
+        return 4
 
 
 def _is_profile_api_key_provider(provider_id: str) -> bool:
@@ -13134,6 +13169,7 @@ def main():
     # model command  (parser built in hermes_cli/subcommands/model.py)
     # =========================================================================
     build_model_parser(subparsers, cmd_model=cmd_model)
+    build_models_parser(subparsers, cmd_models=cmd_models)
 
     from hermes_cli.moa_cmd import cmd_moa
 
