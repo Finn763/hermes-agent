@@ -689,6 +689,12 @@ def browser_exec(
             text=True,
             timeout=timeout,
             env=env,
+            # ponytail: text=True without encoding decodes with
+            # locale.getpreferredencoding() (cp1252/cp936 on Windows) and
+            # crashes the reader thread on any non-ASCII byte (#87152). The
+            # install_cli call above already pins the same pair.
+            encoding="utf-8",
+            errors="replace",
             **popen_extra,
         )
     except subprocess.TimeoutExpired:
