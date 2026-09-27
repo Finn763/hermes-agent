@@ -46,6 +46,30 @@ class TestGenerateTitle:
         assert captured_kwargs["task"] == "title_generation"
         assert captured_kwargs["timeout"] is None
 
+    def test_title_generation_disables_reasoning(self):
+        """Aux title calls must not burn thinking tokens on thinking-capable
+        providers (#107238).
+
+        The user's session config sets ``agent.reasoning_effort: false`` (or
+        desktop toggles Thinking → Off), but title_generation's auxiliary call
+        passed no reasoning_config — so the DeepSeek profile fell through to
+        its deliberate ``thinking: enabled`` default and burned ~95% of
+        output tokens on reasoning per the issue's usage ledger.
+        """
+        captured_kwargs = {}
+
+        def mock_call_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "Title"
+            return resp
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            assert generate_title("hello") == "Title"
+
+        assert captured_kwargs["reasoning_config"] == {"enabled": False}
+
 
 
     def test_strips_think_blocks(self):

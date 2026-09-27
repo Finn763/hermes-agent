@@ -410,6 +410,10 @@ def generate_title(
             timeout=timeout,
             main_runtime=main_runtime,
             extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
+            # Titles are forced-format JSON; thinking burns output tokens on
+            # providers like DeepSeek V4 whose profile defaults
+            # ``thinking: enabled`` when reasoning_config is absent (#107238).
+            reasoning_config={"enabled": False},
         )
         content = response.choices[0].message.content or ""
         title = _clean_title(_extract_title_text(content))
