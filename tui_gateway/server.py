@@ -963,6 +963,38 @@ def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
         logger.debug("session.reclaimed broadcast failed", exc_info=True)
 
 
+def _announce_cancelled_approvals(session: dict, dropped: list,
+                                end_reason: str) -> None:
+    """Tell connected clients which pending approvals teardown just discarded.
+
+    The orphan reap / session close pops ``tools.approval._gateway_queues``
+    and the parked agent wait resolves as deny/timeout — from the user's side
+    the prompt simply never arrives (#106678). One ``approval.cancelled``
+    broadcast per dropped entry (same global channel as
+    ``session.reclaimed``) makes the discard visible instead of silent.
+    Fires for every end reason: a dropped prompt the user never answered is
+    always news, even on an explicit close. Best-effort; a failed notify
+    must never break teardown.
+    # ponytail: broadcast-only, no tombstone — a client replaying
+    # approval.pending against the dead id still gets 4001; persist the
+    # cancelled entries if that path needs the notice too.
+    """
+    for data in dropped:
+        try:
+            _broadcast_global_event(
+                "approval.cancelled",
+                {
+                    "session_id": str(session.get("_sid") or ""),
+                    "stored_session_id": str(session.get("session_key") or ""),
+                    "request_id": str(data.get("request_id") or ""),
+                    "command": str(data.get("command") or ""),
+                    "reason": end_reason,
+                },
+            )
+        except Exception:
+            logger.debug("approval.cancelled broadcast failed", exc_info=True)
+
+
 def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
     """Fully tear down a session: finalize, unregister, close agent + worker.
 
@@ -978,12 +1010,16 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     _finalize_session(session, end_reason=end_reason)
     _announce_session_reclaimed(session, end_reason)
     try:
-        from tools.approval import unregister_gateway_notify
+        from tools.approval import list_gateway_approvals, unregister_gateway_notify
 
         if key := session.get("session_key"):
+            dropped = list_gateway_approvals(key)
             unregister_gateway_notify(key)
+        else:
+            dropped = []
     except Exception:
-        pass
+        dropped = []
+    _announce_cancelled_approvals(session, dropped, end_reason)
     try:
         agent = session.get("agent")
         if agent is not None and hasattr(agent, "close"):
