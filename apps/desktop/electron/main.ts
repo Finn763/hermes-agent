@@ -2793,8 +2793,26 @@ function runGit(args, options: any = {}): Promise<{ code: number; stdout: string
       stderr += text
       options.onLine?.('stderr', text)
     })
-    child.once('error', reject)
-    child.once('exit', code => resolve({ code, stdout, stderr }))
+    // #125932: reap git calls stuck on a failing network (tree:0 promisor
+    // fetch) so retries can't pile up into dozens of orphaned git processes.
+    // Callers that pass no timeout keep the old wait-forever behavior.
+    let timer = null
+    if (typeof options.timeoutMs === 'number' && options.timeoutMs >= 0) {
+      timer = setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          // already exited; 'exit' below settles the promise
+        }
+      }, options.timeoutMs)
+      timer.unref?.()
+    }
+    const settle = fn => {
+      if (timer) clearTimeout(timer)
+      fn()
+    }
+    child.once('error', err => settle(() => reject(err)))
+    child.once('exit', code => settle(() => resolve({ code, stdout, stderr })))
   })
 }
 

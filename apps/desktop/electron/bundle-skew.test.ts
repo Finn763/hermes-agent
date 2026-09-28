@@ -84,4 +84,21 @@ describe('detectBundleSkew', () => {
       outOfSync: false
     })
   })
+
+  it(
+    'gives up instead of hanging when git never resolves (tree:0 promisor stall)',
+    { timeout: 50_000 },
+    async () => {
+      const seenOptions: unknown[] = []
+      const hung: RunGit = (_args, options) => {
+        seenOptions.push(options)
+        return new Promise<{ code: number; stderr: string; stdout: string }>(() => {})
+      }
+
+      const result = await detectBundleSkew(STAMP, hung, REPO, { timeoutMs: 200 })
+
+      expect(result).toEqual({ desktopCommitsBehind: null, outOfSync: false })
+      expect(seenOptions).toEqual([{ cwd: REPO, timeoutMs: 200 }])
+    }
+  )
 })

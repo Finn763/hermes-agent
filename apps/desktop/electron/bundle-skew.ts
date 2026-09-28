@@ -43,10 +43,16 @@ export interface BundleSkewResult {
 
 export type RunGit = (
   args: string[],
-  options: { cwd: string }
+  options: { cwd: string; timeoutMs?: number }
 ) => Promise<{ code: number; stderr: string; stdout: string }>
 
 const NOT_STALE: BundleSkewResult = { desktopCommitsBehind: null, outOfSync: false }
+
+// A path-filtered rev-list on a tree:0 partial clone fetches every tree in
+// <stamp>..HEAD over the network; when the link is failing it hangs forever
+// and each retry leaks another git process (#125932). Cap it — a slow link
+// reports "not stale" instead of piling up.
+const BUNDLE_SKEW_GIT_TIMEOUT_MS = 30_000
 
 /** Matches write-build-stamp.mjs's all-zero placeholder for non-git builds. */
 export function isFallbackCommit(commit: string): boolean {
@@ -56,16 +62,32 @@ export function isFallbackCommit(commit: string): boolean {
 export async function detectBundleSkew(
   stamp: BundleSkewStamp | null,
   runGit: RunGit,
-  repoRoot: string
+  repoRoot: string,
+  opts: { timeoutMs?: number } = {}
 ): Promise<BundleSkewResult> {
   if (!stamp?.commit || stamp.source === 'fallback' || isFallbackCommit(stamp.commit)) {
     return NOT_STALE
   }
 
   try {
-    const result = await runGit(['rev-list', '--count', `${stamp.commit}..HEAD`, '--', 'apps/desktop'], {
-      cwd: repoRoot
+    const timeoutMs = opts.timeoutMs ?? BUNDLE_SKEW_GIT_TIMEOUT_MS
+    let clearTimer = () => {}
+    const onTimeout = new Promise<null>(resolve => {
+      const t = setTimeout(() => resolve(null), timeoutMs)
+      clearTimer = () => clearTimeout(t)
     })
+    const result = await Promise.race([
+      runGit(['rev-list', '--count', `${stamp.commit}..HEAD`, '--', 'apps/desktop'], {
+        cwd: repoRoot,
+        timeoutMs
+      }),
+      onTimeout
+    ])
+    clearTimer()
+
+    if (result === null) {
+      return NOT_STALE
+    }
 
     if (result.code !== 0) {
       return NOT_STALE
