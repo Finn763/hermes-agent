@@ -71,7 +71,7 @@ class TestSmartApproval:
         monkeypatch.setattr(approval_module, "_smart_approve", lambda *_: "approve")
         monkeypatch.setattr(
             "tools.tirith_security.check_command_security",
-            lambda _command: {"action": "allow", "findings": [], "summary": ""},
+            lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         )
         approval_module.clear_session(session_key)
         approval_module._permanent_approved.clear()

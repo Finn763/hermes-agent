@@ -289,7 +289,7 @@ def test_terminal_smart_deny_owner_override_is_one_operation(gw_session, monkeyp
     )
     monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
-        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         raising=False,
     )
 
@@ -344,7 +344,7 @@ def test_smart_escalate_still_persists_session_choice(gw_session, monkeypatch):
     )
     monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
-        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         raising=False,
     )
 
@@ -366,7 +366,7 @@ def test_terminal_smart_deny_pending_payload_is_one_operation(gw_session, monkey
     )
     monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
-        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         raising=False,
     )
 

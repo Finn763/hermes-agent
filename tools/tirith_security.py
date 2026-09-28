@@ -728,7 +728,31 @@ _MAX_FINDINGS = 50
 _MAX_SUMMARY_LEN = 500
 
 
-def check_command_security(command: str) -> dict:
+def _remote_shell_expands_tilde(env_type: str) -> bool:
+    """Return whether the shell running the command expands its ``~`` itself.
+
+    ``ssh`` runs the command on the remote host as the remote user, and docker
+    runs it inside the container — expanding ``~`` with the local
+    ``os.path.expanduser`` would rewrite it to the Hermes host home before that
+    shell ever sees it. Same divergence ``_is_ssh_remote_tilde_cwd``
+    (``hermes_cli/config.py``) already guards for ``cwd``; docker belongs to the
+    same class (``tools/environments/docker.py`` sets no ``HOME``).
+    """
+    return (env_type or "").strip().lower() in ("ssh", "docker")
+
+
+def _normalize_command_for_scan(command: str, env_type: str = "") -> str:
+    # ponytail: leading-tilde only; mid-command ~/ args left verbatim (upgrade to shell-lexed expansion if tirith flags those too).
+    if command:
+        stripped = command.lstrip()
+        if stripped.startswith("~") and not _remote_shell_expands_tilde(env_type):
+            expanded = os.path.expanduser(stripped)
+            if expanded != stripped:
+                return command[: len(command) - len(stripped)] + expanded
+    return command
+
+
+def check_command_security(command: str, env_type: str = "") -> dict:
     """Run tirith security scan on a command.
 
     Exit code determines action (0=allow, 1=block, 2=warn). JSON enriches
@@ -775,7 +799,7 @@ def check_command_security(command: str) -> dict:
     try:
         result = subprocess.run(
             [tirith_path, "check", "--json", "--non-interactive",
-             "--shell", "posix", "--", command],
+             "--shell", "posix", "--", _normalize_command_for_scan(command, env_type)],
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
             timeout=timeout,

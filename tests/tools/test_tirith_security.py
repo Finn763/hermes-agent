@@ -691,6 +691,61 @@ class TestIsAppTldFinding:
 
 
 # ---------------------------------------------------------------------------
+# Tilde normalization (issue #106714)
+# ---------------------------------------------------------------------------
+
+class TestTildeNormalization:
+    """Leading ~/ must be expanduser-normalized before scan; quoted ~ untouched."""
+
+    @patch("tools.tirith_security._resolve_tirith_path", return_value="tirith")
+    @patch("tools.tirith_security.is_platform_supported", return_value=True)
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_leading_tilde_expanded_for_scan(self, mock_cfg, mock_run, _plat, _res):
+        mock_cfg.return_value = _CFG
+        mock_run.return_value = _mock_run(0, _json_stdout())
+        check_command_security("~/bin/foo --help")
+        scanned = mock_run.call_args[0][0][-1]
+        assert not scanned.startswith("~/")
+        assert scanned == os.path.expanduser("~/bin/foo --help")
+
+    @patch("tools.tirith_security._resolve_tirith_path", return_value="tirith")
+    @patch("tools.tirith_security.is_platform_supported", return_value=True)
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_quoted_tilde_untouched(self, mock_cfg, mock_run, _plat, _res):
+        mock_cfg.return_value = _CFG
+        mock_run.return_value = _mock_run(0, _json_stdout())
+        check_command_security("'~/bin/foo'")
+        assert mock_run.call_args[0][0][-1] == "'~/bin/foo'"
+
+    @pytest.mark.parametrize("env_type", ["ssh", "docker"])
+    @patch("tools.tirith_security._resolve_tirith_path", return_value="tirith")
+    @patch("tools.tirith_security.is_platform_supported", return_value=True)
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_remote_tilde_left_for_the_remote_shell(
+        self, mock_cfg, mock_run, _plat, _res, env_type,
+    ):
+        """ssh/docker expand ~ themselves; the Hermes host home is the wrong home."""
+        mock_cfg.return_value = _CFG
+        mock_run.return_value = _mock_run(0, _json_stdout())
+        for cmd in ("~/bin/foo --help", "~", "  ~/bin/foo", "~deploy/bin/foo"):
+            check_command_security(cmd, env_type)
+            assert mock_run.call_args[0][0][-1] == cmd
+
+    @patch("tools.tirith_security._resolve_tirith_path", return_value="tirith")
+    @patch("tools.tirith_security.is_platform_supported", return_value=True)
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_local_backend_still_expands(self, mock_cfg, mock_run, _plat, _res):
+        mock_cfg.return_value = _CFG
+        mock_run.return_value = _mock_run(0, _json_stdout())
+        check_command_security("~/bin/foo --help", "local")
+        assert mock_run.call_args[0][0][-1] == os.path.expanduser("~/bin/foo --help")
+
+
+# ---------------------------------------------------------------------------
 # mkdtemp OSError → no_space (disk-full leak prevention)
 # ---------------------------------------------------------------------------
 

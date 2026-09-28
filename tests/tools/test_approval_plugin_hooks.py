@@ -162,7 +162,7 @@ class TestSmartModeFiresHooks:
         monkeypatch.setattr(approval_module, "_smart_approve", lambda *_: verdict)
         monkeypatch.setattr(
             "tools.tirith_security.check_command_security",
-            lambda _: {"action": "allow", "findings": [], "summary": ""},
+            lambda _, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         )
 
     @pytest.mark.parametrize(
@@ -325,7 +325,7 @@ class TestSmartModeFiresHooks:
         monkeypatch.setattr(approval_module, "_smart_approve", lambda *_: next(verdicts))
         monkeypatch.setattr(
             "tools.tirith_security.check_command_security",
-            lambda _: {"action": "allow", "findings": [], "summary": ""},
+            lambda _, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         )
         captured = []
         with patch(

@@ -96,7 +96,7 @@ class TestYoloMode:
 
         called = {"value": False}
 
-        def fake_check(command):
+        def fake_check(command, _env_type=""):
             called["value"] = True
             return {"action": "block", "findings": [], "summary": "should never run"}
 

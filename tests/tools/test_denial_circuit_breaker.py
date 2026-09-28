@@ -42,7 +42,7 @@ def breaker_session(monkeypatch):
     )
     monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
-        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         raising=False,
     )
 
@@ -179,7 +179,7 @@ def test_headless_smart_deny_increments_and_trips(monkeypatch):
     )
     monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
-        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        lambda _command, _env_type="": {"action": "allow", "findings": [], "summary": ""},
         raising=False,
     )
     # CLI-interactive path: the owner denies via the prompt callback.

@@ -4666,7 +4666,7 @@ def check_all_command_guards(command: str, env_type: str,
                 # the pattern-based detection above.
                 try:
                     from tools.tirith_security import check_command_security
-                    _sq_tirith = check_command_security(command)
+                    _sq_tirith = check_command_security(command, env_type)
                     if _sq_tirith.get("action") in ("block", "warn"):
                         _sq_desc = _format_tirith_description(_sq_tirith)
                         return {
@@ -4732,7 +4732,7 @@ def check_all_command_guards(command: str, env_type: str,
                 # the pattern-based detection above.
                 try:
                     from tools.tirith_security import check_command_security
-                    _cron_tirith = check_command_security(command)
+                    _cron_tirith = check_command_security(command, env_type)
                     if _cron_tirith.get("action") in ("block", "warn"):
                         _cron_desc = _format_tirith_description(_cron_tirith)
                         return {
@@ -4782,7 +4782,7 @@ def check_all_command_guards(command: str, env_type: str,
     tirith_result = {"action": "allow", "findings": [], "summary": ""}
     try:
         from tools.tirith_security import check_command_security
-        tirith_result = check_command_security(command)
+        tirith_result = check_command_security(command, env_type)
     except ImportError:
         # Tirith module not installed.  When tirith_fail_open is True (the
         # default) we silently allow, matching the pre-existing behaviour.

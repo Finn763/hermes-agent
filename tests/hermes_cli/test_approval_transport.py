@@ -270,7 +270,7 @@ def _configure_manual_guard(monkeypatch, approval_module, manager, *, fallback=N
         lambda: ("phone", fallback),
         raising=False,
     )
-    monkeypatch.setattr("tools.tirith_security.check_command_security", lambda command: {"action": "allow"})
+    monkeypatch.setattr("tools.tirith_security.check_command_security", lambda command, _env_type="": {"action": "allow"})
 
 
 def test_cli_selected_transport_replaces_builtin_prompt(monkeypatch):
