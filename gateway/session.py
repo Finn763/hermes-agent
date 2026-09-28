@@ -2939,6 +2939,10 @@ class SessionStore:
                     "origin_json": _origin_json,
                     "display_name": source.chat_name,
                     "parent_session_id": prev_session_id,
+                    # ponytail: gateway rows previously persisted cwd=NULL/empty and
+                    # vanished from the desktop workspace grouping; TERMINAL_CWD is
+                    # the already-resolved config.terminal.cwd (else $HOME).
+                    "cwd": os.environ.get("TERMINAL_CWD") or os.path.expanduser("~"),
                     "model_config": (
                         {"_reset_from": prev_session_id}
                         if prev_session_id
