@@ -419,6 +419,33 @@ class TestReportDatabaseJournalModes:
         assert "cannot rule out WAL exposure" not in out
         assert "⚠" not in out
 
+    def test_empty_database_warns_even_on_fixed_runtime(self, tmp_path, capsys):
+        (tmp_path / "kanban.db").touch()
+
+        doctor._report_database_journal_modes(tmp_path, (3, 51, 3))
+
+        out = capsys.readouterr().out
+        assert "⚠" in out
+        assert "kanban.db is empty (0 bytes)" in out
+
+    def test_empty_database_warns_on_vulnerable_runtime_too(self, tmp_path, capsys):
+        (tmp_path / "state.db").touch()
+
+        doctor._report_database_journal_modes(tmp_path, VULNERABLE)
+
+        out = capsys.readouterr().out
+        assert "⚠" in out
+        assert "state.db is empty (0 bytes)" in out
+
+    def test_empty_warning_does_not_depend_on_error_text(self, tmp_path, capsys, monkeypatch):
+        (tmp_path / "kanban.db").touch()
+        monkeypatch.setattr(doctor, "_read_journal_mode", lambda p: (None, "reworded"))
+
+        doctor._report_database_journal_modes(tmp_path, (3, 51, 3))
+
+        out = capsys.readouterr().out
+        assert "kanban.db is empty (0 bytes)" in out
+
     def test_report_creates_no_wal_sidecars(self, tmp_path, capsys):
         db = tmp_path / "state.db"
         _make_db(db, journal_mode="WAL")

@@ -209,7 +209,18 @@ def _report_database_journal_modes(
         mode, error = _read_journal_mode(path)
         size = _format_db_size(path)
         if error is not None:
-            if vulnerable:
+            # ponytail: 0-byte check only; near-empty truncations stay on the
+            # generic unreadable path, widen if placeholders appear half-written.
+            try:
+                is_empty = path.stat().st_size == 0
+            except OSError:
+                is_empty = False
+            if is_empty:
+                check_warn(
+                    f"{name} is empty (0 bytes)",
+                    "(stale placeholder, not real data)",
+                )
+            elif vulnerable:
                 check_warn(
                     f"{name}: journal mode could not be read",
                     f"({error}; cannot rule out WAL exposure)",
