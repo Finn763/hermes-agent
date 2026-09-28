@@ -11368,7 +11368,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 )
             return inserted
 
-        return self._execute_write(_do)
+        # Born durable (#126021): every dict in ``compacted_messages`` was just
+        # inserted above as a live row under this same session id, so stamp the
+        # persistence marker at the source. Without this, the next
+        # identity-losing flush (incremental tool-call persist with no history
+        # arg, a second agent instance on a multiplexed gateway) re-INSERTs
+        # the whole compacted set as duplicate active rows with byte-identical
+        # content AND identical microsecond timestamps (explicit timestamps
+        # are preserved on write). Rotation is unaffected: it publishes via
+        # publish_compression_child, which must stay unstamped (#57491).
+        inserted = self._execute_write(_do)
+        for _msg in compacted_messages:
+            if isinstance(_msg, dict):
+                _msg[_DB_PERSISTED_MARKER_KEY] = True
+        return inserted
 
     def _message_column_names(self, conn) -> List[str]:
         """Column names of the messages table, cached per-connection era."""
