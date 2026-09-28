@@ -70,6 +70,32 @@ fn is_valid_commit(s: &str) -> bool {
     (7..=40).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Validates a branch/tag ref before it is interpolated into the download
+/// URL. Only `[A-Za-z0-9._/-]` is accepted, with `..` and `//` rejected so
+/// the ref stays a single path segment and cannot inject URL metachars
+/// (`?`, `#`, whitespace, control chars) into the raw.githubusercontent URL.
+/// Commit pins remain the reproducible path for release builds.
+// ponytail: charset allowlist, not full `git check-ref-format`; tighten if refs need more.
+fn is_valid_branch(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || t.len() > 200 {
+        return false;
+    }
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/'))
+    {
+        return false;
+    }
+    if t.starts_with('/') || t.starts_with('.') || t.ends_with('/') || t.ends_with('.') {
+        return false;
+    }
+    if t.contains("..") || t.contains("//") {
+        return false;
+    }
+    true
+}
+
 /// Resolver cache plan for a pin that already has a local path computed.
 ///
 /// Immutable commit pins reuse cache forever. Mutable branch/tag pins always
@@ -129,7 +155,13 @@ pub async fn resolve(
     // cannot keep reusing a poisoned install-main.ps1 forever (#67193).
     let (commit_or_ref, immutable) = match (&pin.commit, &pin.branch) {
         (Some(c), _) if is_valid_commit(c) => (c.clone(), true),
-        (_, Some(b)) if !b.trim().is_empty() => (b.clone(), false),
+        (_, Some(b)) if is_valid_branch(b) => (b.trim().to_string(), false),
+        (_, Some(b)) if !b.trim().is_empty() => {
+            return Err(anyhow!(
+                "install script pin branch `{b}` is not a valid ref name; \
+                 release builds must pin a commit SHA"
+            ));
+        }
         (Some(other), _) => {
             return Err(anyhow!(
                 "install script pin commit `{other}` is not a valid git SHA"
@@ -402,6 +434,58 @@ mod tests {
         assert!(!is_valid_commit("02d269"));
         assert!(!is_valid_commit("not-a-sha"));
         assert!(!is_valid_commit(""));
+    }
+
+    #[test]
+    fn branch_pins_accept_plain_and_slashed_refs() {
+        assert!(is_valid_branch("main"));
+        assert!(is_valid_branch("release/1.2.3"));
+        assert!(is_valid_branch("bb/gui"));
+        assert!(is_valid_branch("v1.2.3"));
+        assert!(is_valid_branch("  main  "));
+    }
+
+    #[test]
+    fn branch_pins_reject_url_metachars_and_traversal() {
+        // URL injection / path escape attempts must not reach the download URL.
+        let long = "m".repeat(201);
+        let bad = [
+            "",
+            "   ",
+            "main?x=1",
+            "main#frag",
+            "a b",
+            "a;b",
+            "../evil",
+            "a..b",
+            "a//b",
+            "/main",
+            "main/",
+            ".main",
+            "main.",
+            "main:evil",
+            "main\\evil",
+            "ma|in",
+            long.as_str(),
+        ];
+        for b in bad {
+            assert!(!is_valid_branch(b), "must reject {b:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_invalid_branch_before_network() {
+        let pin = Pin {
+            commit: None,
+            branch: Some("main?x=1".to_string()),
+        };
+        let err = resolve(ScriptKind::Sh, &pin, &|_| {})
+            .await
+            .expect_err("invalid branch pin must be rejected");
+        assert!(
+            err.to_string().contains("not a valid ref name"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
