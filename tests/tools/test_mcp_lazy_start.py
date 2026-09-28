@@ -329,3 +329,39 @@ class TestResolveServerLazy:
 
     def test_explicit_false(self):
         assert mcp._resolve_server_lazy("s", {"command": "npx", "lazy": False}) is False
+
+
+class TestCacheLoadAllowedTools:
+    def test_allowed_tools_filters_cache_load_path(self):
+        """allowed_tools must filter the lazy cache-load path too (#106983)."""
+        from tools.registry import ToolRegistry
+
+        entry = {
+            "fingerprint": "abc",
+            "tools": [
+                {
+                    "name": "browser_navigate",
+                    "description": "Navigate",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "browser_run",
+                    "description": "Run",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+            ],
+            "utility_tools": [],
+        }
+        config = {
+            "command": "npx",
+            "args": [],
+            "lazy": True,
+            "allowed_tools": ["browser_navigate"],
+        }
+        mock_registry = ToolRegistry()
+        with patch("tools.registry.registry", mock_registry), \
+             patch("toolsets.create_custom_toolset"):
+            registered = mcp._register_from_cache_sync(
+                "playwright", config, entry
+            )
+        assert registered == ["mcp__playwright__browser_navigate"]

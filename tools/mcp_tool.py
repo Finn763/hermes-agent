@@ -6924,6 +6924,23 @@ def _normalize_name_filter(value: Any, label: str) -> set[str]:
     return set()
 
 
+def _resolve_include_raw(name: str, config: dict) -> tuple[Any, str]:
+    """Effective allowlist raw value + its config label for warnings.
+
+    ``mcp_servers.<name>.tools.include`` wins; top-level ``allowed_tools``
+    is a fallback alias so a scoping key that reads as an access boundary
+    is never silently inert (#106983). Unregistered tools get no handler,
+    so filtering at registration enforces both presentation and dispatch.
+    """
+    # ponytail: alias, not a union — single-whitelist precedence stays
+    # obvious; merge into a union if both-keys-set ever needs it.
+    tools_filter = config.get("tools") or {}
+    include_raw = tools_filter.get("include")
+    if include_raw is None and config.get("allowed_tools") is not None:
+        return config.get("allowed_tools"), f"mcp_servers.{name}.allowed_tools"
+    return include_raw, f"mcp_servers.{name}.tools.include"
+
+
 def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
     """True if ``tool_name`` matches any entry in ``patterns``.
 
@@ -7129,9 +7146,9 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     #   written by the install checklist's "uncheck everything" path)
     #   Neither set → register all tools (backward-compatible default)
     tools_filter = config.get("tools") or {}
-    include_raw = tools_filter.get("include")
+    include_raw, _include_label = _resolve_include_raw(name, config)
     include_set = _normalize_name_filter(
-        include_raw, f"mcp_servers.{name}.tools.include"
+        include_raw, _include_label
     )
     include_active = isinstance(include_raw, (str, list, tuple, set))
     exclude_set = _normalize_name_filter(
@@ -7393,9 +7410,9 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     fingerprint = config_fingerprint(config)
     tool_timeout = _resolve_tool_timeout(config)
     tools_filter = config.get("tools") or {}
-    include_raw = tools_filter.get("include")
+    include_raw, _include_label = _resolve_include_raw(name, config)
     include_set = _normalize_name_filter(
-        include_raw, f"mcp_servers.{name}.tools.include"
+        include_raw, _include_label
     )
     # include: [] is an explicit empty whitelist (register nothing) — see the
     # live discovery path above for the full filter rules.
