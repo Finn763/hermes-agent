@@ -21,6 +21,8 @@ MARKETING = re.compile(
     re.I,
 )
 MACHINE_LOCAL = re.compile(r"/home/(?!runner\b)[a-z0-9_-]+/|[A-Z]:\\+Users\\+(?!<)")
+SCRAPER_MARKER = "automatically generated from official documentation"
+SCRAPER_PLACEHOLDER = "Quick reference patterns will be added as you use the skill."
 
 # ---------------------------------------------------------------------------
 # Grandfathered pre-existing debt. Shrink this list; never grow it.
@@ -147,3 +149,34 @@ def test_grandfather_entries_still_needed():
     """A grandfather entry whose violation is fixed must be removed."""
     for rel in GRANDFATHER:
         assert (REPO / rel / "SKILL.md").exists(), f"stale grandfather entry: {rel}"
+
+
+@pytest.mark.parametrize("p", _params())
+def test_no_scraper_placeholder(p):
+    _, content = _frontmatter(p)
+    if SCRAPER_PLACEHOLDER in content and not _grandfathered(p, "placeholder"):
+        pytest.fail(f"{_rel(p)}: scraper Quick Reference placeholder was never filled")
+
+
+def _is_scraper_skill(p: Path) -> bool:
+    _, content = _frontmatter(p)
+    return SCRAPER_MARKER in content and (p.parent / "references" / "index.md").is_file()
+
+
+@pytest.mark.parametrize("p", _params())
+def test_scraper_references_listed(p):
+    # ponytail: filename-substring check; scraper bullets use the exact
+    # `- **<name>.md**` form, upgrade to bullet parsing if this ever misfires.
+    if not _is_scraper_skill(p):
+        return
+    refs = p.parent / "references"
+    on_disk = {f.name for f in refs.glob("*.md")} - {"index.md"}
+    skill_text = p.read_text(encoding="utf-8")
+    index_text = (refs / "index.md").read_text(encoding="utf-8")
+    missing = sorted(
+        f
+        for f in on_disk
+        if f not in skill_text or f not in index_text
+    )
+    if missing and not _grandfathered(p, "refs"):
+        pytest.fail(f"{_rel(p)}: references/ files unlisted: {missing}")

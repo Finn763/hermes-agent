@@ -29,13 +29,69 @@ This skill should be triggered when:
 
 ### Common Patterns
 
-*Quick reference patterns will be added as you use the skill.*
+**Pattern 1:** Load a pre-quantized model with room for long context via `max_seq_length`, for example:
+
+```python
+from unsloth import FastLanguageModel
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Qwen3-4B-Instruct-2507",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+```
+
+**Pattern 2:** Wrap the model with LoRA adapters, targeting all attention and MLP projections, for example:
+
+```python
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=16,
+    use_gradient_checkpointing="unsloth",
+)
+```
+
+**Pattern 3:** Train with the TRL `SFTTrainer` on a supervised dataset, for example:
+
+```python
+from datasets import load_dataset
+from trl import SFTTrainer
+from transformers import TrainingArguments
+dataset = load_dataset("tatsu-lab/alpaca", split="train")
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    args=TrainingArguments(per_device_train_batch_size=2, num_train_epochs=1),
+)
+trainer.train()
+```
+
+**Pattern 4:** Export the fine-tune for local inference by saving a quantized GGUF, for example:
+
+```python
+model.save_pretrained_gguf("unsloth-finetune", tokenizer, quantization_method="q4_k_m")
+```
+
+**Pattern 5:** Run fast inference with the model's chat template applied, for example:
+
+```python
+from unsloth import FastLanguageModel
+FastLanguageModel.for_inference(model)
+inputs = tokenizer(["Explain LoRA in one sentence."], return_tensors="pt").to("cuda")
+outputs = model.generate(**inputs, max_new_tokens=64)
+print(tokenizer.batch_decode(outputs)[0])
+```
 
 ## Reference Files
 
 This skill includes full documentation in `references/`:
 
 - **llms-txt.md** - Llms-Txt documentation
+- **llms-full.md** - Full Unsloth documentation, including GRPO/reward-function, base-model and epoch guides absent from llms-txt.md
+- **llms.md** - Upstream documentation link index
 
 Use `view` to read specific reference files when detailed information is needed.
 
