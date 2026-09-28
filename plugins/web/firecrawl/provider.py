@@ -46,6 +46,7 @@ Env vars::
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 from typing import Any, Dict, List, NoReturn, Optional, TYPE_CHECKING
@@ -199,6 +200,60 @@ def _use_keyless_ring() -> bool:
     return use_keyless("firecrawl", "")
 
 
+_DEFAULT_EXTRACT_WAIT_MS = 3000
+# Stay under the 60s asyncio scrape ceiling so a huge configured wait
+# cannot look like a hung page.
+_MAX_EXTRACT_WAIT_MS = 50_000
+
+
+def _coerce_wait_ms(value: Any, *, fallback: int = _DEFAULT_EXTRACT_WAIT_MS) -> int:
+    """Positive wait in ms; 0 omits the wait; invalid falls back."""
+    if value is None:
+        return fallback
+    try:
+        wait = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if wait <= 0:
+        return 0
+    return min(wait, _MAX_EXTRACT_WAIT_MS)
+
+
+def _extract_wait_ms() -> int:
+    """``web.extract_wait_ms`` (default 3000). Lazy import so tests can patch."""
+    import tools.web_tools as _wt
+
+    cfg = _wt._load_web_config()
+    if "extract_wait_ms" not in cfg:
+        return _DEFAULT_EXTRACT_WAIT_MS
+    return _coerce_wait_ms(cfg.get("extract_wait_ms"))
+
+
+def _scrape_with_wait(scrape_fn: Any, *, url: str, formats: List[str]) -> Any:
+    """Call ``scrape`` with the configured wait (#106904).
+
+    Without a wait the scrape snapshots first paint and lazily loaded
+    content (comments, collapsed sections, dashboards) is silently lost.
+    The SDK parameter name is picked from its signature (``wait_for``,
+    ``waitFor``, or ``**kwargs`` passthrough); unknown signatures fall
+    back to the legacy wait-free call rather than failing the scrape.
+    """
+    wait = _extract_wait_ms()
+    if wait <= 0:
+        return scrape_fn(url=url, formats=formats)
+    try:
+        params = inspect.signature(scrape_fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "wait_for" in params:
+        return scrape_fn(url=url, formats=formats, wait_for=wait)
+    if "waitFor" in params:
+        return scrape_fn(url=url, formats=formats, waitFor=wait)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return scrape_fn(url=url, formats=formats, wait_for=wait)
+    return scrape_fn(url=url, formats=formats)
+
+
 class _KeylessFirecrawlClient:
     """Minimal REST client for Firecrawl's keyless cloud mode.
 
@@ -223,8 +278,26 @@ class _KeylessFirecrawlClient:
     def search(self, *, query: str, limit: int = 5) -> Dict[str, Any]:
         return self._post("/v2/search", {"query": query, "limit": limit})
 
-    def scrape(self, *, url: str, formats: List[str]) -> Dict[str, Any]:
-        return self._post("/v2/scrape", {"url": url, "formats": formats})
+    def scrape(
+        self,
+        *,
+        url: str,
+        formats: List[str],
+        wait_for: Any = None,
+        waitFor: Any = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"url": url, "formats": formats}
+        # fallback=0, not the module default: an absent kwarg means the caller
+        # asked for no wait (_scrape_with_wait omits it exactly when the config
+        # says 0). Re-defaulting here made `extract_wait_ms: 0` send
+        # ``waitFor: 3000`` on this leg alone, so the documented escape hatch
+        # was unreachable (#106904 review).
+        wait = _coerce_wait_ms(
+            wait_for if wait_for is not None else waitFor, fallback=0
+        )
+        if wait > 0:
+            payload["waitFor"] = wait
+        return self._post("/v2/scrape", payload)
 
 
 def _get_firecrawl_gateway_url() -> str:
@@ -606,6 +679,10 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
           - ``format``: ``"markdown"`` or ``"html"``; default is both
             (request both, return markdown when available).
 
+        Every scrape waits ``web.extract_wait_ms`` (default 3000ms) via
+        Firecrawl ``waitFor`` so lazily loaded content is in the snapshot;
+        0 disables the wait. Search is unaffected.
+
         Returns the legacy per-URL list-of-results shape. Per-URL failures
         (timeout, SSRF block, scrape error, policy block) become items
         with an ``error`` field rather than raising.
@@ -675,6 +752,7 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 try:
                     scrape_result = await asyncio.wait_for(
                         asyncio.to_thread(
+                            _scrape_with_wait,
                             _get_firecrawl_client().scrape,
                             url=url,
                             formats=formats,

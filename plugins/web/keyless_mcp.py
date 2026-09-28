@@ -578,13 +578,20 @@ def firecrawl_extract_keyless(urls: List[str]) -> List[Dict[str, Any]]:
     from plugins.web.firecrawl.provider import (
         _KeylessFirecrawlClient,
         _extract_scrape_payload,
+        _scrape_with_wait,
     )
 
     client = _KeylessFirecrawlClient()
     results: List[Dict[str, Any]] = []
     for url in urls:
         try:
-            response = client.scrape(url=url, formats=["markdown"])
+            # Route through the shared waiter so this leg honours
+            # ``web.extract_wait_ms`` (default 3000, 0 disables) like the
+            # provider's own extract path, instead of inheriting whatever
+            # default the keyless client happens to carry.
+            response = _scrape_with_wait(
+                client.scrape, url=url, formats=["markdown"]
+            )
             payload = _extract_scrape_payload(response) or {}
             metadata = payload.get("metadata") or {}
             if not isinstance(metadata, dict):

@@ -187,7 +187,8 @@ class TestFirecrawlClientConfig:
 
         assert result["success"] is True
         assert captured["url"] == "https://api.firecrawl.dev/v2/scrape"
-        assert captured["json"] == {"url": "https://example.com", "formats": ["markdown"]}
+        assert captured["json"]["url"] == "https://example.com"
+        assert captured["json"]["formats"] == ["markdown"]
         assert captured["headers"] == {"Content-Type": "application/json"}
         assert "Authorization" not in captured["headers"]
 

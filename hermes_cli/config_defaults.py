@@ -510,6 +510,9 @@ DEFAULT_CONFIG = {
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
         "extract_char_limit": 15000,  # per-page char budget for web_extract; larger pages truncate + store full text in cache/web
+        # Firecrawl scrape waitFor (ms) so lazily hydrated pages (comments, dashboards) are in the
+        # snapshot. 0 omits the field (legacy first-paint). Other extract backends ignore this.
+        "extract_wait_ms": 3000,
         # Keyless free-tier ring: with NO web backend configured or keyed,
         # web_search/web_extract rotate round-robin across five vendors'
         # public free tiers (exa, parallel, tavily, firecrawl, keenable),
