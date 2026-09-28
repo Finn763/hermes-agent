@@ -613,6 +613,7 @@ def heartbeat_worker(
     *,
     note: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    worker_session_id: Optional[str] = None,
 ) -> bool:
     """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
 
@@ -639,10 +640,100 @@ def heartbeat_worker(
             conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (now, run_id))
         _kb._append_event(
             conn, task_id, "heartbeat",
-            {"note": note} if note else None,
+            _heartbeat_payload(note, worker_session_id),
             run_id=run_id,
         )
     return True
+
+
+def _heartbeat_payload(note: Optional[str], worker_session_id: Optional[str]) -> Optional[dict]:
+    payload: dict[str, Any] = {}
+    if note:
+        payload["note"] = note
+    if worker_session_id:
+        payload["worker_session_id"] = worker_session_id
+    return payload or None
+
+
+def _latest_worker_session_id(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
+) -> Optional[str]:
+    """Latest worker session id recorded for a run (heartbeat payloads, then terminal metadata)."""
+    import json as _json
+
+    for kind in ("heartbeat", "reclaimed", "timed_out"):
+        sql = "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?"
+        params: tuple = (task_id, kind)
+        if run_id is not None:
+            sql += " AND run_id = ?"
+            params += (int(run_id),)
+        sql += " ORDER BY id DESC LIMIT 20"
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except Exception:
+            return None
+        for r in rows:
+            try:
+                pl = _json.loads(r["payload"]) if r["payload"] else None
+            except Exception:
+                continue
+            if isinstance(pl, dict):
+                sid = pl.get("worker_session_id")
+                if sid:
+                    return str(sid)
+    return None
+
+
+def finalize_killed_worker_session(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+    assignee: Optional[str],
+    reason: str,
+) -> None:
+    """End a killed worker's live session (compression tip) from the dispatcher.
+
+    Best-effort: never raises, never blocks the reclaim. Call AFTER the kanban
+    write txn commits so the two DB locks are never held together.
+    # ponytail: heartbeat-payload lookup only, no task_runs column migration.
+    """
+    try:
+        sid = _latest_worker_session_id(conn, task_id, run_id)
+        if not sid or not assignee:
+            return
+        from hermes_cli.profiles import resolve_profile_env
+
+        try:
+            home = resolve_profile_env(str(assignee))
+        except Exception:
+            return
+        from pathlib import Path as _Path
+
+        db_path = _Path(home) / "state.db"
+        if not db_path.is_file():
+            return
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=db_path)
+        try:
+            try:
+                tip = db.get_compression_tip(sid) or sid
+            except Exception:
+                tip = sid
+            try:
+                db.end_session(tip, reason)
+            except Exception:
+                return
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        try:
+            _kb._log.debug("kanban: finalize killed worker session skipped", exc_info=True)
+        except Exception:
+            pass
 
 
 def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
@@ -660,7 +751,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.assignee "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -736,6 +827,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
+            )
+            finalize_killed_worker_session(
+                conn, tid, run_id, _kb._row_get(row, "assignee"), "kanban_timed_out",
             )
     return timed_out
 
