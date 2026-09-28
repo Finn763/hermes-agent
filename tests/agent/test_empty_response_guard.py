@@ -233,6 +233,104 @@ class TestEmptyRetryBudget:
         )
 
 
+class TestRouteStableStreakBudget:
+    """Issue #93991: the reduced budget must be reachable without cost.
+
+    Free / zero-priced models never clear the cost threshold, so a
+    route-stable streak of zero-output empties must reduce the budget
+    on behavioural evidence alone. finish_reason is deliberately NOT
+    part of the key: proxies alternate it across attempts of one
+    deterministic refusal, which keeps deterministic_empty() False
+    while the endpoint keeps failing.
+    """
+
+    def _churned_streak(self, agent, reasons=("stop", "")):
+        for reason in reasons:
+            guard.record_empty_attempt(
+                agent, finish_reason=reason, response=_response()
+            )
+            agent._empty_content_retries += 1
+
+    def test_free_model_route_stable_streak_reduces(self, monkeypatch):
+        monkeypatch.setattr(
+            guard, "_estimate_attempt_cost", lambda a, r: Decimal("0.0")
+        )
+        agent = _agent()
+        self._churned_streak(agent)
+        assert guard.deterministic_empty(agent) is False
+        assert (
+            guard.empty_retry_budget(agent, _response())
+            == guard.REDUCED_EMPTY_RETRY_BUDGET
+        )
+
+    def test_unknown_pricing_route_stable_streak_reduces(self, monkeypatch):
+        monkeypatch.setattr(guard, "_estimate_attempt_cost", lambda a, r: None)
+        agent = _agent()
+        self._churned_streak(agent)
+        assert (
+            guard.empty_retry_budget(agent, _response())
+            == guard.REDUCED_EMPTY_RETRY_BUDGET
+        )
+
+    def test_single_attempt_stays_default(self, monkeypatch):
+        """One empty may be a transient blip — retry #1 must always run."""
+        monkeypatch.setattr(
+            guard, "_estimate_attempt_cost", lambda a, r: Decimal("0.0")
+        )
+        agent = _agent()
+        guard.record_empty_attempt(
+            agent, finish_reason="stop", response=_response()
+        )
+        agent._empty_content_retries += 1
+        assert (
+            guard.empty_retry_budget(agent, _response())
+            == guard.DEFAULT_EMPTY_RETRY_BUDGET
+        )
+
+    def test_route_change_stays_default(self, monkeypatch):
+        monkeypatch.setattr(
+            guard, "_estimate_attempt_cost", lambda a, r: Decimal("0.0")
+        )
+        agent = _agent()
+        guard.record_empty_attempt(
+            agent, finish_reason="stop", response=_response()
+        )
+        agent._empty_content_retries += 1
+        agent.model = "other/model"
+        guard.record_empty_attempt(
+            agent, finish_reason="stop", response=_response()
+        )
+        agent._empty_content_retries += 1
+        assert (
+            guard.empty_retry_budget(agent, _response())
+            == guard.DEFAULT_EMPTY_RETRY_BUDGET
+        )
+
+    def test_missing_usage_streak_stays_default(self, monkeypatch):
+        monkeypatch.setattr(guard, "_estimate_attempt_cost", lambda a, r: None)
+        agent = _agent()
+        _record_streak(
+            agent, [_response(usage_present=False), _response(usage_present=False)]
+        )
+        assert (
+            guard.empty_retry_budget(agent, _response(usage_present=False))
+            == guard.DEFAULT_EMPTY_RETRY_BUDGET
+        )
+
+    def test_generated_tokens_streak_stays_default(self, monkeypatch):
+        monkeypatch.setattr(
+            guard, "_estimate_attempt_cost", lambda a, r: Decimal("0.0")
+        )
+        agent = _agent()
+        _record_streak(
+            agent, [_response(completion_tokens=42), _response(completion_tokens=42)]
+        )
+        assert (
+            guard.empty_retry_budget(agent, _response(completion_tokens=42))
+            == guard.DEFAULT_EMPTY_RETRY_BUDGET
+        )
+
+
 class TestStreakCost:
     def test_streak_cost_accumulates(self, monkeypatch):
         costs = iter([Decimal("1.10"), Decimal("1.23")])

@@ -28,8 +28,10 @@ Two independent guards, both failing OPEN to today's behaviour:
 2. **Cost-aware retry budget** — when the estimated input cost of a
    single empty attempt exceeds the configured threshold (default
    $0.25), the empty-retry budget for this streak drops from 3 to 1.
-   Unknown pricing, missing usage, or included/subscription routes
-   leave the budget untouched.
+   A route-stable streak of zero-output empties (same model/provider)
+   also drops the budget regardless of price — free models never clear
+   the threshold. Without such evidence, unknown pricing, missing usage,
+   generated tokens, or included/subscription routes leave the budget untouched.
 
 Configured via the additive ``agent.empty_response_guard`` section in
 ``config.yaml`` (resolved once at agent init by ``agent_init``)::
@@ -251,11 +253,38 @@ def deterministic_empty(agent: Any) -> bool:
     )
 
 
+def _route_stable_zero_output_streak(agent: Any, *, minimum: int = 2) -> bool:
+    """True when the streak shows >= minimum consecutive zero-output empties
+    from the same (model, provider), regardless of finish_reason or price.
+
+    Proxies alternate finish_reason across attempts of one deterministic
+    refusal, which keeps deterministic_empty() False while the endpoint
+    keeps failing — and free models never clear the cost threshold, so
+    neither guard fires. The (model, provider) route is the stable key.
+    # ponytail: finish_reason ignored on purpose; re-add it if a route
+    # alternates reasons across genuinely transient empties (the fallback
+    # chain still bounds the loss to one skipped retry).
+    """
+    attempts = getattr(agent, _ATTEMPTS_ATTR, None) or []
+    if len(attempts) < minimum:
+        return False
+    first = attempts[0]
+    return all(
+        a.usage_present
+        and a.zero_output
+        and (a.model, a.provider) == (first.model, first.provider)
+        for a in attempts
+    )
+
+
 def empty_retry_budget(agent: Any, response: Any) -> int:
     """Empty-retry budget for the current streak (3, or 1 when a single
-    attempt is estimated to cost more than the configured threshold)."""
+    attempt is estimated to cost more than the configured threshold,
+    or when the streak already shows route-stable zero-output empties)."""
     if not guard_enabled(agent):
         return DEFAULT_EMPTY_RETRY_BUDGET
+    if _route_stable_zero_output_streak(agent):
+        return REDUCED_EMPTY_RETRY_BUDGET
     cost = _estimate_attempt_cost(agent, response)
     if cost is None:
         return DEFAULT_EMPTY_RETRY_BUDGET
