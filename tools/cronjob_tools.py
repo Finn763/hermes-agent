@@ -115,16 +115,20 @@ _CRON_THREAT_PATTERNS = [
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
     # Secret-read intent: cat literal OR prose verb+target pair where the
     # target is a credential path. ``\s*[(\s]`` after the verb lets ``open(``
-    # / ``read_file`` style invocations through; the trailing credential-path
-    # alternation is the same set the literal pattern already used.
-    (r'\bcat\b\s+[^\n]*?(?:\.env|/\.hermes/|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_literal"),
-    (r'\b(?:read|show|open|reveal|expose|dump|get|extract|fetch|send|post|forward|push|upload|transmit|leak|exfiltrate|print|display|cat)\b\s*[(\s][^\n]{0,80}?(?:\.env|/\.hermes/|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_prose"),
+    # / ``read_file`` style invocations through. #8886 review: ``/\.hermes/``
+    # alone is the whole Hermes home dir (notes.md, memory/ are benign), so
+    # only concrete secrets under it match; ``\.env`` excludes ``.env.example``.
+    # ponytail: single shared alternation, no new abstraction.
+    (r'\bcat\b\s+[^\n]*?(?:\.env(?!\.example\b)|/\.hermes/(?:\.env|config\.ya?ml|credentials?|secrets?)|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_literal"),
+    (r'\b(?:read|show|open|reveal|expose|dump|get|extract|fetch|send|post|forward|push|upload|transmit|leak|exfiltrate|print|display|cat)\b\s*[(\s][^\n]{0,80}?(?:\.env(?!\.example\b)|/\.hermes/(?:\.env|config\.ya?ml|credentials?|secrets?)|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets_prose"),
     # Web exfil of secrets/configs to an arbitrary external host. Catches
     # "POST contents to https://...", "send data over https://...", and
     # the bare presence of an http(s) URL ending in a credential extension
     # when paired with an exfil verb nearby on the same line.
     (r'\b(?:post|send|upload|push|submit|exfiltrate|transmit|leak|forward|ship|webhook)\b\s+(?:\w+\s+){0,8}?(?:contents?|file|data|secrets?|keys?|creds?|configs?|configuration)\s+[^\n]{0,40}?https?://(?!(?:api\.github\.com|github\.com)/)', "secrets_to_external_host"),
-    (r'https?://[^\s"\'`]*\.(?:env|credentials|config|yaml|yml|json)', "secrets_url_reference"),
+    # #8886 review: scope to real secret extensions (json/yaml/config blocked
+    # benign API polling) + same github host exemption as the sibling pattern.
+    (r'https?://(?!(?:api\.github\.com|github\.com|raw\.githubusercontent\.com)(?:/|$))[^\s"\'`]*\.(?:env|pem|key|p12|pfx|credentials|netrc|pgpass)', "secrets_url_reference"),
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
@@ -133,7 +137,7 @@ _CRON_THREAT_PATTERNS = [
     # Internal network recon. CIDR-shaped prompt intent ("scan X.X.X.X/X",
     # port-scan language, "scan the X.X.X.X subnet/range"). Hosts strictly
     # inside the user's own machine do not match (no /X mask).
-    (r'\b(?:scan|scans|scanned|scanning|probe|probes|probed|probing|recon(?:noitre)?|enumerate|enumerates|sweep|sweeps)\b\s+[^\n]{0,80}?\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?', "internal_network_recon"),
+    (r'\b(?:scan|scans|scanned|scanning|probe|probes|probed|probing|recon(?:noitre)?|enumerate|enumerates|sweep|sweeps)\b\s+[^\n]{0,80}?\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})\b', "internal_network_recon"),  # #8886 review: mask mandatory, single host is not a subnet sweep
     (r'\bport[\s-]*scan\b\s+[^\n]{0,40}?\d{1,3}(?:\.\d{1,3}){3}', "port_scan_intent"),
     # Directed sub-agent credential/config extraction via delegate_task.
     # Matches "delegate_task ... read/fetch/dump ... ~/.hermes/|.env|..."

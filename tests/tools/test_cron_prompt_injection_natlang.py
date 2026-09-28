@@ -158,3 +158,39 @@ class TestCleanPromptsStillPass:
         assert _scan_cron_prompt(
             "Restart the service if the staging environment is unreachable"
         ) == ""
+
+    # #8886 review (Enough1122): these 6 benign prompts were blocked by the
+    # widened patterns. Each guards one tightening:
+    # hermes-notes/memory -> concrete secrets under ~/.hermes/ only;
+    # .env.example -> .env excludes .example; status.json/deploy.yaml ->
+    # secrets_url_reference limited to real secret extensions + host exempt;
+    # single host -> recon requires mandatory /mask.
+    def test_benign_hermes_notes_passes(self):
+        assert _scan_cron_prompt(
+            "Read ~/.hermes/notes.md and summarize it"
+        ) == ""
+
+    def test_benign_hermes_memory_passes(self):
+        assert _scan_cron_prompt(
+            "read files under ~/.hermes/memory/, post a summary"
+        ) == ""
+
+    def test_benign_env_example_passes(self):
+        assert _scan_cron_prompt(
+            "Read .env.example to show expected variables"
+        ) == ""
+
+    def test_benign_fetch_json_api_passes(self):
+        assert _scan_cron_prompt(
+            "Fetch https://api.example.com/status.json"
+        ) == ""
+
+    def test_benign_download_yaml_passes(self):
+        assert _scan_cron_prompt(
+            "Download https://raw.example.com/deploy.yaml"
+        ) == ""
+
+    def test_benign_single_host_check_passes(self):
+        assert _scan_cron_prompt(
+            "Scan 10.0.0.5 for an open SSH port"
+        ) == ""
