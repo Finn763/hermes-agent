@@ -94,6 +94,33 @@ def test_install_writes_entry_with_absolute_exec_and_icon(
     assert icon_path == lde.icon_path(root)
 
 
+def test_exec_skips_the_build_only_once_a_packaged_app_resolves(
+    tmp_path, xdg_home, monkeypatch
+):
+    """#126009: a menu/taskbar click must launch the packaged app, not rebuild Electron — but
+    ``--skip-build`` exits when nothing is packaged, so the entry may carry the flag only once the
+    checkout actually resolves a packaged app."""
+    root = _make_project(tmp_path)
+    desktop = root / "apps" / "desktop"
+    (desktop / "package.json").write_text("{}", encoding="utf-8")
+    _stub_install(tmp_path, monkeypatch)
+    monkeypatch.setattr(lde, "_install_icon_to_hicolor", lambda _icon: False)
+
+    def _exec() -> str:
+        entry = lde.install_desktop_entry(root)
+        return _parse(entry.read_text(encoding="utf-8"))["Exec"]
+
+    # Desktop source present but never packaged: no flag, so the click can build one.
+    assert not _exec().endswith("--skip-build")
+
+    packaged = desktop / "release" / "linux-unpacked" / "hermes"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text("", encoding="utf-8")
+
+    # A packaged app resolves: the click launches it instead of rebuilding.
+    assert _exec().endswith("desktop --skip-build")
+
+
 def test_install_prefers_themed_icon_from_hicolor(tmp_path, xdg_home, monkeypatch):
     """When the icon installs into hicolor, the entry uses the themed name.
 

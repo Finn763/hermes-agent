@@ -111,10 +111,33 @@ def _running_interpreter_fallback() -> str:
     return os.path.abspath(sys.executable)
 
 
+def _packaged_app_resolves(project_root: Optional[Path]) -> bool:
+    """Whether ``project_root`` already resolves a launchable packaged app.
+
+    ``hermes desktop --skip-build`` exits when no packaged app resolves, so the persisted entry may
+    pass the flag only once one exists: a checkout that was never packaged would otherwise never
+    build from the menu (#126009). ``cmd_gui`` reads the flag after its desktop-source check, so a
+    missing ``apps/desktop`` cannot be rescued by the flag either way.
+    """
+    if project_root is None:
+        return False
+    desktop_dir = project_root / "apps" / "desktop"
+    if not (desktop_dir / "package.json").is_file():
+        return False
+    release = desktop_dir / "release"
+    return any(
+        (release / unpacked / exe).is_file()
+        for unpacked in ("linux-unpacked", "linux-arm64-unpacked")
+        for exe in ("hermes", "Hermes")
+    )
+
+
 def resolve_exec_command(project_root: Optional[Path] = None) -> str:
     """Build the absolute ``Exec=`` command line for ``hermes desktop``.
 
     Prefer the real ``hermes`` launcher; fall back to ``<python> -m hermes_cli.main desktop``.
+    A packaged app that already resolves gets ``--skip-build`` (#126009), so a menu/taskbar click
+    launches it instead of rebuilding Electron every invocation.
     """
     from hermes_cli.relaunch import resolve_hermes_bin
 
@@ -139,6 +162,11 @@ def resolve_exec_command(project_root: Optional[Path] = None) -> str:
         prefix = [interpreter] if _needs_interpreter(resolved) else []
         # See #90292.
         argv = [*prefix, str(resolved), "desktop"]
+    if _packaged_app_resolves(project_root):
+        # #126009: the packaged app is there, so a click should launch it rather than re-run
+        # `npm`/electron-builder. Omitted when nothing is packaged yet — ``cmd_gui`` would exit
+        # on --skip-build instead of building the first one.
+        argv.append("--skip-build")
     return " ".join(_quote_exec_arg(a) for a in argv)
 
 
