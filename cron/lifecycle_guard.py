@@ -212,8 +212,83 @@ def _contains_launchctl_gateway_lifecycle(normalized_text: str) -> bool:
     )
 
 
+# Characters after which an unquoted `#` is at the start of a word and
+# therefore opens a shell comment (a word beginning with unquoted `#` is
+# ignored by the shell). Deliberately narrow: `=`/`$`/word chars are
+# excluded so `FOO=#x`, `$#` and `foo#bar` are kept (fail-closed).
+_COMMENT_PRECEDERS = frozenset((" ", "\t", "\n", "\r", ";", "&", "|", "(", ")", "`"))
+
+
+def _strip_shell_comments(text: str) -> str:
+    """Remove unquoted `#`-to-end-of-line comments (#106723).
+
+    A lifecycle incantation inside a comment or help hint
+    (``# if wedged, run: hermes gateway restart``) never executes, but the
+    raw-text regex in ``contains_gateway_lifecycle_command`` matched it, so
+    every explicitly-pathed invocation of that script hard-blocked. The
+    tokenized passes already drop comments via shlex; only the raw pass
+    needed this.
+
+    Fail-closed: unbalanced quotes return the input unchanged (today's
+    blocking behaviour), and `#` mid-word, after `=`/`$`, or inside quotes
+    is kept.
+    # ponytail: line comments only; quoted-string hints (echo "...") still
+    # block — masking those needs execution-aware arg analysis (piped or
+    # substituted variants re-arm them); revisit if that class is reported.
+    """
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+    in_comment = False
+    prev = "\n"
+    for ch in text:
+        if in_comment:
+            if ch == "\n":
+                in_comment = False
+                out.append(ch)
+                prev = "\n"
+            continue
+        if escaped:
+            out.append(ch)
+            escaped = False
+            prev = ch
+            continue
+        if ch == "\\" and not in_single:
+            out.append(ch)
+            escaped = True
+            prev = ch
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            out.append(ch)
+            prev = ch
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            prev = ch
+            continue
+        if (
+            ch == "#"
+            and not in_single
+            and not in_double
+            and prev in _COMMENT_PRECEDERS
+        ):
+            in_comment = True
+            continue
+        out.append(ch)
+        prev = ch
+    if in_single or in_double:
+        return text
+    return "".join(out)
+
+
 def contains_gateway_lifecycle_command(text: str) -> bool:
     """Return True if *text* contains a gateway lifecycle command pattern.
+
+    Shell `#` comments are stripped before matching (#106723): hint text
+    that merely mentions the incantation never executes.
 
     Matches in two passes. The first is the raw-text regex above — cheap,
     and the only pass that can fire on non-shell inputs shlex can't
@@ -246,6 +321,7 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     text = strip_inert_heredoc_bodies(text)
+    text = _strip_shell_comments(text)
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
     if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
         return True

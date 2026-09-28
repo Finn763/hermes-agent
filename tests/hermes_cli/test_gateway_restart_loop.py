@@ -180,6 +180,9 @@ class TestGatewayLifecyclePattern:
         "Monitor the gateway and tell me if a restart is recommended",
         "research how the OpenAI API gateway handles restart after rate limiting",
         "compare AWS API Gateway vs Cloudflare on restart latency",
+        # #106723: `#` hints never execute — the shell ignores them.
+        "# run hermes gateway restart to apply",
+        "echo hello # hermes gateway restart",
         # #92372 Branch A: no trailing boundary meant ordinary prose matched —
         # "restarted" carries the "restart" prefix and the old pattern ended
         # exactly there. \b after the verb group fixes it.
@@ -202,6 +205,8 @@ class TestGatewayLifecyclePattern:
         "hermes gateway restart",
         "hermes gateway restart; echo done",
         "hermes gateway stop && echo stopped",
+        # #106723: a trailing comment must not wave through a real command.
+        "hermes gateway restart # apply now",
         # #77173 command-position anchor must not weaken separator/subshell
         # forms either.
         "true;hermes gateway restart",
@@ -998,6 +1003,45 @@ class TestLifecycleGuardModule:
         assert (
             contains_gateway_lifecycle_command_or_referenced_script(f"bash {script}")
             is False
+        )
+
+    def test_script_hint_comment_not_blocked(self, tmp_path):
+        """#106723: a `#` hint mentioning the incantation never executes, so
+        an explicitly-pathed run of that script must not hard-block."""
+        from cron.lifecycle_guard import (
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        script = tmp_path / "papercuts.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "# hint: if wedged, run: hermes gateway restart to apply\n"
+            "echo stats\n",
+            encoding="utf-8",
+        )
+        assert (
+            contains_gateway_lifecycle_command_or_referenced_script(
+                f"bash {script.as_posix()}"
+            )
+            is False
+        )
+
+    def test_script_real_command_with_trailing_comment_still_blocked(
+        self, tmp_path
+    ):
+        """Comment stripping must not wave through a real command."""
+        from cron.lifecycle_guard import (
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        script = tmp_path / "evil.sh"
+        script.write_text(
+            "#!/bin/bash\nhermes gateway restart # apply now\n",
+            encoding="utf-8",
+        )
+        assert (
+            contains_gateway_lifecycle_command_or_referenced_script(
+                f"bash {script.as_posix()}"
+            )
+            is True
         )
 
     def test_prompt_with_command_raises(self):
