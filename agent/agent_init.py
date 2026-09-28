@@ -1576,6 +1576,19 @@ def init_agent(
         agent._fallback_chain = []
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    # A session created under a /model override still recovers via the
+    # configured default first — seat it at the head (#93988). No-op when
+    # the primary IS the default.
+    try:
+        from hermes_cli.fallback_config import seat_configured_default_at_head
+
+        agent._fallback_chain = seat_configured_default_at_head(
+            agent._fallback_chain,
+            primary_model=agent.model,
+            primary_provider=agent.provider,
+        )
+    except Exception:
+        pass
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:

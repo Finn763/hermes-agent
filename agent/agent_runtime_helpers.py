@@ -3149,6 +3149,19 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             entry for entry in fallback_chain
             if (entry.get("provider") or "").strip().lower() not in {old_norm, new_norm}
         ]
+    # A session /model override must still recover via the configured default
+    # first — seat it at the head AFTER the prune, so the default survives
+    # even when it shares the old primary's provider (#93988).
+    try:
+        from hermes_cli.fallback_config import seat_configured_default_at_head
+
+        fallback_chain = seat_configured_default_at_head(
+            fallback_chain,
+            primary_model=new_model,
+            primary_provider=new_provider,
+        )
+    except Exception:
+        pass
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None
 

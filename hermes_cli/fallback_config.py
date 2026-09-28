@@ -77,6 +77,53 @@ def _entry_identity(entry: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def seat_configured_default_at_head(
+    chain: list[dict[str, Any]] | None,
+    *,
+    primary_model: str = "",
+    primary_provider: str = "",
+    default_model: str | None = None,
+    default_provider: str | None = None,
+    default_base_url: str = "",
+) -> list[dict[str, Any]]:
+    """Seat the configured ``model.default`` cell at the head of a chain.
+
+    A session-scoped ``/model`` override makes the primary differ from the
+    configured default; without seating, recovery walks ``fallback_providers``
+    only and never tries the healthy default (#93988). Deduped by
+    (provider, model, base_url); no-op when the primary IS the default or no
+    usable default resolves. Fail-open: never raises, returns a new list.
+    """
+    entries = [dict(e) for e in (chain or []) if isinstance(e, dict)]
+    if default_model is None or default_provider is None:
+        try:
+            from hermes_cli.runtime_provider import _get_model_config
+
+            _mc = _get_model_config() or {}
+        except Exception:
+            return entries
+        default_model = _mc.get("default")
+        default_provider = _mc.get("provider")
+        default_base_url = _mc.get("base_url") or ""
+    _def_model = str(default_model or "").strip()
+    _def_provider = str(default_provider or "").strip()
+    if not _def_model or not _def_provider:
+        return entries
+    if (
+        str(primary_model or "").strip().lower() == _def_model.lower()
+        and str(primary_provider or "").strip().lower() == _def_provider.lower()
+    ):
+        return entries
+    cell: dict[str, Any] = {"provider": _def_provider, "model": _def_model}
+    _base = _normalized_base_url(default_base_url)
+    if _base:
+        cell["base_url"] = _base
+    _identity = _entry_identity(cell)
+    entries = [e for e in entries if _entry_identity(e) != _identity]
+    entries.insert(0, cell)
+    return entries
+
+
 def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Return the effective fallback chain merged across old and new config keys.
 

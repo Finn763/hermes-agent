@@ -9924,6 +9924,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ):
             return
         old_chain = list(getattr(agent, "_fallback_chain", []) or [])
+        # A cached agent on a session /model override must keep recovering
+        # via the configured default first — re-seat it after the refresh
+        # so the disk reload cannot evict it (#93988).
+        try:
+            from hermes_cli.fallback_config import seat_configured_default_at_head
+
+            new_chain = seat_configured_default_at_head(
+                new_chain,
+                primary_model=getattr(agent, "model", ""),
+                primary_provider=getattr(agent, "provider", ""),
+            )
+        except Exception:
+            pass
         agent._fallback_chain = new_chain
         agent._fallback_model = new_chain[0] if new_chain else None
         if not getattr(agent, "_fallback_activated", False):
