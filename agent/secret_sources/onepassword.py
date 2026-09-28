@@ -17,9 +17,11 @@ Design summary
             OPENAI_API_KEY: "op://Private/OpenAI/api key"
             ANTHROPIC_API_KEY: "op://Private/Anthropic/credential"
 
-* After ``.env`` loads, each reference is resolved with a single
-  ``op read -- <reference>`` call and injected into ``os.environ`` (the
-  same point in startup as the Bitwarden source).
+* After ``.env`` loads, references are resolved with a single
+  ``op inject`` over a template of the references (values never touch
+  disk), falling back to one ``op read -- <reference>`` per reference
+  only for names inject left unresolved — and injected at ``os.environ``
+  (the same point in startup as the Bitwarden source).
 * Authentication is whatever the user's ``op`` CLI already uses — a
   service-account token (``OP_SERVICE_ACCOUNT_TOKEN``) for headless boxes,
   or a desktop/interactive session (``OP_SESSION_*``).  Hermes never
@@ -313,6 +315,88 @@ def _run_op_read(
     return value
 
 
+def _run_op_inject(
+    op: Path,
+    valid: Dict[str, str],
+    *,
+    account: str = "",
+    token_value: str = "",
+) -> Dict[str, str]:
+    """Resolve many ``op://`` references with one ``op inject`` call.
+
+    Builds a stdin template with one ``{{ <ref> }}`` placeholder per name
+    (unquoted — ``op`` leaves the quoted form unresolved when the reference
+    contains spaces), wrapped in per-name marker lines, and splits the
+    single stdout back apart.  Names ``op`` leaves unresolved (placeholder
+    still present) or empty are omitted so the caller can fall back to
+    per-reference ``op read`` for just those names.  Values never touch
+    disk: template goes via stdin, resolved values come back via stdout.
+
+    Raises :class:`RuntimeError` when ``op inject`` itself fails — the
+    caller then falls back to per-reference reads for everything.
+    """
+    names = sorted(valid)
+    # ponytail: random per-call boundary; a secret containing its own
+    # marker lines would mis-split — re-template with a fresh boundary
+    # (or per-read fallback) if that ever matters.
+    boundary = os.urandom(4).hex()
+    lines: List[str] = []
+    for name in names:
+        lines.append(f"HERMES_OP_{boundary}_{name}_START")
+        lines.append("{{ " + valid[name] + " }}")
+        lines.append(f"HERMES_OP_{boundary}_{name}_END")
+    template = "\n".join(lines) + "\n"
+
+    cmd: List[str] = [str(op), "inject"]
+    if account:
+        cmd += ["--account", account]
+
+    try:
+        proc = subprocess.run(  # noqa: S603 — op path is user-trusted, argv list
+            cmd,
+            input=template,
+            env=_op_child_env(token_value),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_OP_RUN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"op inject timed out after {_OP_RUN_TIMEOUT}s "
+            f"for {len(names)} references"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"failed to invoke op: {exc}") from exc
+
+    if proc.returncode != 0:
+        err = _scrub(proc.stderr or "")[:200]
+        if err:
+            raise RuntimeError(f"op inject failed: {err}")
+        raise RuntimeError(f"op inject exited {proc.returncode}")
+
+    output = proc.stdout or ""
+    resolved: Dict[str, str] = {}
+    for name in names:
+        start = f"HERMES_OP_{boundary}_{name}_START\n"
+        end = f"\nHERMES_OP_{boundary}_{name}_END"
+        try:
+            section = output.split(start, 1)[1].split(end, 1)[0]
+        except IndexError:
+            continue
+        # Same edge-space rule as _run_op_read: only the template's own
+        # structural newlines come off; an empty/whitespace-only value
+        # would clobber a good .env credential, so leave it for fallback.
+        value = section.rstrip("\r\n")
+        if not value.strip():
+            continue
+        if value.strip() == "{{ " + valid[name] + " }}":
+            continue
+        resolved[name] = value
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # Fetch
 # ---------------------------------------------------------------------------
@@ -371,7 +455,19 @@ def fetch_onepassword_secrets(
 
     secrets: Dict[str, str] = {}
     read_errors = 0
+    if len(valid) > 1:
+        try:
+            injected = _run_op_inject(
+                op, valid, account=account, token_value=token_value
+            )
+        except RuntimeError:
+            injected = {}
+        for name, value in injected.items():
+            if name in valid:
+                secrets[name] = value
     for name in sorted(valid):
+        if name in secrets:
+            continue
         try:
             secrets[name] = _run_op_read(
                 op, valid[name], account=account, token_value=token_value

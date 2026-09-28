@@ -89,7 +89,14 @@ def test_fetch_happy_path(monkeypatch, tmp_path):
     }
 
     def fake_run(cmd, **kwargs):
-        # argv list, never shell=True; reference passed after `--`.
+        if "inject" in cmd:
+            # single batched call: substitute each placeholder in the template
+            template = kwargs.get("input", "")
+            out = template
+            for ref, val in values.items():
+                out = out.replace("{{ " + ref + " }}", val)
+            return _ok(out)
+        # fallback path: argv list, never shell=True; reference after `--`.
         assert "--" in cmd
         ref = cmd[cmd.index("--") + 1]
         return _ok(values[ref])
