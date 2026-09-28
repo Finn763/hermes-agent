@@ -396,6 +396,23 @@ def maybe_persist_tool_result(
     )
 
 
+def _content_chars(content) -> int:
+    """Char size of tool content for budget accounting.
+
+    Multimodal results carry an OpenAI-style part list
+    ([{type:text,...},{type:image_url,...}]); only their text parts count.
+    """
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(str(part.get("text", "")))
+            for part in content
+            if isinstance(part, dict)
+        )
+    return 0
+
+
 def enforce_turn_budget(
     tool_messages: list[dict],
     env=None,
@@ -413,8 +430,14 @@ def enforce_turn_budget(
     total_size = 0
     for i, msg in enumerate(tool_messages):
         content = msg.get("content", "")
-        size = len(content)
+        size = _content_chars(content)
         total_size += size
+        # ponytail: multimodal (list) entries are never persistence
+        # candidates — Layer 2 already skips them via
+        # _is_multimodal_tool_result, and spilling an image-part list as
+        # text is never correct. Their text parts count toward the total.
+        if isinstance(content, list):
+            continue
         if PERSISTED_OUTPUT_TAG not in content:
             candidates.append((i, size))
 
