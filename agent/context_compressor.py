@@ -3905,6 +3905,7 @@ class ContextCompressor(ContextEngine):
 
         def _truncate_tool_call_args_at(idx: int) -> bool:
             """Shrink large tool_call argument payloads at ``idx``."""
+            nonlocal pruned
             msg = result[idx]
             if msg.get("role") != "assistant" or not msg.get("tool_calls"):
                 return False
@@ -3921,6 +3922,7 @@ class ContextCompressor(ContextEngine):
                 new_tcs.append(tc)
             if modified:
                 result[idx] = {**msg, "tool_calls": new_tcs}
+                pruned += 1
             return modified
 
         # Pass 2: Replace old tool results with informative summaries
