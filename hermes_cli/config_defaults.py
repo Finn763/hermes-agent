@@ -445,6 +445,17 @@ DEFAULT_CONFIG = {
         # this off if your rc files misbehave when sourced
         # non-interactively (e.g. one that hard-exits on TTY checks).
         "auto_source_bashrc": True,
+        # Extra directories prepended to the terminal child PATH, highest
+        # priority (before every managed entry). This is the channel for
+        # pointing the Windows chat-terminal at a user-managed interpreter
+        # so bare ``python`` and ``pip`` resolve to the same environment
+        # (#126460). Example:
+        #   extra_path:
+        #     - C:/Program Files/Python313
+        #     - C:/Program Files/Python313/Scripts
+        # Empty by default; missing entries are never created, failures
+        # fall back to leaving PATH unchanged.
+        "extra_path": [],
         "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "docker_forward_env": [],
         # Explicit environment variables to set inside Docker containers.

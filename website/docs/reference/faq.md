@@ -186,6 +186,21 @@ terminal:
   auto_source_bashrc: false
 ```
 
+#### On Windows, `python` and `pip` resolve to different environments
+
+**Cause:** the chat-terminal child PATH puts the bare managed interpreter first, while `pip` arrives from the system Python — so `pip install --user <pkg>` lands in an environment bare `python` never sees. The `~/.profile`/`~/.bashrc` auto-source above is POSIX-only and does not apply on Windows.
+
+**Solution:** point the terminal at your user Python with `terminal.extra_path` (highest priority, before every managed entry):
+
+```yaml
+terminal:
+  extra_path:
+    - C:/Program Files/Python313
+    - C:/Program Files/Python313/Scripts
+```
+
+(A `shell_init_files` entry exporting the same PATH also works; `extra_path` is the documented channel.)
+
 #### `uv: command not found`
 
 **Cause:** The `uv` package manager isn't installed or not in PATH.

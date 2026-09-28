@@ -550,7 +550,9 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     # this invariant; Cron scripts use this sanitizer directly (#92998).
     path_key = _path_env_key(sanitized)
     if path_key is not None:
-        sanitized[path_key] = _prepend_hermes_bin_dir(sanitized.get(path_key, ""))
+        sanitized[path_key] = _prepend_terminal_extra_path(
+            _prepend_hermes_bin_dir(sanitized.get(path_key, ""))
+        )
 
     _apply_windows_msys_bash_env_defaults(sanitized)
 
@@ -1352,7 +1354,11 @@ def _make_run_env(env: dict) -> dict:
         # Ensure the hermes install dir is reachable so plugins can shell out
         # to bare ``hermes`` via the terminal tool even when the gateway was
         # launched without it on PATH (systemd, service managers, cron, etc.).
-        run_env[path_key] = _prepend_hermes_bin_dir(new_path)
+        new_path = _prepend_hermes_bin_dir(new_path)
+        # User-declared PATH priority (terminal.extra_path, #126460) wins
+        # over every managed entry so a user Python sorts before the bare
+        # managed interpreter.
+        run_env[path_key] = _prepend_terminal_extra_path(new_path)
 
     _inject_context_hermes_home(run_env)
 
@@ -1713,6 +1719,64 @@ def _resolve_shell_init_files() -> list[str]:
         if path and os.path.isfile(path):
             resolved.append(path)
     return resolved
+
+
+def _read_terminal_extra_path() -> list[str]:
+    """Directories to prepend to the terminal child PATH.
+
+    Best-effort — returns [] on any failure so terminal execution never
+    breaks because the config file is unreadable. Mirrors the
+    ``shell_init_files`` read pattern. This is the config channel for
+    pointing the Windows chat-terminal at a user-managed interpreter
+    (e.g. ``C:/Program Files/Python313`` + ``.../Scripts``) so bare
+    ``python`` and ``pip`` agree (#126460).
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        terminal_cfg = (load_config() or {}).get("terminal") or {}
+        entries = terminal_cfg.get("extra_path") or []
+        if not isinstance(entries, list):
+            return []
+        cleaned: list[str] = []
+        for entry in entries:
+            if not entry:
+                continue
+            text = str(entry)
+            if text.strip():
+                cleaned.append(text)
+        return cleaned
+    except Exception:
+        return []
+
+
+def _prepend_terminal_extra_path(existing_path: str) -> str:
+    """Prepend configured ``terminal.extra_path`` dirs with priority semantics.
+
+    An already-present dir is *moved* to the front (not skipped): on a
+    typical Windows box the user Python is already in PATH, just after
+    the managed toolchain dirs, and presence-only prepend would no-op on
+    exactly the case this exists for. Comparison normalizes
+    (normcase + normpath) so slash-spelling variants don't duplicate.
+    Idempotent — applying twice changes nothing.
+    # ponytail: O(n*m) norm scan, fine for PATH lengths; config re-read
+    per spawn so edits apply without restart.
+    """
+    extra = _read_terminal_extra_path()
+    if not extra:
+        return existing_path
+    sep = os.pathsep
+
+    def _norm(path: str) -> str:
+        return os.path.normcase(os.path.normpath(path.strip()))
+
+    existing = [e for e in existing_path.split(sep) if e] if existing_path else []
+    existing_norm = {_norm(e) for e in existing}
+    missing = [e for e in extra if _norm(e) not in existing_norm]
+    moved = [e for e in extra if _norm(e) in existing_norm]
+    moved_norm = {_norm(m) for m in moved}
+    remaining = [e for e in existing if _norm(e) not in moved_norm]
+    return sep.join([*missing, *moved, *remaining])
 
 
 def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:

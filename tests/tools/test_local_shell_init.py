@@ -13,8 +13,12 @@ import pytest
 
 from tools.environments.local import (
     LocalEnvironment,
+    _make_run_env,
     _prepend_shell_init,
+    _prepend_terminal_extra_path,
+    _read_terminal_extra_path,
     _resolve_shell_init_files,
+    _sanitize_subprocess_env,
 )
 
 
@@ -224,3 +228,109 @@ class TestSnapshotEndToEnd:
         assert str(fake_n_bin) in output
         # bashrc short-circuited on the interactive guard — its export never ran
         assert "FROM_BASHRC=bashrc-should-not-appear" not in output
+
+
+class TestTerminalExtraPath:
+    """terminal.extra_path: user-Python PATH channel (#126460).
+
+    Windows chat-terminal has no default channel to put a user-managed
+    interpreter first: ``python`` resolves to the bare managed runtime
+    while ``pip`` resolves to the system Python. These tests pin the
+    config-driven prepend with priority semantics.
+    """
+
+    def test_empty_config_returns_path_unchanged(self):
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=[],
+        ):
+            assert _prepend_terminal_extra_path("/a:/b") == "/a:/b"
+
+    def test_entries_prepended_order_preserved(self):
+        sep = os.pathsep
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin", "/opt/user-python/scripts"],
+        ):
+            out = _prepend_terminal_extra_path(sep.join(["/usr/bin", "/bin"]))
+        parts = out.split(sep)
+        assert parts[0] == "/opt/user-python/bin"
+        assert parts[1] == "/opt/user-python/scripts"
+
+    def test_already_present_dir_moves_to_front(self):
+        # Priority, not presence: the user dir is already in PATH but
+        # after the managed entries, so it must move to the front.
+        sep = os.pathsep
+        existing = sep.join(["/managed/tools", "/opt/user-python/bin", "/usr/bin"])
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin"],
+        ):
+            out = _prepend_terminal_extra_path(existing)
+        parts = [p for p in out.split(sep) if p]
+        assert parts[0] == "/opt/user-python/bin"
+        assert parts.count("/opt/user-python/bin") == 1
+
+    def test_trailing_slash_spelling_does_not_duplicate(self):
+        sep = os.pathsep
+        existing = sep.join(["/opt/user-python/bin/", "/usr/bin"])
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin"],
+        ):
+            out = _prepend_terminal_extra_path(existing)
+        parts = [p for p in out.split(sep) if p]
+        assert len(parts) == 2
+        assert parts[0] == "/opt/user-python/bin"
+
+    def test_applying_twice_is_idempotent(self):
+        sep = os.pathsep
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin"],
+        ):
+            once = _prepend_terminal_extra_path(sep.join(["/usr/bin"]))
+            twice = _prepend_terminal_extra_path(once)
+        assert once == twice
+
+    def test_make_run_env_honors_extra_path(self, monkeypatch):
+        sep = os.pathsep
+        monkeypatch.setenv("PATH", sep.join(["/usr/bin", "/bin"]))
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin"],
+        ):
+            run_env = _make_run_env({})
+        key = "PATH" if "PATH" in run_env else "Path"
+        assert run_env[key].split(sep)[0] == "/opt/user-python/bin"
+
+    def test_sanitize_env_honors_extra_path(self, monkeypatch):
+        sep = os.pathsep
+        monkeypatch.setenv("PATH", sep.join(["/usr/bin", "/bin"]))
+        base = {"PATH": sep.join(["/usr/bin", "/bin"])}
+        with patch(
+            "tools.environments.local._read_terminal_extra_path",
+            return_value=["/opt/user-python/bin"],
+        ):
+            sanitized = _sanitize_subprocess_env(base, None)
+        key = "PATH" if "PATH" in sanitized else "Path"
+        assert sanitized[key].split(sep)[0] == "/opt/user-python/bin"
+
+    def test_read_extra_path_defaults_on_bad_config(self):
+        import tools.environments.local as local_mod
+
+        with patch(
+            "hermes_cli.config.load_config",
+            side_effect=Exception("boom"),
+        ):
+            assert local_mod._read_terminal_extra_path() == []
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {"extra_path": "not-a-list"}},
+        ):
+            assert local_mod._read_terminal_extra_path() == []
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {"extra_path": ["", None, "/opt/x"]}},
+        ):
+            assert local_mod._read_terminal_extra_path() == ["/opt/x"]
