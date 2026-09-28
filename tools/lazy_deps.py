@@ -251,6 +251,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # installed on demand like every other messaging platform; also exposed
     # as the `teams` extra in pyproject for packagers / explicit installs.
     "platform.teams": ("microsoft-teams-apps==2.0.13.4", "aiohttp==3.14.3"),  # aiohttp 3.14.3: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7
+    # Baileys bridge probe (plugins/platforms/whatsapp/adapter.py) polls the
+    # Node bridge over HTTP with aiohttp. Without this entry a sealed env
+    # that ships a partial messaging extra silently loops on
+    # "Bridge HTTP server did not start in 15s" (#126358).
+    "platform.whatsapp": ("aiohttp==3.14.3",),  # aiohttp 3.14.3: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7
 
     # ─── Terminal backends ─────────────────────────────────────────────────
     "terminal.modal": ("modal==1.3.4",),

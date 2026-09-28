@@ -355,12 +355,7 @@ def _file_content_hash(path: Path) -> str:
         return ""
 
 
-def check_whatsapp_requirements() -> bool:
-    """
-    Check if WhatsApp dependencies are available.
-    
-    WhatsApp requires a Node.js bridge for most implementations.
-    """
+def _node_available() -> bool:
     # Prefer Hermes-managed Node/npm so Windows installs are not broken by a
     # bad or elevation-triggering system Node on PATH.
     _node = find_node_executable("node")
@@ -376,6 +371,46 @@ def check_whatsapp_requirements() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _aiohttp_available() -> bool:
+    try:
+        import aiohttp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def check_whatsapp_requirements() -> bool:
+    """
+    Passive probe: Node.js AND aiohttp importable right now.
+
+    Registry ``check_fn`` — called from status displays and config loading,
+    so it must never install anything. The ACTIVE lazy-installer
+    (``ensure_whatsapp_deps``) is registered as ``ensure_deps_fn`` and runs
+    from ``create_adapter()`` when this returns False (#79812, #126358).
+    """
+    return _node_available() and _aiohttp_available()
+
+
+def ensure_whatsapp_deps() -> bool:
+    """Active installer (registry ``ensure_deps_fn``): lazy-install aiohttp.
+
+    Node.js itself can't be pip-installed, so a missing Node still fails.
+    """
+    if not _node_available():
+        return False
+    if _aiohttp_available():
+        return True
+    try:
+        from tools.lazy_deps import ensure
+        ensure("platform.whatsapp", prompt=False)
+    except Exception as e:
+        logger.warning("[whatsapp] aiohttp lazy install failed: %s", e)
+        return False
+    import importlib
+    importlib.invalidate_caches()
+    return _aiohttp_available()
 
 
 class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
@@ -512,14 +547,35 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         
         This launches the Node.js bridge process and waits for it to be ready.
         """
+        import importlib as _importlib  # ponytail: stale FileFinder cache after a sealed-env repair; recheck without restart
+        _importlib.invalidate_caches()
         if not check_whatsapp_requirements():
-            logger.warning("[%s] Node.js not found. WhatsApp requires Node.js.", self.name)
-            self._set_fatal_error(
-                "whatsapp_node_missing",
-                "Node.js is not installed — install Node.js and re-run `hermes gateway`.",
-                retryable=False,
+            if not _node_available():
+                logger.warning("[%s] Node.js not found. WhatsApp requires Node.js.", self.name)
+                self._set_fatal_error(
+                    "whatsapp_node_missing",
+                    "Node.js is not installed — install Node.js and re-run `hermes gateway`.",
+                    retryable=False,
+                )
+                return False
+            # aiohttp missing (e.g. sealed env shipped a partial messaging
+            # extra, #126358): name it instead of spawning the bridge and
+            # looping 15s per poll on "did not start in 15s".
+            logger.warning(
+                "[%s] aiohttp not installed — WhatsApp bridge probe needs it.",
+                self.name,
             )
-            return False
+            if not ensure_whatsapp_deps():
+                # Lazy install failed: name the missing dep and stop before
+                # spawning a bridge we can never probe.
+                self._set_fatal_error(
+                    "whatsapp_aiohttp_missing",
+                    "aiohttp is not installed — the WhatsApp bridge health probe "
+                    "needs it. Run `hermes update` (or `uv pip install "
+                    "\"aiohttp==3.14.3\"`) and restart `hermes gateway`.",
+                    retryable=True,
+                )
+                return False
         
         bridge_path = Path(self._bridge_script)
         if not bridge_path.exists():
@@ -1913,6 +1969,7 @@ def register(ctx) -> None:
         label="WhatsApp",
         adapter_factory=_build_adapter,
         check_fn=check_whatsapp_requirements,
+        ensure_deps_fn=ensure_whatsapp_deps,
         is_connected=_is_connected,
         required_env=["WHATSAPP_ENABLED"],
         install_hint="WhatsApp requires a Node.js bridge — see the WhatsApp messaging docs",
