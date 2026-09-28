@@ -98,8 +98,6 @@ from tests.compat.old_updater_support import (
         ("hermes_cli.update_cmd", "get_default_hermes_root", (), {}, None),
         ("hermes_cli.tools_config", "_pip_install", (["--quiet", "honcho-ai"],), {}, None),
         ("hermes_cli.tools_config", "_pip_install", (["--quiet", "honcho-ai"],), {"timeout": 120, "capture_output": False}, None),
-        ("tools.lazy_deps", "install_specs", ([],), {"timeout": 120}, None),
-        ("tools.lazy_deps", "install_specs", (["honcho-ai"],), {"timeout": 120}, None),
     ],
 )
 def test_retired_dependency_entrypoints_handoff_without_fallback(module, name, args, kwargs, cached, fresh_child, monkeypatch):
@@ -119,6 +117,22 @@ def test_retired_dependency_entrypoints_handoff_without_fallback(module, name, a
     with fresh_child.exits():
         getattr(importlib.import_module(module), name)(*args, **kwargs)
     assert (args, kwargs) == before
+
+
+def test_install_specs_is_inert_for_plugin_callers(no_external_work):
+    """install_specs from plugin code must not run the updater (#126494).
+
+    The retired shim handed off to the updater child and exited, so a
+    plugin availability probe turned every invocation into a
+    gateway-draining update loop — and SystemExit slips past
+    `except Exception`. Like ensure(), it must raise a plain error.
+    """
+    from tools import lazy_deps
+
+    with pytest.raises(ImportError, match="relaunch"):
+        lazy_deps.install_specs(["hindsight-all"], timeout=120)
+    with pytest.raises(ImportError, match="relaunch"):
+        lazy_deps.install_specs([], timeout=120)
 
 
 @pytest.mark.parametrize("unpack", [False, True], ids=["path-era", "tuple-era"])

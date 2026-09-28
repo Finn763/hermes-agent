@@ -2,8 +2,6 @@
 
 from typing import NoReturn
 
-from hermes_cli._old_updater import stop_for_relaunch
-
 
 def ensure(feature: str, *, prompt: bool = True) -> NoReturn:
     # Shim to suppress old updater work until relaunch. Do not claim readiness.
@@ -12,5 +10,8 @@ def ensure(feature: str, *, prompt: bool = True) -> NoReturn:
 
 
 def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> NoReturn:
-    # Shim to suppress old updater work until relaunch. Do not install or report success.
-    stop_for_relaunch()
+    # Shim to suppress old updater work until relaunch. Do not install,
+    # run the updater, or report success. Exiting here turned every plugin
+    # availability probe into a gateway-draining update loop (SystemExit
+    # slips past `except Exception`), so raise a plain error like ensure().
+    raise ImportError("Dependencies are unknown to this old updater. Please relaunch Hermes.")
