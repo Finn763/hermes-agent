@@ -367,7 +367,9 @@ class TestEscapeDriftGuard:
         # This particular pair won't match anything, so it exits via
         # no-match path. Build a case where a non-exact strategy DOES match.
         content = "line\n    x = 1\nline"
-        old_string = "line\n  x = \\'a\\'\nline"
+        # Middle line clears the 0.70 block_anchor bar (#93698) so a
+        # non-exact strategy binds and the drift guard below can fire.
+        old_string = "line\n  x = \\'1\\'\nline"
         new_string = "line\n  x = \\'b\\'\nline"
         new, count, strategy, err = fuzzy_find_and_replace(content, old_string, new_string)
         assert count == 0
@@ -378,7 +380,8 @@ class TestEscapeDriftGuard:
     def test_drift_blocked_double_quote(self):
         """Same idea but with \\" drift instead of \\'."""
         content = 'line\n    x = 1\nline'
-        old_string = 'line\n  x = \\"a\\"\nline'
+        # As above: middle must clear the 0.70 block_anchor bar (#93698).
+        old_string = 'line\n  x = \\"1\\"\nline'
         new_string = 'line\n  x = \\"b\\"\nline'
         new, count, strategy, err = fuzzy_find_and_replace(content, old_string, new_string)
         assert count == 0
