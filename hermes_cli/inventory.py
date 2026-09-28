@@ -297,6 +297,10 @@ def build_model_options_payload(
       endpoints do not block the picker
     - explicit refresh: probe every custom provider while busting the model
       cache so live catalogs repopulate fully
+
+    Always uses the picker credential posture (``for_picker=True``): this is
+    a picker surface, and only that posture sees OAuth-subscription providers
+    backed by external stores (e.g. ``openai-codex`` via ``~/.codex/auth.json``).
     """
     refresh = bool(refresh)
     return build_models_payload(
@@ -308,6 +312,7 @@ def build_model_options_payload(
         pricing=True,
         capabilities=True,
         featured=True,
+        for_picker=True,
         refresh=refresh,
         probe_custom_providers=refresh,
         probe_current_custom_provider=not refresh,
