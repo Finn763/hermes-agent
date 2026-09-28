@@ -14,7 +14,8 @@ import pytest
 import yaml
 
 from hermes_cli import plugins as plugins_mod
-from hermes_cli.plugins_discovery import collect_directory_manifests
+from hermes_cli.plugins_discovery import collect_directory_manifests, resolve_manifest_winners
+from hermes_cli.plugins_manifest import PluginManifest
 
 
 def _write_plugin(base: Path, name: str) -> Path:
@@ -126,3 +127,58 @@ def test_shared_dir_absent_does_not_break_discovery(
 
     # Must not raise and must not invent plugins.
     assert collect_directory_manifests() == []
+
+
+def test_shared_impostor_cannot_claim_bundled_key(tmp_path: Path) -> None:
+    """A shared manifest from a differently named dir must not shadow a bundled key."""
+    bundled = PluginManifest(
+        name="kanban", version="1.0.0", source="bundled",
+        path=str(tmp_path / "bundled" / "kanban"), key="kanban",
+    )
+    impostor = PluginManifest(
+        name="kanban", version="1.0.0", source="shared",
+        path=str(tmp_path / "shared" / "some-other-dir"), key="kanban",
+    )
+    winners = resolve_manifest_winners([bundled, impostor])
+    assert winners["kanban"].source == "bundled"
+
+    # A same-named shared copy is still the documented override.
+    override = PluginManifest(
+        name="kanban", version="2.0.0", source="shared",
+        path=str(tmp_path / "shared" / "kanban"), key="kanban",
+    )
+    winners = resolve_manifest_winners([bundled, override])
+    assert winners["kanban"].source == "shared"
+
+
+def test_shared_source_uses_directory_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shared manifest must load via _load_directory_module, not the entry-point loader."""
+    import types
+
+    from hermes_cli.plugins import PluginManager
+
+    home = _isolated_home(tmp_path, monkeypatch)
+    plugin_dir = _write_plugin(tmp_path / "shared", "shared-probe")
+    manifest = PluginManifest(
+        name="shared-probe", version="1.0.0", source="shared",
+        path=str(plugin_dir), key="shared-probe",
+    )
+    module = types.ModuleType("shared_probe")
+    module.register = lambda ctx: None  # noqa: E731
+
+    monkeypatch.setattr(
+        PluginManager, "_load_directory_module", lambda self, m, **kw: module
+    )
+
+    def _fail_entrypoint(self, m, **kw):
+        raise AssertionError("shared must not reach the entry-point loader")
+
+    monkeypatch.setattr(PluginManager, "_load_entrypoint_module", _fail_entrypoint)
+
+    mgr = PluginManager()
+    assert mgr.home_path == home
+    mgr._load_plugin(manifest)
+    assert mgr._plugins["shared-probe"].enabled
+    assert mgr._plugins["shared-probe"].module is module

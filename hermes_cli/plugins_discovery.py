@@ -221,16 +221,16 @@ def _get_shared_plugins_dir() -> Optional[Path]:
 
 
 def resolve_manifest_winners(manifests: List[PluginManifest]) -> Dict[str, PluginManifest]:
-    """Later sources win on key collision (project > user > bundled): a same-named copy under
+    """Later sources win on key collision (project > user > shared > bundled): a same-named copy under
     ``~/.hermes/plugins/<name>`` is the documented way to override a bundled plugin, and is logged. A flat
-    user/project manifest that claims a bundled key from a *differently named* directory is an impostor, not
+    user/project/shared manifest that claims a bundled key from a *differently named* directory is an impostor, not
     an override (``impostor_dir/plugin.yaml`` with ``name: kanban``): it is skipped with a warning so
     ``hermes plugins enable kanban`` never activates unrelated code under the bundled name."""
     winners: Dict[str, PluginManifest] = {}
     for manifest in manifests:
         key = manifest_key(manifest)
         shadowed = winners.get(key)
-        if shadowed is not None and shadowed.source == "bundled" and manifest.source in {"user", "project"}:
+        if shadowed is not None and shadowed.source == "bundled" and manifest.source in {"user", "project", "shared"}:
             own_dir = Path(manifest.path).name if manifest.path else ""
             bundled_dir = Path(shadowed.path).name if shadowed.path else ""
             if own_dir and bundled_dir and own_dir != bundled_dir:
