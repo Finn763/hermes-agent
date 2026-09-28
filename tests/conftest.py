@@ -1224,6 +1224,14 @@ def pytest_runtest_setup(item):
                 "Environment does not support symbolic links "
                 "(requires admin/developer mode on Windows)"
             )
+    # cwd baseline for the #87100 guard (restore lands in
+    # ``pytest_runtest_teardown`` below). Snapshot here — BEFORE fixture
+    # setup — not in ``pytest_runtest_call``: that hook name is taken by
+    # the SIGSEGV title-join wrapper, and a post-fixture snapshot
+    # false-positives whenever a fixture uses ``monkeypatch.chdir``
+    # (e.g. ``project_env``): monkeypatch's teardown restores the
+    # pre-fixture cwd, which then differs from the recorded baseline.
+    _TEST_START_CWD[item.nodeid] = Path.cwd()
 
 
 def _reject_multiple_os_marks(items):
@@ -1757,28 +1765,24 @@ def _moa_caches_isolated():
 # file. That is the canonical "passes in isolation, fails in the full
 # suite, and only on a Tuesday" flake.
 #
-# Implementation: two pytest hooks that bracket the test body, NOT an
-# autouse fixture. Autouse fixtures cannot observe the right cwd at
-# teardown because monkeypatch's own chdir-restore teardown runs AFTER
-# the autouse fixture teardown — so reading ``Path.cwd()`` from a
-# fixture teardown looks like a leak monkeypatch is about to fix. Hooks
-# run at well-defined points: ``pytest_runtest_call`` fires AFTER all
-# fixture setups and BEFORE the test body; the body returns (or raises);
-# then ``pytest_runtest_teardown`` fires AFTER all fixture teardowns.
-# Comparing cwd between those two points isolates the test body from
-# every fixture's chdir/restore.
-#
-#   * ``pytest_runtest_call(item)`` captures cwd just before invoking
-#     the test callable. Whatever a fixture (e.g. ``project_env``)
-#     chdir'd is now part of the baseline.
-#   * ``pytest_runtest_teardown(item, nextitem)`` reads cwd just after
-#     the body and every fixture teardown has run, including
-#     monkeypatch's own restore. If cwd differs from the captured
-#     value, the body leaked; restore silently so the next test sees
-#     the right cwd. The ``tests/test_cwd_isolation.py`` regression
-#     suite asserts the leak is observable to a sibling test, so we
-#     do not need to fail inside this hook (failing here corrupts
-#     pytest's per-test teardown bookkeeping).
+# Implementation: snapshot in ``pytest_runtest_setup`` (extended in place
+# above), restore in ``pytest_runtest_teardown`` below — NOT an autouse
+# fixture, and NOT ``pytest_runtest_call``. Autouse fixtures cannot
+# observe the right cwd at teardown because monkeypatch's own
+# chdir-restore teardown runs AFTER the autouse fixture teardown, so
+# reading ``Path.cwd()`` from a fixture teardown looks like a leak
+# monkeypatch is about to fix. And ``pytest_runtest_call`` is off-limits:
+# that hook name is taken by the SIGSEGV title-join wrapper — a second
+# def would shadow it at import (no pytest error, no pluggy warning)
+# and drop the capture-race join. A post-fixture snapshot would also
+# false-positive whenever a fixture uses ``monkeypatch.chdir`` (e.g.
+# ``project_env``): monkeypatch's teardown restores the pre-fixture cwd,
+# which then differs from the recorded baseline. The pre-fixture
+# baseline is immune — end != start here means the body leaked (or a
+# fixture chdir'd, in which case restoring to the pre-fixture baseline
+# is what its own teardown converges on anyway). Restore silently: raising
+# would corrupt pytest's per-item teardown state, so the loud-failure
+# path lives in ``tests/test_cwd_isolation.py`` instead.
 #
 # Tests that genuinely need to chdir use ``monkeypatch.chdir`` or wrap
 # the call in ``try/finally``; both styles leave cwd unchanged at
@@ -1792,40 +1796,20 @@ def _moa_caches_isolated():
 _TEST_START_CWD: dict[str, "Path"] = {}
 
 
-@pytest.fixture(autouse=True)
-def _isolate_cwd(request):
-    """No-op fixture kept only for the name.
-
-    The real work happens in the two hooks below. The fixture exists so
-    future contributors grepping for ``_isolate_cwd`` find the right
-    place to extend behaviour (and so conftest stays a complete
-    inventory of isolation policies).
-    """
-    yield
-
-
-def pytest_runtest_call(item):
-    """Snapshot cwd AFTER every fixture setup and BEFORE the test body.
-
-    Runs strictly after ``pytest_runtest_setup`` (which is where every
-    fixture's setup — including ``monkeypatch.chdir(repo)`` — fires),
-    so the captured value reflects the cwd the test body actually
-    inherits, not the cwd of any earlier fixture's pre-setup state.
-    """
-    _TEST_START_CWD[item.nodeid] = Path.cwd()
-
-
 def pytest_runtest_teardown(item, nextitem):
-    """Restore cwd AFTER every fixture teardown so the next test inherits it.
+    """Restore cwd so the next test inherits the setup-time baseline.
 
-    Runs strictly after ``pytest_runtest_teardown``'s normal fixture
-    teardown pass, which means monkeypatch's own chdir-restore has
-    already landed. So ``Path.cwd()`` here is the cwd the NEXT test
-    will actually inherit — if the test body leaked, this is the wrong
-    one and we silently restore to the captured baseline. Raising
-    here would corrupt pytest's per-item teardown state, which is why
-    the loud-failure path lives in ``tests/test_cwd_isolation.py``
-    instead.
+    Pluggy runs this conftest impl BEFORE the runner's own fixture
+    teardown pass (verified by probe: the hook still sees the leaked
+    dir while a yield-fixture teardown already sees the restored
+    one). That ordering is safe here because the baseline above is
+    pre-fixture: ``monkeypatch.chdir`` teardowns restore to that same
+    pre-fixture cwd, so restoring early and letting fixture teardowns
+    land afterwards converges on the same directory. If the test body
+    leaked, this is the wrong one and we silently restore to the
+    captured baseline. Raising here would corrupt pytest's per-item
+    teardown state, which is why the loud-failure path lives in
+    ``tests/test_cwd_isolation.py`` instead.
     """
     start = _TEST_START_CWD.pop(item.nodeid, None)
     if start is None:
