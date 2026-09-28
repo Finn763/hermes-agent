@@ -15043,6 +15043,21 @@ def _profile_setup_command(name: str) -> str:
     return "hermes setup" if name == "default" else f"{name} setup"
 
 
+# ``providers.<name>`` fields ``_write_profile_model`` carries into a new
+# profile: everything needed to define the endpoint (settings + credential
+# *pointers*). Credential literals are deliberately absent — an entry that
+# gains a new credential-bearing field later is dropped by default instead of
+# silently riding along.
+_PROVIDER_ENTRY_CARRY_KEYS = frozenset({
+    "provider", "name", "url", "base_url", "api",
+    "key_env", "api_key_env", "key_cmd",
+    "api_mode", "transport", "model", "default_model",
+    "models", "models_discovered", "context_length", "rate_limit_delay",
+    "request_timeout_seconds", "stale_timeout_seconds",
+    "discover_models", "extra_body", "extra_headers", "ssl_ca_cert", "ssl_verify",
+})
+
+
 def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
     """Write the main model assignment into a specific profile's config.yaml.
 
@@ -15051,14 +15066,84 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
     profile's config rather than the dashboard process's active profile.
     Clears any stale ``base_url`` / ``context_length`` the same way
     ``POST /api/model/set`` does, since the new model may differ.
+
+    Carries the source ``providers.<name>`` entry for config-map (non
+    registry) providers: the entry carries the actual provider definition
+    (``base_url`` + ``key_env`` pointer), and without it the new profile
+    fails agent init with ``Unknown provider``. Non-destructive: a
+    pre-existing target entry is kept. Credential *literals* (a plaintext
+    ``api_key``, non-templated ``extra_headers`` values) stay behind; only
+    ``${VAR}`` pointers are carried.
     """
+    import copy
+
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    # Snapshot the source entry BEFORE re-scoping HERMES_HOME — the
+    # definition lives in the dashboard session's own config, which is
+    # unreachable once the override points at the target profile dir.
+    try:
+        _src_providers = load_config().get("providers")
+    except Exception:
+        _src_providers = None
+    if not isinstance(_src_providers, dict):
+        _src_providers = {}
+    _want = (provider or "").strip()
+    _src_entry = _src_providers.get(_want)
+    if not isinstance(_src_entry, dict) and _want:
+        _lower = _want.lower()
+        for _k, _v in _src_providers.items():
+            if isinstance(_k, str) and _k.lower() == _lower and isinstance(_v, dict):
+                _src_entry = _v
+                break
+    if not isinstance(_src_entry, dict):
+        _src_entry = None
 
     token = set_hermes_home_override(str(profile_dir))
     try:
         provider, model = _normalize_main_model_assignment(provider, model)
         cfg = load_config()
         cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), provider, model)
+        if _src_entry is None:
+            _maybe = _src_providers.get(provider)
+            _src_entry = _maybe if isinstance(_maybe, dict) else None
+        if _src_entry is not None:
+            try:
+                from hermes_cli.auth import PROVIDER_REGISTRY
+            except Exception:
+                PROVIDER_REGISTRY = {}
+            if provider.strip().lower() not in PROVIDER_REGISTRY:
+                _target_providers = cfg.get("providers")
+                if not isinstance(_target_providers, dict):
+                    _target_providers = {}
+                    cfg["providers"] = _target_providers
+                if provider not in _target_providers:
+                    # ponytail: pointer-only carry — allowlisted endpoint
+                    # fields plus ``${VAR}`` key pointers; credential
+                    # literals never leave the source profile. ``api_key`` is
+                    # the one allowlisted-adjacent field that may hold either
+                    # (``api`` is a base_url alias here, not a secret).
+                    _carried: dict = {}
+                    for _k, _v in _src_entry.items():
+                        if _k in _PROVIDER_ENTRY_CARRY_KEYS:
+                            _carried[_k] = copy.deepcopy(_v)
+                        elif _k == "api_key" and isinstance(_v, str) and "${" in _v:
+                            _carried[_k] = _v
+                    # extra_headers values routinely carry credentials
+                    # (Cloudflare Access service tokens, custom bearer
+                    # schemes); keep only the ${VAR} templates.
+                    _hdrs = _carried.get("extra_headers")
+                    if isinstance(_hdrs, dict):
+                        _hdrs = {
+                            _h: _hv
+                            for _h, _hv in _hdrs.items()
+                            if isinstance(_hv, str) and "${" in _hv
+                        }
+                        if _hdrs:
+                            _carried["extra_headers"] = _hdrs
+                        else:
+                            _carried.pop("extra_headers", None)
+                    _target_providers[provider] = _carried
         save_config(cfg)
     finally:
         reset_hermes_home_override(token)

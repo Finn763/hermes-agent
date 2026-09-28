@@ -2601,6 +2601,51 @@ class TestNewEndpoints:
         assert "Bearer Bearer" not in profile_env
         assert not (root / ".env").exists()
 
+    def test_profile_provider_carry_keeps_pointers_and_drops_literals(self):
+        """A config-map provider entry is carried into the new profile, but
+        its credential *literals* are not (issue #106643).
+
+        ``extra_headers`` values routinely carry credentials (Cloudflare
+        Access service tokens, custom bearer schemes) and ride along in a
+        naive ``deepcopy`` — and the target is a listed, exportable profile,
+        so an inline secret would leave the scope it was written for. The
+        entry itself must survive, or the profile fails init with
+        ``Unknown provider``.
+        """
+        from hermes_constants import get_hermes_home
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli import web_server
+
+        source = load_config()
+        source.setdefault("providers", {})["my-proxy"] = {
+            "base_url": "https://llm.internal.example.com/v1",
+            "key_env": "MY_PROXY_API_KEY",
+            "api_key": "sk-inline-literal",
+            "extra_headers": {
+                "CF-Access-Client-Id": "xxxx.access",
+                "CF-Access-Client-Secret": "${CF_ACCESS_SECRET}",
+            },
+            "context_length": 128000,
+            "future_credential_field": "inline-secret",
+        }
+        save_config(source)
+
+        profile_dir = get_hermes_home() / "profiles" / "carry"
+        profile_dir.mkdir(parents=True)
+        web_server._write_profile_model(profile_dir, "my-proxy", "some-model")
+
+        config_text = (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        entry = yaml.safe_load(config_text)["providers"]["my-proxy"]
+        assert entry["base_url"] == "https://llm.internal.example.com/v1"
+        assert entry["key_env"] == "MY_PROXY_API_KEY"
+        assert entry["context_length"] == 128000
+        assert entry["extra_headers"] == {
+            "CF-Access-Client-Secret": "${CF_ACCESS_SECRET}",
+        }
+        assert "sk-inline-literal" not in config_text
+        assert "xxxx.access" not in config_text
+        assert "inline-secret" not in config_text
+
 
 
     # --- New profiles endpoints: active / description / model / describe-auto ---
