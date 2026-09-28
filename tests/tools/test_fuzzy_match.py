@@ -320,6 +320,31 @@ class TestBlockAnchorThreshold:
         )
 
 
+class TestBlockAnchorSingleCandidateGuard:
+    """Single-candidate block_anchor must fail closed, not bind the wrong neighbor (#93698)."""
+
+    def test_half_different_middle_does_not_bind(self):
+        """Same first+last lines but ~0.54-similar middle: a nearby lookalike
+        (Markdown task entry + source-URL segment shape) must NOT bind."""
+        content = (
+            "- [ ] Collect source URL for the atlas entry review queue\n"
+            "- source: https://internal.example.com/atlas/boreal-survey\n"
+            "- status: pending editor signoff, owner marina, due thursday\n"
+            "- [ ] Collect source URL for the atlas entry review queue\n"
+        )
+        pattern = (
+            "- [ ] Collect source URL for the atlas entry review queue\n"
+            "- ref: atlas boreal survey (mirror id 7, cached snapshot)\n"
+            "- note: quarterly budget reforecast approved, kpi dashboard v2\n"
+            "- [ ] Collect source URL for the atlas entry review queue\n"
+        )
+        new, count, strategy, err = fuzzy_find_and_replace(content, pattern, "REPLACED")
+        assert count == 0, f"wrong-neighbor bind must fail closed, got strategy={strategy}"
+        assert err is not None
+        assert new == content  # untouched
+        assert "pending editor signoff" in new  # not destroyed
+
+
 
 
 class TestEscapeDriftGuard:
