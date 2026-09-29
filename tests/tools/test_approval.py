@@ -1898,3 +1898,45 @@ class TestLifecycleGuardLaunchctlParity:
             "launchctl print system/com.apple.WindowServer",
         ):
             assert contains_gateway_lifecycle_command(cmd) is False, cmd
+
+
+class TestHermesHomeDestructiveVerbs:
+    """#109367: destructive verbs scoped to HERMES_HOME must prompt.
+
+    Bare-home `rm -rf` is hardline (see test_hardline_blocklist.py); every
+    other destructive idiom against the agent's own data dir must at least
+    reach the approval gate instead of silent-approve. Read-only access
+    (cat, cp-FROM, tee elsewhere) stays clean.
+    """
+
+    def test_destructive_verbs_against_hermes_home_prompt(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+        home = str(tmp_path / "hh")
+        for command in (
+            "mv ~/.hermes /tmp/x",
+            f"mv {home} /tmp/x",
+            "rm ~/.hermes/state.db",
+            f"rm {home}/state.db",
+            "rm -rf ~/.hermes/cache",
+            "> ~/.hermes/state.db",
+            "truncate -s0 ~/.hermes/state.db",
+            "shred -u ~/.hermes/state.db",
+            "unlink ~/.hermes/state.db",
+            "echo x | tee ~/.hermes/state.db",
+            "cp /dev/null ~/.hermes/state.db",
+            "mv $HERMES_HOME /tmp/x",
+        ):
+            dangerous, key, desc = detect_dangerous_command(command)
+            assert dangerous is True, command
+            assert key is not None, command
+
+    def test_reads_and_forensics_copies_stay_clean(self):
+        for cmd in (
+            "cat ~/.hermes/config.yaml",
+            "cp ~/.hermes/state.db /tmp/backup",
+            "echo hello | tee /tmp/output.txt",
+            "echo data > /tmp/scratch.txt",
+            "rm foo.txt",
+        ):
+            dangerous, key, desc = detect_dangerous_command(cmd)
+            assert dangerous is False, cmd

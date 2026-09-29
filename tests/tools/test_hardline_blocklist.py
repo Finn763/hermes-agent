@@ -807,3 +807,49 @@ def test_sudo_stdin_guard_container_bypass(clean_session):
         for cmd in _SUDO_STDIN_BLOCK:
             result = check_all_command_guards(cmd, env)
             assert result["approved"] is True, f"container {env} should bypass sudo guard on {cmd!r}"
+
+
+# #109367: the active Hermes home is the agent's own data dir — bare-home
+# recursive delete sits below the yolo floor. Children (cache prune, log
+# rotate) stay prompt-grade via DANGEROUS, not hardline.
+_HERMES_HOME_HARDLINE_BLOCK = [
+    "rm -rf ~/.hermes",
+    "rm -rf ~/.hermes/",
+    "rm -rf ~/.hermes/*",
+    "rm -rf $HERMES_HOME",
+    "rm -rf ${HERMES_HOME}",
+    'rm -rf "$HERMES_HOME"',
+    "rm -fr ~/.hermes",
+]
+
+
+@pytest.mark.parametrize("command", _HERMES_HOME_HARDLINE_BLOCK)
+def test_hermes_home_bare_delete_is_hardline(command):
+    is_hl, desc = detect_hardline_command(command)
+    assert is_hl, f"expected hardline to match {command!r}"
+    assert desc == "recursive delete of active Hermes home"
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf ~/.hermes/cache",
+    "rm -rf $HERMES_HOME/cache",
+    "rm -rf ~/.hermes-backup",
+])
+def test_hermes_home_child_is_not_hardline(command):
+    is_hl, desc = detect_hardline_command(command)
+    assert not is_hl, f"child path must not hit the floor: {command!r} ({desc})"
+    assert desc is None
+
+
+def test_resolved_hermes_home_is_hardline_blocked(monkeypatch, tmp_path):
+    active_home = tmp_path / "custom-hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(active_home))
+    for command in (
+        f"rm -rf {active_home}",
+        f'rm -rf "{active_home}"',
+        f"rm -rf {active_home}/",
+        f"rm -rf {active_home}/*",
+    ):
+        is_hl, desc = detect_hardline_command(command)
+        assert is_hl, command
+        assert desc == "recursive delete of active Hermes home"
