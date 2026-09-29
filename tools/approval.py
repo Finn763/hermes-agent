@@ -5679,6 +5679,12 @@ def request_elicitation_consent(
             "description": description,
             "pattern_key": "mcp_elicitation",
             "pattern_keys": ["mcp_elicitation"],
+            # Elicitation is a per-call confirmation — no pattern to remember,
+            # so only Once/Deny render (mirrors the CLI allow_permanent=False).
+            # ponytail: one-shot for all elicitation surfaces; per-server+tool
+            # persistence if trust-gated tools ever need session/always.
+            "allow_session": False,
+            "allow_permanent": False,
         }
         try:
             decision = _await_gateway_decision(
@@ -5706,6 +5712,7 @@ def request_elicitation_consent(
             message,
             description,
             timeout_seconds=timeout_seconds,
+            allow_session=False,
             allow_permanent=False,
         )
     except Exception as exc:
