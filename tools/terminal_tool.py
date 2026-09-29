@@ -3924,10 +3924,45 @@ def _evict_environment_for_task(task_id: Optional[str]) -> None:
             logger.debug("cleanup of degraded environment failed", exc_info=True)
 
 
+def _session_profile_terminal_env() -> Optional[Dict[str, str]]:
+    """TERMINAL_* view of the session's profile config when multiplexing.
+
+    A multiplexed gateway serves many profiles from one process while
+    TERMINAL_* process env stays pinned to the launch profile. The schema
+    check must follow the session's own profile, or a non-default profile
+    silently loses the terminal/file tools for the session's lifetime.
+    Returns None outside multiplexing (historical process-wide behavior).
+    """
+    try:
+        from agent.secret_scope import is_multiplex_active
+        if not is_multiplex_active():
+            return None
+        from hermes_constants import get_hermes_home_override
+        if not get_hermes_home_override():
+            return None
+        from hermes_cli.config import apply_terminal_config_to_env, load_config_readonly
+        bridged: Dict[str, str] = {}
+        apply_terminal_config_to_env(env=bridged, config=load_config_readonly())
+        return bridged
+    except Exception:
+        return None
+
+
 def check_terminal_requirements() -> bool:
     """Check if all requirements for the terminal tool are met."""
     try:
         config = _get_env_config()
+        session_env = _session_profile_terminal_env()
+        if session_env:
+            # ponytail: session profile wins for the check only; execution env untouched.
+            if session_env.get("TERMINAL_ENV"):
+                config["env_type"] = session_env["TERMINAL_ENV"]
+            if "TERMINAL_SSH_HOST" in session_env:
+                config["ssh_host"] = session_env["TERMINAL_SSH_HOST"]
+            if "TERMINAL_SSH_USER" in session_env:
+                config["ssh_user"] = session_env["TERMINAL_SSH_USER"]
+            if session_env.get("TERMINAL_MODAL_MODE"):
+                config["modal_mode"] = coerce_modal_mode(session_env["TERMINAL_MODAL_MODE"])
         env_type = config["env_type"]
 
         if env_type == "local":
