@@ -12281,7 +12281,8 @@ def _session_latest_descendant(session_id: str, db):
                 return None
 
     sid = db.resolve_session_id(session_id)
-    if not sid or not db.get_session(sid):
+    sess = db.get_session(sid) if sid else None
+    if not sid or not sess:
         return None, []
 
     conn = (
@@ -12295,14 +12296,14 @@ def _session_latest_descendant(session_id: str, db):
     if conn is not None:
         raw_rows = conn.execute(
             """
-            WITH RECURSIVE descendants(id, parent_session_id, started_at) AS (
-                SELECT id, parent_session_id, started_at FROM sessions WHERE id = ?
+            WITH RECURSIVE descendants(id, parent_session_id, started_at, end_reason) AS (
+                SELECT id, parent_session_id, started_at, end_reason FROM sessions WHERE id = ?
                 UNION
-                SELECT s.id, s.parent_session_id, s.started_at
+                SELECT s.id, s.parent_session_id, s.started_at, s.end_reason
                 FROM sessions s
                 JOIN descendants d ON s.parent_session_id = d.id
             )
-            SELECT id, parent_session_id, started_at FROM descendants
+            SELECT id, parent_session_id, started_at, end_reason FROM descendants
             """,
             (sid,),
         ).fetchall()
@@ -12311,9 +12312,22 @@ def _session_latest_descendant(session_id: str, db):
                 "id": row_get(row, "id", 0),
                 "parent_session_id": row_get(row, "parent_session_id", 1),
                 "started_at": row_get(row, "started_at", 2),
+                "end_reason": row_get(row, "end_reason", 3),
             })
     else:
         rows = db.list_sessions_rich(limit=10000, offset=0, compact_rows=True)
+
+    # ponytail: ended descendants must not capture a live session's resume
+    # (#90165: an ended delegate child kept hijacking a live gateway parent
+    # even after agent_close). Pruning here covers both row sources above.
+    # Ended parents keep the legacy walk so old compression tips still
+    # resolve; a live grandchild under an ended child is pruned with it.
+    try:
+        sid_ended = sess.get("end_reason") if isinstance(sess, dict) else sess["end_reason"]
+    except Exception:
+        sid_ended = None
+    if not sid_ended:
+        rows = [r for r in rows if r.get("id") == sid or not r.get("end_reason")]
 
     children = {}
     for row in rows:

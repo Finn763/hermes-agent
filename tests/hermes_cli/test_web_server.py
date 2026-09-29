@@ -1147,6 +1147,40 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["session_id"] == "cyc-b"
 
+    def test_latest_descendant_skips_ended_child_of_live_parent(self):
+        """Resuming a live session must not redirect into an ended child.
+
+        #90165 (2026-09-24 report): a live gateway parent with delegate
+        children kept resolving to the newest child even after the child
+        was ended via PATCH end_reason=agent_close, so prompts landed in
+        a dead subagent session. Ended descendants are pruned; a live
+        child is still followed and ended parents keep the legacy walk.
+        """
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="live-tg", source="telegram",
+                session_key="agent:main:tg1",
+            )
+            db.create_session(
+                session_id="dead-del", source="subagent",
+                session_key="agent:main:tg1", parent_session_id="live-tg",
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at = started_at + 10 "
+                "WHERE id = 'dead-del'"
+            )
+            db._conn.commit()
+            db.end_session("dead-del", "agent_close")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/live-tg/latest-descendant")
+        assert resp.status_code == 200
+        assert resp.json()["session_id"] == "live-tg"
+
 
 
 
