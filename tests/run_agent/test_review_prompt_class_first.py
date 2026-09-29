@@ -144,6 +144,23 @@ def test_combined_review_prompt_rejects_unresolved_failures():
     _assert_unresolved_failure_guidance(AIAgent._COMBINED_REVIEW_PROMPT, "_COMBINED_REVIEW_PROMPT")
 
 
+def _assert_system_stance_guidance(prompt: str, label: str) -> None:
+    """Stances on the review system itself must not become skill rules (#82772)."""
+    lower = prompt.lower()
+    assert "system mechanism" in lower, f"{label}: must name system mechanisms as not-skill-worthy"
+    assert "review pass" in lower, f"{label}: must name the review pass itself as an example"
+    assert "reply" in lower, f"{label}: must redirect conflicts to the reply"
+    assert "skill library" in lower, f"{label}: must bar persisting the stance in the skill library"
+
+
+def test_skill_review_prompt_rejects_system_stance_capture():
+    _assert_system_stance_guidance(AIAgent._SKILL_REVIEW_PROMPT, "_SKILL_REVIEW_PROMPT")
+
+
+def test_combined_review_prompt_rejects_system_stance_capture():
+    _assert_system_stance_guidance(AIAgent._COMBINED_REVIEW_PROMPT, "_COMBINED_REVIEW_PROMPT")
+
+
 def _assert_read_before_write_guidance(prompt: str, label: str) -> None:
     """Both review prompts must teach the enforced read-before-write handshake.
 
