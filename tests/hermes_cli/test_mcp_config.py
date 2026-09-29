@@ -168,6 +168,64 @@ class TestMcpRemove:
         cmd_mcp_remove(_make_args(name="oauth-srv"))
         assert not token_file.exists()
 
+    def test_remove_cleans_all_oauth_files_when_manager_fails(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """#81050: manager failure must not leave .json/.client.json/.meta.json."""
+        _seed_config(tmp_path, {
+            "oauth-srv": {"url": "https://example.com/mcp", "auth": "oauth"},
+        })
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config.get_hermes_home", lambda: tmp_path
+        )
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir()
+        files = [
+            token_dir / f"oauth-srv{suffix}"
+            for suffix in (".json", ".client.json", ".meta.json")
+        ]
+        for fp in files:
+            fp.write_text("{}")
+
+        def _boom():
+            raise RuntimeError("profile setup not ready")
+
+        monkeypatch.setattr("tools.mcp_oauth_manager.get_manager", _boom)
+        from hermes_cli.mcp_config import cmd_mcp_remove
+
+        cmd_mcp_remove(_make_args(name="oauth-srv"))
+        assert [fp for fp in files if fp.exists()] == []
+
+    def test_remove_orphan_cleans_token_files(self, tmp_path, capsys, monkeypatch):
+        """#81050: removing a server already absent from config heals orphans."""
+        _seed_config(tmp_path, {
+            "other": {"url": "https://example.com/mcp"},
+        })
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config.get_hermes_home", lambda: tmp_path
+        )
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir()
+        files = [
+            token_dir / f"ghost{suffix}"
+            for suffix in (".json", ".client.json", ".meta.json")
+        ]
+        for fp in files:
+            fp.write_text("{}")
+
+        from hermes_cli.mcp_config import cmd_mcp_remove
+
+        cmd_mcp_remove(_make_args(name="ghost"))
+        out = capsys.readouterr().out
+        assert "not found" in out
+        assert [fp for fp in files if fp.exists()] == []
+
+        # No phantom config entry created by the orphan cleanup.
+        from hermes_cli.config import load_config
+
+        assert "ghost" not in load_config().get("mcp_servers", {})
+
 
 # ---------------------------------------------------------------------------
 # Tests: cmd_mcp_add

@@ -104,17 +104,25 @@ def _save_mcp_server(name: str, server_config: dict) -> bool:
     return True
 
 
-def _remove_mcp_server(name: str) -> bool:
+def _remove_mcp_server(name: str, *, clean_tokens: bool = True) -> bool:
     """Remove a server from config.yaml.  Returns True if it existed."""
     config = load_config()
     servers = config.get("mcp_servers", {})
-    if name not in servers:
-        return False
-    del servers[name]
-    if not servers:
-        config.pop("mcp_servers", None)
-    save_config(config)
-    return True
+    existed = name in servers
+    if existed:
+        del servers[name]
+        if not servers:
+            config.pop("mcp_servers", None)
+        save_config(config)
+    if clean_tokens:
+        # ponytail: best-effort disk cleanup; a token-write failure never
+        # blocks the config removal, manager cache eviction stays caller-side.
+        try:
+            from tools.mcp_oauth import remove_oauth_tokens
+            remove_oauth_tokens(name)
+        except Exception:
+            pass
+    return existed
 
 
 def _replace_mcp_servers(servers: Dict[str, dict]) -> Tuple[bool, List[str]]:
@@ -648,6 +656,9 @@ def cmd_mcp_remove(args):
     existing = _get_mcp_servers()
 
     if name not in existing:
+        # Orphan on disk (config entry gone, token files left): heal it now
+        # so a later re-add never picks up stale OAuth state. Still 404.
+        _remove_mcp_server(name)
         _error(f"Server '{name}' not found in config.")
         servers = list(existing.keys())
         if servers:
