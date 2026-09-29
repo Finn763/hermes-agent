@@ -149,4 +149,26 @@ After the table.`
 
     expect(sanitizeTextForSpeech(text)).toContain('Item | Value')
   })
+
+  it('rewrites filenames, hashes, paths, and IDs instead of reading them raw', () => {
+    expect(sanitizeTextForSpeech('I generated peyton-sample-20260922.wav today.')).toBe(
+      'I generated WAV file today.'
+    )
+    expect(sanitizeTextForSpeech('sha256: abc123def456789012345678901234567890 ok')).toBe(
+      'SHA-256 hash omitted ok'
+    )
+    expect(sanitizeTextForSpeech('see models/gpt-4o/checkpoint-20260922.bin today')).toBe(
+      'see file path omitted today'
+    )
+    expect(sanitizeTextForSpeech('released model-xyz-20260922-alpha build')).toBe(
+      'released identifier omitted build'
+    )
+    // Speakable text stays intact: prose, dates, and/or, rates.
+    expect(sanitizeTextForSpeech('Use git status after the change.')).toBe(
+      'Use git status after the change.'
+    )
+    expect(sanitizeTextForSpeech('choose and/or option, due 2026/06/02 ok')).toBe(
+      'choose and/or option, due 2026/06/02 ok'
+    )
+  })
 })

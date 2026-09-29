@@ -227,6 +227,49 @@ _VERIFIER_FOOTER_RE = re.compile(
 )
 
 
+# Identifier-heavy spans (filenames, hashes, paths, model/version IDs) sound
+# like corrupted audio when read verbatim (#119207).  Prefer a short
+# placeholder over literally pronouncing them.
+# ponytail: naive placeholder policy, per-language expansion if it matters.
+_TTS_SPOKEN_EXTS = r"wav|ogg|opus|mp3|flac|m4a|aac|png|jpe?g|gif|webp|mp4|mov|pdf|zip|csv|json|log|txt|bin|py|ts|m?js"
+_TTS_FILENAME_RE = re.compile(r"(?<![\w.-])[\w][\w.-]*\.(" + _TTS_SPOKEN_EXTS + r")\b", re.IGNORECASE)
+_TTS_HASH_LABELED_RE = re.compile(r"\bsha[\s_-]*256\s*:\s*[0-9a-fA-F]{6,}(?:\.\.\.)?", re.IGNORECASE)
+_TTS_HASH_BARE_RE = re.compile(r"\b[0-9a-fA-F]{32,}\b")
+_TTS_PATH_RE = re.compile(r"(?<![\w/.-])([\w][\w.-]*(?:/[\w][\w.-]*)+)(?![\w/])")
+_TTS_VERSION_RE = re.compile(r"(?<![\w.])v?\d+\.\d+\.\d+(?:[-.+][\w.+-]*)?(?![\w.])")
+_TTS_DASH_ID_RE = re.compile(r"(?<![\w-])([A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+)(?![\w-])")
+
+
+def _summarize_path(match: re.Match[str]) -> str:
+    token = match.group(0)
+    # Dates (2026/06/02), and/or, N/A, TCP/IP, $5/month stay speakable.
+    if not re.search(r"[A-Za-z]", token):
+        return token
+    if token.count("/") >= 2 or len(token) >= 12 or re.search(r"[.\-_]", token):
+        return "file path omitted"
+    return token
+
+
+def _summarize_dash_id(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if len(token) >= 16 and token.count("-") + token.count("_") >= 2 and re.search(r"\d", token):
+        return "identifier omitted"
+    return token
+
+
+def replace_identifiers_for_tts(text: str) -> str:
+    """Rewrite identifier-heavy spans into short speakable placeholders."""
+    if not text:
+        return ""
+    text = _TTS_HASH_LABELED_RE.sub("SHA-256 hash omitted", text)
+    text = _TTS_HASH_BARE_RE.sub("hash omitted", text)
+    text = _TTS_PATH_RE.sub(_summarize_path, text)
+    text = _TTS_FILENAME_RE.sub(lambda m: f"{m.group(1).upper()} file", text)
+    text = _TTS_VERSION_RE.sub("version omitted", text)
+    text = _TTS_DASH_ID_RE.sub(_summarize_dash_id, text)
+    return text
+
+
 def strip_nonspoken_blocks(text: str) -> str:
     """Remove blocks that must never reach a speech provider.
 
@@ -270,6 +313,7 @@ def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     """
     spoken = strip_nonspoken_blocks(text)
     spoken = strip_markdown_for_tts(spoken)
+    spoken = replace_identifiers_for_tts(spoken)
     spoken = normalize_symbols_for_tts(spoken)
     spoken = smooth_whitespace_for_tts(spoken)
     spoken = flatten_newlines_for_payload(spoken)

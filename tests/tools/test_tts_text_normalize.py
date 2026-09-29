@@ -47,3 +47,23 @@ def test_prepare_spoken_text_polish_edge_cases():
     assert "and/or" in prepare_spoken_text("choose and/or option")
     assert "N/A" in prepare_spoken_text("status N/A here")
     assert "2026/06/02" in prepare_spoken_text("due 2026/06/02 ok")
+
+
+def test_prepare_spoken_text_rewrites_filenames_hashes_paths_ids():
+    # RED for #119207: identifier-heavy spans must not be spoken verbatim.
+    assert "peyton-sample-20260922" not in prepare_spoken_text(
+        "I generated peyton-sample-20260922.wav today"
+    )
+    assert "WAV file" in prepare_spoken_text("I generated peyton-sample-20260922.wav today")
+    assert "SHA-256 hash omitted" in prepare_spoken_text(
+        "sha256: abc123def456789012345678901234567890 ok"
+    )
+    assert "abc123def456" not in prepare_spoken_text(
+        "sha256: abc123def456789012345678901234567890 ok"
+    )
+    assert "file path omitted" in prepare_spoken_text(
+        "see models/gpt-4o/checkpoint-20260922.bin today"
+    )
+    assert "identifier omitted" in prepare_spoken_text("released model-xyz-20260922-alpha build")
+    # Speakable neighbors stay intact.
+    assert "git status" in prepare_spoken_text("Use `git status` after the change.")
