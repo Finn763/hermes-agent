@@ -699,6 +699,93 @@ def _core_constraints_file() -> Optional[Path]:
         return None
 
 
+def _pep503_name(name: str) -> str:
+    """PEP 503 normalized distribution name (``[-_.]+`` -> ``-``, lower)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _module_loaded(pkg: str) -> bool:
+    # ponytail: inspects only the calling process; sibling processes holding
+    # the venv are not portably enumerable (psutil is itself a lazy dep).
+    mod = pkg.replace("-", "_")
+    return mod in sys.modules or any(
+        m == mod or m.startswith(mod + ".") for m in sys.modules
+    )
+
+
+def _live_venv_install_refusal(specs: tuple[str, ...]) -> Optional[str]:
+    """Refuse a venv-scoped install that would mutate code under a live process.
+
+    Returns an error string when the destination is unsafe, else None.
+    Skipped entirely in durable-target mode (``--target`` never touches
+    site-packages). One choke point: called at the top of the venv-scoped
+    branch of :func:`_venv_pip_install`, which every caller routes through.
+    """
+    if _lazy_install_target() is not None:
+        return None
+    try:
+        dest = Path(sysconfig.get_paths()["purelib"])
+    except Exception:
+        return None
+    for spec in specs:
+        name = _pkg_name_from_spec(spec)
+        try:
+            # PEP 503 collapses `[-_.]+` to '-', but pip/PEP 427 writes the
+            # on-disk dist-info dir with '_' separators (dingtalk-stream ->
+            # dingtalk_stream-*.dist-info). Matching only the PEP 503 shape
+            # missed every hyphenated name. Match both, de-duplicated.
+            norm = _pep503_name(name)
+            shapes = (norm, norm.replace("-", "_"))
+            metas = sorted({p for shape in shapes for p in dest.glob(f"{shape}-*.dist-info")})
+        except OSError:
+            metas = []
+        if any(m.is_symlink() for m in metas):
+            return (
+                f"{dest / (name + '.dist-info')} is a symlink: a package "
+                "manager cannot uninstall through it and can write through "
+                "it into the target tree. Materialize the link first."
+            )
+        if len(metas) > 1:
+            return (
+                f"{len(metas)} dist-info dirs for {name!r} in {dest}: "
+                "importlib.metadata resolves one arbitrarily, so the version "
+                "check disagrees with the code on disk. Normalize the "
+                "environment instead of deleting the metadata dir -- that dir "
+                "is the only record of which version is installed: "
+                "uv sync --locked --extra all --python <live venv python>. "
+                "Never hand-patch the package contents."
+            )
+        top = name.replace("-", "_")
+        try:
+            import importlib.util as _u
+
+            found = _u.find_spec(top)
+        except Exception:
+            found = None
+        root = None
+        if found is not None:
+            try:
+                if found.submodule_search_locations:
+                    root = Path(list(found.submodule_search_locations)[0])
+                elif found.origin:
+                    root = Path(found.origin).parent
+            except Exception:
+                root = None
+        if root is not None and root.is_symlink():
+            return (
+                f"package dir {root} for {name!r} is a symlink: installing "
+                "would write through it into the target tree. Materialize "
+                "the link first."
+            )
+        if _module_loaded(name):
+            return (
+                f"{name!r} is already imported by this process: uv pip "
+                "install uninstalls the existing copy before installing, "
+                "which removes code from under a live process."
+            )
+    return None
+
+
 def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _InstallResult:
     """Install ``specs`` using the uv → pip → ensurepip ladder.
 
@@ -719,6 +806,9 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         return _InstallResult(True, "", "")
 
     target = _lazy_install_target()
+    if target is None and (refusal := _live_venv_install_refusal(specs)):
+        logger.warning("Refusing lazy install of %s into the live venv: %s", " ".join(specs), refusal)
+        return _InstallResult(False, "", refusal)
     constraints: Optional[Path] = None
 
     if target is not None:
