@@ -5455,6 +5455,70 @@ def _mcp_loop_exception_handler(loop, context):
     loop.default_exception_handler(context)
 
 
+# Benign messages raised when an asyncio transport finalizer runs after its
+# loop is gone: unix BaseSubprocessTransport.__del__ and the Windows
+# _ProactorBasePipeTransport.__del__ variant (ValueError via __repr__).
+_BENIGN_ASYNCIO_TEARDOWN_MESSAGES = (
+    "Event loop is closed",
+    "I/O operation on closed pipe",
+)
+
+
+def _is_benign_asyncio_teardown(unraisable) -> bool:
+    """True only for the benign asyncio-transport teardown race (#81175).
+
+    That race bypasses the loop exception handler above and reaches
+    ``sys.unraisablehook`` ("Exception ignored in: ...__del__ ..."), so it
+    needs its own filter. Matching is message-gated AND context-gated
+    (``__del__`` err_msg or an asyncio frame in the traceback); a bare
+    message match from ordinary code stays loud.
+    """
+    # ponytail: substring/frame heuristic, per-transport-type checks if a
+    # genuine error ever shares both the message and the teardown context.
+    exc = getattr(unraisable, "exc_value", None)
+    if not isinstance(exc, (RuntimeError, ValueError, ResourceWarning)):
+        return False
+    if not any(m in str(exc) for m in _BENIGN_ASYNCIO_TEARDOWN_MESSAGES):
+        return False
+    if "__del__" in (getattr(unraisable, "err_msg", None) or ""):
+        return True
+    # CPython leaves err_msg=None for exceptions raised in __del__ and puts
+    # the finalizer itself on .object ("Exception ignored in: ..." is only
+    # composed later by the default hook), so check the object too.
+    if getattr(getattr(unraisable, "object", None), "__name__", "") == "__del__":
+        return True
+    tb = getattr(unraisable, "exc_traceback", None)
+    while tb is not None:
+        if "asyncio" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def _install_asyncio_teardown_quiet_hook() -> None:
+    """Swallow ONLY the benign teardown race; forward everything else.
+
+    Preserves the previous hook and chains to it. Idempotent.
+    """
+    if getattr(sys, "_hermes_mcp_teardown_hook_installed", False):
+        return
+    previous = sys.unraisablehook
+
+    def _hook(unraisable):
+        try:
+            if _is_benign_asyncio_teardown(unraisable):
+                return
+        except Exception:
+            pass
+        try:
+            previous(unraisable)
+        except Exception:
+            sys.__unraisablehook__(unraisable)
+
+    sys.unraisablehook = _hook
+    sys._hermes_mcp_teardown_hook_installed = True
+
+
 def _ensure_mcp_loop():
     """Start the background event loop thread if not already running."""
     global _mcp_loop, _mcp_thread
@@ -8590,3 +8654,9 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
         # since the loop is gone and no session can still be in flight.
         _kill_orphaned_mcp_children(include_active=True)
     return True
+
+
+# Install the quiet unraisable hook (#81175) at import time so MCP stdio
+# subprocess transports GC'd after the event loop closes stay silent.
+# Idempotent; all other unraisables chain to the previous hook.
+_install_asyncio_teardown_quiet_hook()
