@@ -551,10 +551,10 @@ export function useMessageStream({
       // a tool part can't jump ahead of the text that preceded it.
       flushQueuedDeltas(sessionId)
 
-      if (sessionInterrupted(sessionId)) {
-        return
-      }
-
+      // ponytail: status-store projections bypass the interrupted gate below;
+      // only the assistant bubble stays sealed after a Stop (mutateStream
+      // drops late writes on its own). Background work outlives the turn, so
+      // completions must still retire status rows (#81114).
       // The composer status stack owns todo display now (no inline panel) —
       // mirror every todo state the tool reports into its session store.
       if (payload && isTodoToolName(payload.name)) {
@@ -574,6 +574,10 @@ export function useMessageStream({
             phase === 'complete' ? 'delegate.complete' : 'delegate.running'
           )
         }
+      }
+
+      if (sessionInterrupted(sessionId)) {
+        return
       }
 
       mutateStream(
