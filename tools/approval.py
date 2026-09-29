@@ -782,9 +782,36 @@ def _match_user_deny_rule(command: str) -> str | None:
     for command_variant in _command_detection_variants(command):
         candidate = command_variant.lower().strip()
         for pattern in globs:
-            if fnmatch.fnmatchcase(candidate, pattern.lower()):
+            if _deny_glob_matches(candidate, pattern.lower()):
                 return pattern
     return None
+
+
+def _deny_glob_matches(candidate: str, pattern: str) -> bool:
+    """``fnmatch`` a deny glob, anchoring a leading ``*`` of a multi-word glob at a word start.
+
+    Whole-line ``fnmatch`` lets the leading ``*`` end mid-word, so ``*rm *-*r*.hermes/org*``
+    fired on ``confirm wave-2 … /home/me/.hermes/org`` and ``*rm *.hermes/org*`` on
+    ``grep -n confirm …`` / ``perform the audit of .hermes/org`` (#108994). For a glob shaped
+    like a command (``*<word> …``: a leading ``*``, then a word character, and whitespace
+    later) the first word must therefore start the string or follow a non-word character
+    (space, ``/``, ``;``, ``&``, ``|``, ``(``, quote, backslash…), which every real
+    invocation of that word does (``rm``, ``/bin/rm``, ``sudo rm``, ``a && rm``). Every
+    other glob, e.g. the single-token ``*secret*``, keeps plain substring semantics.
+    """
+    if not fnmatch.fnmatchcase(candidate, pattern):
+        return False
+    anchored = _word_anchored_deny_regex(pattern)
+    return anchored is None or anchored.search(candidate) is not None
+
+
+@functools.lru_cache(maxsize=256)
+def _word_anchored_deny_regex(pattern: str) -> "re.Pattern[str] | None":
+    """Compiled ``(?<!\\w)<glob minus its leading *>`` for command-shaped globs, else None."""
+    body = pattern[1:]
+    if not (pattern.startswith("*") and re.match(r"\w", body) and re.search(r"\s", body)):
+        return None
+    return re.compile(r"(?<!\w)" + fnmatch.translate(body))
 
 
 def _user_deny_block_result(pattern: str) -> dict:

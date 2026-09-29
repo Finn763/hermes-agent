@@ -56,6 +56,23 @@ class TestMatchUserDenyRule:
         deny_config(["git push --force*"])
         assert mod._match_user_deny_rule('git pu""sh --force origin main') is not None
 
+    def test_leading_star_does_not_match_inside_tokens(self, deny_config):
+        """A leading ``*`` must not end mid-word: ``confirm``/``perform`` are not ``rm`` (#108994)."""
+        deny_config(["*rm *-*r*.hermes/org*", "*rm *.hermes/org*"])
+        for blocked in (
+            "rm -rf /home/me/.hermes/org",
+            "cd /tmp && rm -rf /home/me/.hermes/org",
+            "/bin/rm -r /home/me/.hermes/org/x",
+            "sudo rm /home/me/.hermes/org/x",
+        ):
+            assert mod._match_user_deny_rule(blocked) is not None, blocked
+        for allowed in (
+            "grep -n confirm /home/me/.hermes/org/talk.py",
+            'talk send x "ACK" "perform the audit of .hermes/org now"',
+            'talk send x "confirm wave-2 ready" "/home/me/.hermes/org/x"',
+        ):
+            assert mod._match_user_deny_rule(allowed) is None, allowed
+
 
 class TestDenyBeatsYolo:
     def test_deny_blocks_under_yolo_env(self, deny_config, clean_env, monkeypatch):
