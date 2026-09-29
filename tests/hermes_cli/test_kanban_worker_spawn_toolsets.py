@@ -161,3 +161,43 @@ toolsets:
     assert "web" in resolved
     assert "kanban" in resolved  # recovered worker lifecycle surface
     assert resolved != ["kanban"]
+
+
+def test_worker_pin_drops_cli_rejected_names(monkeypatch, tmp_path):
+    """Pinned --toolsets must only name toolsets the worker CLI accepts.
+
+    Regression guard for #86394: a non-resolvable entry (e.g. the internal
+    ``platform`` name) reaches _get_platform_tools via config passthrough
+    and was serialized into the worker's explicit --toolsets pin, so every
+    worker boot warned ``Unknown toolsets: platform``. Configured MCP
+    servers must survive the pin (the CLI resolver exempts them).
+    """
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "grace"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - terminal
+    - web
+    - platform
+mcp_servers:
+  myserver:
+    command: ["true"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved is not None
+    assert "platform" not in resolved
+    for required in ("terminal", "web", "kanban", "myserver"):
+        assert required in resolved
+    from toolsets import validate_toolset
+
+    assert all(validate_toolset(t) or t == "myserver" for t in resolved)

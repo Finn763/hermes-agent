@@ -10662,7 +10662,8 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
     try:
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.config import load_config
-        from hermes_cli.tools_config import _get_platform_tools
+        from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
+        from toolsets import validate_toolset
 
         token = set_hermes_home_override(hermes_home)
         try:
@@ -10670,6 +10671,12 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
             toolsets = sorted(_get_platform_tools(cfg, "cli"))
         finally:
             reset_hermes_home_override(token)
+        # ponytail: pin must stay CLI-selectable; unknown names only warn at
+        # worker boot (#86394). MCP names stay (cli.py exempts them);
+        # portable-only MCP names can still warn pre-discovery — exempt
+        # consumer-side if that path ever matters.
+        selectable = set(enabled_mcp_server_names(cfg))
+        toolsets = [t for t in toolsets if validate_toolset(t) or t in selectable]
         return toolsets or None
     except Exception as exc:
         _log.debug(
