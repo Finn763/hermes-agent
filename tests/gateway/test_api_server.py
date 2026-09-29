@@ -633,7 +633,7 @@ class TestRunEventCallback:
         run_id = "run_subagent_redact"
         loop = asyncio.get_running_loop()
         queue = asyncio.Queue()
-        adapter._run_streams[run_id] = queue
+        adapter._run_streams[run_id] = {queue}
         adapter._run_statuses.pop(run_id, None)
 
         callback = adapter._make_run_event_callback(run_id, loop)

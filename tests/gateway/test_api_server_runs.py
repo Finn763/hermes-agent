@@ -339,6 +339,54 @@ class TestRunEvents:
                 assert "run.completed" in body
                 assert "Hello!" in body
 
+    @pytest.mark.asyncio
+    async def test_two_subscribers_both_receive_each_event(self, adapter):
+        """Broadcast: two concurrent SSE subscribers to one run_id each get every event (#103262)."""
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent, agent_ready, _ = _make_slow_agent()
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                assert resp.status == 202
+                run_id = (await resp.json())["run_id"]
+                agent_ready.wait(timeout=3.0)
+                await asyncio.sleep(0.1)
+
+                s1 = await cli.session.get(cli.make_url(f"/v1/runs/{run_id}/events"))
+                s2 = await cli.session.get(cli.make_url(f"/v1/runs/{run_id}/events"))
+                assert s1.status == 200
+                assert s2.status == 200
+                await asyncio.sleep(0.3)
+
+                async def _read_until(r, marker: bytes, timeout: float) -> bytes:
+                    async def _drain() -> bytes:
+                        buf = b""
+                        async for chunk in r.content.iter_any():
+                            buf += chunk
+                            if marker in buf:
+                                return buf
+                        return buf
+
+                    return await asyncio.wait_for(_drain(), timeout)
+
+                try:
+                    steer = await cli.post(f"/v1/runs/{run_id}/steer", json={"input": "go"})
+                    assert steer.status == 200
+                    await steer.json()
+
+                    # Each live subscriber must see the event; a single-consumer
+                    # queue delivers it to exactly one of them, so one read fails.
+                    body1 = await _read_until(s1, b"run.steered", 5.0)
+                    body2 = await _read_until(s2, b"run.steered", 5.0)
+                    assert b"run.steered" in body1
+                    assert b"run.steered" in body2
+                finally:
+                    s1.close()
+                    s2.close()
+                    await cli.post(f"/v1/runs/{run_id}/stop")
+
 
     @pytest.mark.asyncio
     async def test_approval_resolve_all_is_scoped_to_target_run(self, auth_adapter):
@@ -424,7 +472,7 @@ class TestSteerRun:
         agent.steer.return_value = True
         queue = asyncio.Queue()
         adapter._active_run_agents["run_123"] = agent
-        adapter._run_streams["run_123"] = queue
+        adapter._run_streams["run_123"] = {queue}
         adapter._set_run_status("run_123", "running")
 
         async with TestClient(TestServer(app)) as cli:

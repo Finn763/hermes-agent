@@ -59,7 +59,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Sentinel returned by _resolve_request_profile when a /p/<profile>/ prefix
 # names a profile this gateway does not serve (→ 404). Distinct from None
@@ -1547,8 +1547,15 @@ class APIServerAdapter(BasePlatformAdapter):
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
         self._response_store = ResponseStore()
-        # Active run streams: run_id -> asyncio.Queue of SSE event dicts
-        self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
+        # Active run streams: run_id -> per-subscriber SSE queues.
+        # One shared queue would hand each event to exactly one subscriber
+        # (#103262); every live subscriber queue gets every event instead.
+        # ponytail: history buffer is unbounded per run, same profile as the
+        # old single-queue buffer; reaped by disconnect cleanup + orphan sweep.
+        self._run_streams: Dict[str, Set["asyncio.Queue[Optional[Dict]]"]] = {}
+        # Ordered event history per run_id so late subscribers replay events
+        # published before they connected (including the None close sentinel).
+        self._run_stream_history: Dict[str, List["Optional[Dict]"]] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         # Runs with a connected SSE consumer; their queue is actively draining.
@@ -7475,6 +7482,21 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_statuses[run_id] = current
         return current
 
+    def _publish_run_event(self, run_id: str, event: Optional[Dict]) -> None:
+        """Fan out one run event to history + every live subscriber queue.
+
+        Loop-thread only; cross-thread publishers must schedule this via
+        loop.call_soon_threadsafe so set iteration never races mutation.
+        """
+        if run_id not in self._run_streams and run_id not in self._run_stream_history:
+            return
+        self._run_stream_history.setdefault(run_id, []).append(event)
+        for q in list(self._run_streams.get(run_id) or ()):
+            try:
+                q.put_nowait(event)
+            except Exception:
+                pass
+
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
         """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
         def _push(event: Dict[str, Any]) -> None:
@@ -7483,11 +7505,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_statuses.get(run_id, {}).get("status", "running"),
                 last_event=event.get("event"),
             )
-            q = self._run_streams.get(run_id)
-            if q is None:
+            if run_id not in self._run_streams and run_id not in self._run_stream_history:
                 return
             try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
+                loop.call_soon_threadsafe(self._publish_run_event, run_id, event)
             except Exception:
                 pass
 
@@ -7665,9 +7686,9 @@ class APIServerAdapter(BasePlatformAdapter):
         approval_session_key = run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
-        q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
         created_at = time.time()
-        self._run_streams[run_id] = q
+        self._run_streams[run_id] = set()
+        self._run_stream_history[run_id] = []
         self._run_streams_created[run_id] = created_at
         self._run_approval_sessions[run_id] = approval_session_key
 
@@ -7675,8 +7696,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         def _put_event_if_active(event: Optional[Dict]) -> None:
             """Enqueue only while this run still owns live transport state."""
-            if self._run_streams.get(run_id) is q:
-                q.put_nowait(event)
+            if run_id in self._run_streams or run_id in self._run_stream_history:
+                self._publish_run_event(run_id, event)
 
         # Also wire stream_delta_callback so message.delta events flow through.
         def _text_cb(delta: Optional[str]) -> None:
@@ -7767,7 +7788,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         last_event="approval.request",
                     )
                     try:
-                        loop.call_soon_threadsafe(q.put_nowait, event)
+                        loop.call_soon_threadsafe(self._publish_run_event, run_id, event)
                     except Exception:
                         pass
 
@@ -8028,7 +8049,16 @@ class APIServerAdapter(BasePlatformAdapter):
         else:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
-        q = self._run_streams[run_id]
+        q = self._run_streams.get(run_id)
+        if q is None:
+            return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
+        my_q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
+        # Register-then-backfill with no await in between: atomic on the loop
+        # thread, so a concurrent publish lands in exactly one of history
+        # (replayed below) or the live queue — never both, never neither.
+        q.add(my_q)
+        for past in self._run_stream_history.get(run_id, []):
+            my_q.put_nowait(past)
         self._run_stream_subscribers.add(run_id)
 
         response = web.StreamResponse(
@@ -8044,7 +8074,7 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             while True:
                 try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                    event = await asyncio.wait_for(my_q.get(), timeout=30.0)
                 except asyncio.TimeoutError:
                     await response.write(b": keepalive\n\n")
                     continue
@@ -8057,9 +8087,21 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
-            self._run_stream_subscribers.discard(run_id)
-            self._run_streams.pop(run_id, None)
-            self._run_streams_created.pop(run_id, None)
+            # One subscriber leaving must not kill the transport for the
+            # others (#103262). Reap buffered state only once the last
+            # subscriber is gone and the run already reached a terminal state;
+            # still-running runs keep buffering for late joiners until the
+            # orphan sweep TTL.
+            queues = self._run_streams.get(run_id)
+            if queues is not None:
+                queues.discard(my_q)
+                if not queues:
+                    status = (self._run_statuses.get(run_id) or {}).get("status")
+                    if status in {"completed", "failed", "cancelled"}:
+                        self._run_streams.pop(run_id, None)
+                        self._run_stream_history.pop(run_id, None)
+                        self._run_streams_created.pop(run_id, None)
+                    self._run_stream_subscribers.discard(run_id)
 
         return response
 
@@ -8132,18 +8174,19 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         self._set_run_status(run_id, "running", last_event="approval.responded")
-        q = self._run_streams.get(run_id)
-        if q is not None:
-            try:
-                q.put_nowait({
+        try:
+            self._publish_run_event(
+                run_id,
+                {
                     "event": "approval.responded",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "choice": choice,
                     "resolved": resolved,
-                })
-            except Exception:
-                pass
+                },
+            )
+        except Exception:
+            pass
 
         return web.json_response({
             "object": "hermes.run.approval_response",
@@ -8201,15 +8244,16 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         self._set_run_status(run_id, "running", last_event="run.steered")
-        q = self._run_streams.get(run_id)
-        if q is not None:
-            with suppress(Exception):
-                q.put_nowait({
+        with suppress(Exception):
+            self._publish_run_event(
+                run_id,
+                {
                     "event": "run.steered",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "accepted": True,
-                })
+                },
+            )
         return web.json_response({"object": "hermes.run.steer", "run_id": run_id, "accepted": True})
 
     async def _handle_stop_run(self, request: "web.Request") -> "web.Response":
@@ -8276,6 +8320,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # The transport TTL always bounds buffering. Live control state is
             # independent and survives until the executor-backed task returns.
             self._run_streams.pop(run_id, None)
+            self._run_stream_history.pop(run_id, None)
             self._run_streams_created.pop(run_id, None)
             if task_done:
                 self._active_run_agents.pop(run_id, None)
