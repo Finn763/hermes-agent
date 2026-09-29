@@ -47,3 +47,41 @@ def test_prepare_spoken_text_polish_edge_cases():
     assert "and/or" in prepare_spoken_text("choose and/or option")
     assert "N/A" in prepare_spoken_text("status N/A here")
     assert "2026/06/02" in prepare_spoken_text("due 2026/06/02 ok")
+
+
+def test_prepare_spoken_text_rewrites_filenames_hashes_paths_ids():
+    # RED for #119207: identifier-heavy spans must not be spoken verbatim.
+    assert "peyton-sample-20260922" not in prepare_spoken_text(
+        "I generated peyton-sample-20260922.wav today"
+    )
+    assert "WAV file" in prepare_spoken_text("I generated peyton-sample-20260922.wav today")
+    assert "SHA-256 hash omitted" in prepare_spoken_text(
+        "sha256: abc123def456789012345678901234567890 ok"
+    )
+    assert "abc123def456" not in prepare_spoken_text(
+        "sha256: abc123def456789012345678901234567890 ok"
+    )
+    assert "file path omitted" in prepare_spoken_text(
+        "see models/gpt-4o/checkpoint-20260922.bin today"
+    )
+    assert "identifier omitted" in prepare_spoken_text("released model-xyz-20260922-alpha build")
+    # Speakable neighbors stay intact.
+    assert "git status" in prepare_spoken_text("Use `git status` after the change.")
+
+
+def test_prepare_spoken_text_keeps_addresses_and_prose_speakable():
+    # Review follow-up: IPv4 must not read as "version omitted" (#119207).
+    assert "127.0.0.1:8080" in prepare_spoken_text("Connect to 127.0.0.1:8080 first")
+    assert "192.168.1.100" in prepare_spoken_text("It resolved to 192.168.1.100 today")
+    # Slash prose stays speakable whatever its length; a real path still drops.
+    assert "and/or" in prepare_spoken_text("choose and/or option")
+    assert "input/output" in prepare_spoken_text("check the input/output port")
+    assert "TCP/IP" in prepare_spoken_text("stack uses TCP/IP here")
+    assert "N/A" in prepare_spoken_text("status N/A here")
+    assert "file path omitted" in prepare_spoken_text("see src/lib/speech-text.ts today")
+    # A version's optional suffix must not swallow hyphenated prose.
+    spoken = prepare_spoken_text("Use version 2.0.0-or-later for compatibility")
+    assert "version omitted" in spoken
+    assert "or-later" in spoken
+    # Real versions still collapse to the placeholder.
+    assert "version omitted" in prepare_spoken_text("Upgrade to 1.2.3 now")
