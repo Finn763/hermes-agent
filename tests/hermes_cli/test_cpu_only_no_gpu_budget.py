@@ -5,11 +5,15 @@ recommended dense Qwen 27B, which then stalled 15 minutes on CPU prompt
 processing. Root cause: probe_budget's no-NVIDIA branch returned a UMA budget
 (RAM as VRAM at unified bandwidth) on every platform, including hosts with no
 GPU at all.
+
+Platform note: the gate in probe_budget branches on sys.platform, which the
+root AGENTS.md forbids faking. The CPU-only tests therefore run only on
+non-macOS hosts and the darwin test only on macOS, via @pytest.mark.platforms.
 """
 
 from __future__ import annotations
 
-import sys
+import pytest
 
 import hermes_cli.local_runtime.catalog as catalog
 import hermes_cli.local_runtime.hardware as hw
@@ -20,14 +24,14 @@ RAM_TOTAL = int(31.1 * GIB)
 RAM_AVAIL = int(24.0 * GIB)
 
 
-def _cpu_only_box(monkeypatch, *, platform="win32"):
+def _cpu_only_box(monkeypatch):
     monkeypatch.setattr(hw, "_pool_probe_cache", None)
     monkeypatch.setattr(hw, "_nvidia_vram", lambda: None)
     monkeypatch.setattr(hw, "_ram_bytes", lambda: (RAM_TOTAL, RAM_AVAIL))
     monkeypatch.setattr(hw, "_device_pool_view", lambda: None)
-    monkeypatch.setattr(sys, "platform", platform)
 
 
+@pytest.mark.platforms("not macos")
 def test_cpu_only_planning_budget_claims_no_vram(monkeypatch):
     _cpu_only_box(monkeypatch)
     b = hw.probe_budget(planning=True)
@@ -37,6 +41,7 @@ def test_cpu_only_planning_budget_claims_no_vram(monkeypatch):
     assert b.ram_available_bytes == RAM_TOTAL
 
 
+@pytest.mark.platforms("not macos")
 def test_cpu_only_live_budget_claims_no_vram(monkeypatch):
     _cpu_only_box(monkeypatch)
     b = hw.probe_budget(planning=False)
@@ -46,6 +51,7 @@ def test_cpu_only_live_budget_claims_no_vram(monkeypatch):
     assert b.ram_available_bytes == RAM_AVAIL
 
 
+@pytest.mark.platforms("not macos")
 def test_cpu_only_dense_27b_is_spilled_not_resident(monkeypatch):
     """The reported harm: 27B read as 'fits my GPU' (zero-spill). On a
     CPU-only host it must price as spilled from host RAM."""
@@ -57,6 +63,7 @@ def test_cpu_only_dense_27b_is_spilled_not_resident(monkeypatch):
     assert choice.zero_spill is False
 
 
+@pytest.mark.platforms("not macos")
 def test_cpu_only_spilled_speed_uses_host_bandwidth(monkeypatch):
     _cpu_only_box(monkeypatch)
     b = hw.probe_budget(planning=True)
@@ -68,10 +75,11 @@ def test_cpu_only_spilled_speed_uses_host_bandwidth(monkeypatch):
     assert tok_s < catalog._UMA_BANDWIDTH_GB_S * 1e9 / per_token
 
 
+@pytest.mark.platforms("macos")
 def test_darwin_no_gpu_keeps_unified_budget(monkeypatch):
     """Apple Silicon has no NVIDIA device either, but its shared pool is real:
     the darwin path must stay UMA."""
-    _cpu_only_box(monkeypatch, platform="darwin")
+    _cpu_only_box(monkeypatch)
     b = hw.probe_budget(planning=True)
     assert b.uma is True
     assert b.total_device_bytes == RAM_TOTAL
