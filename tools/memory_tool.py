@@ -599,11 +599,21 @@ class MemoryStore:
         if not operations:
             return {"success": False, "error": "operations list is empty."}
 
+        # ponytail: treat 'patch' as 'replace' (whole-entry). Only aliasing is
+        # here because every batch caller -- live tool calls and approve-time
+        # pending replay -- routes through this function. Normalize BEFORE the
+        # scan so patch content gets the same injection/exfil check.
+        operations = [
+            {**op, "action": "replace"}
+            if isinstance(op, dict) and op.get("action") == "patch" else op
+            for op in operations
+        ]
+
         # Scan every add/replace content for injection/exfil BEFORE touching
         # disk -- a single poisoned op rejects the whole batch.
         for i, op in enumerate(operations):
             act = (op or {}).get("action")
-            new_content = (op or {}).get("content")
+            new_content = (op or {}).get("content") or (op or {}).get("new_text")
             if act in {"add", "replace"} and new_content:
                 scan_error = _scan_memory_content(new_content)
                 if scan_error:
