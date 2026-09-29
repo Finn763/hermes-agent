@@ -2100,6 +2100,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._recent_compaction_monos: list = []
         self._structural_no_op_backoff_until = 0.0
         self._prellm_skip_count = 0
         self._fallback_compression_streak = 0
@@ -2385,6 +2386,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._recent_compaction_monos: list = []
         self._structural_no_op_backoff_until = 0.0
         self._prellm_skip_count = 0
         self._fallback_compression_streak = 0
@@ -2418,6 +2420,7 @@ class ContextCompressor(ContextEngine):
         self._ineffective_compression_count = 0
         self._prellm_skip_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._recent_compaction_monos: list = []
         self._structural_no_op_backoff_until = 0.0
         self._proactive_prune_rearm_tokens = 0
         self.get_active_compression_failure_cooldown()
@@ -2667,6 +2670,7 @@ class ContextCompressor(ContextEngine):
         # usual bookkeeping.
         self._structural_no_op_backoff_until = 0.0
         self._verify_compaction_cleared_threshold = True
+        self._note_completed_compaction_time()
         if feasibility_skip:
             # A deliberate pre-LLM feasibility skip (#60451) is not a
             # summary-quality verdict: it must neither extend a fallback
@@ -2692,6 +2696,35 @@ class ContextCompressor(ContextEngine):
         elif self._fallback_compression_streak:
             self._fallback_compression_streak = 0
         self._persist_fallback_compression_streak()
+
+    def _note_completed_compaction_time(self) -> None:
+        """Append one compaction timestamp, pruned to the frequency window."""
+        try:
+            now = time.monotonic()
+        except Exception:
+            return
+        monos = getattr(self, "_recent_compaction_monos", None)
+        if not isinstance(monos, list):
+            monos = self._recent_compaction_monos = []
+        monos.append(now)
+        cutoff = now - self._FREQUENT_COMPACTION_WINDOW_SECONDS
+        del monos[: max(0, len(monos) - self._FREQUENT_COMPACTION_MAX - 1)]
+        while monos and monos[0] < cutoff:
+            del monos[0]
+
+    def _frequent_compaction_tripped(self) -> bool:
+        """True when MAX completions landed inside the frequency window."""
+        try:
+            now = time.monotonic()
+        except Exception:
+            return False
+        monos = getattr(self, "_recent_compaction_monos", None)
+        if not isinstance(monos, list):
+            return False
+        cutoff = now - self._FREQUENT_COMPACTION_WINDOW_SECONDS
+        while monos and monos[0] < cutoff:
+            del monos[0]
+        return len(monos) >= self._FREQUENT_COMPACTION_MAX
 
     def get_active_compression_failure_cooldown(
         self,
@@ -2981,6 +3014,15 @@ class ContextCompressor(ContextEngine):
     # session which has since grown real compressible material recovers well
     # before it rides into the provider's hard context limit.
     _ANTI_THRASH_RECOVERY_SECONDS = 300.0
+
+    # Frequency dimension of the anti-thrash breaker (#117574): the
+    # magnitude check above only sees compactions that FAIL to clear the
+    # threshold, so N successful compactions in a row always read zero.
+    # Trip when this many boundaries complete inside the window below.
+    # ponytail: in-memory only (no durable row); a restart resets the
+    # frequency history while the durable magnitude counters survive.
+    _FREQUENT_COMPACTION_WINDOW_SECONDS = 600.0
+    _FREQUENT_COMPACTION_MAX = 5
 
     # Structural no-op backoff (#93022): when a compression attempt finds
     # nothing eligible inside the protection window (too few messages, empty
@@ -3274,6 +3316,9 @@ class ContextCompressor(ContextEngine):
         # restart with a persisted tripped counter (#69872) waits a full fresh
         # window before probing (#54923: restart must never disarm a guard).
         self._anti_thrash_recovery_deadline: float = 0.0
+        # Monotonic timestamps of recently completed compaction boundaries
+        # (#117574 frequency dimension). Pruned to the window on every read.
+        self._recent_compaction_monos: list = []
         # Pre-LLM feasibility skips (#60451). Observability only; NEVER feeds
         # the ineffectiveness strike latch or the fallback streak breaker.
         self._prellm_skip_count: int = 0
@@ -3580,6 +3625,7 @@ class ContextCompressor(ContextEngine):
         if (
             self._ineffective_compression_count >= 2
             or self._fallback_compression_streak >= 2
+            or self._frequent_compaction_tripped()
         ):
             return "ineffective"
         return None
@@ -3679,6 +3725,7 @@ class ContextCompressor(ContextEngine):
         if (
             self._ineffective_compression_count >= 2
             or self._fallback_compression_streak >= 2
+            or self._frequent_compaction_tripped()
         ):
             _now = time.monotonic()
             if self._anti_thrash_recovery_deadline <= 0.0:
@@ -3692,6 +3739,11 @@ class ContextCompressor(ContextEngine):
                 if self._fallback_compression_streak >= 2:
                     self._fallback_compression_streak = 1
                     self._persist_fallback_compression_streak()
+                if self._frequent_compaction_tripped():
+                    # Drop the oldest timestamp so the probe below is the
+                    # single allowed attempt; its completion re-trips.
+                    if self._recent_compaction_monos:
+                        del self._recent_compaction_monos[0]
                 if not self.quiet_mode:
                     logger.info(
                         "Anti-thrashing recovery: %.0fs elapsed since the "
