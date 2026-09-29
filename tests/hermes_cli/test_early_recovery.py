@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -535,6 +536,58 @@ def test_bump_marker_attempts_handles_missing_and_corrupt_bodies(tmp_path):
 
     m.write_text('{"attempts": 2}', encoding="utf-8")
     assert ir.bump_marker_attempts(m) == 3
+
+
+# ---------------------------------------------------------------------------
+# Stale singleton lock (#86527): a killed repair leaves a >3600s lock; the
+# next launch must re-acquire it and repair, not delete it and return.
+# ---------------------------------------------------------------------------
+
+def _stale_lock(root: Path) -> Path:
+    """A genuinely stale lock, as left by a killed repair process."""
+    lock = root / ".update-incomplete.lock"
+    lock.write_text("999999\n", encoding="utf-8")
+    old = time.time() - 3700
+    os.utime(lock, (old, old))
+    return lock
+
+
+def test_stale_recovery_lock_is_reacquired_not_just_deleted(tmp_path):
+    root = _project(tmp_path)
+    lock = _stale_lock(root)
+
+    assert er._claim_recovery_lock(root) is True
+
+    body = lock.read_text(encoding="utf-8").strip()
+    assert body == str(os.getpid())
+    er._release_recovery_lock(root)
+
+
+def test_early_repair_runs_after_stale_lock_reacquired(tmp_path, monkeypatch):
+    root = _project(tmp_path)
+    (root / ".lazy-refresh-incomplete").write_text("x", encoding="utf-8")
+    _stale_lock(root)
+
+    probe_results = iter([["PyYAML"], []])
+    monkeypatch.setattr(er, "_probe_broken_packages", lambda: next(probe_results))
+    installs = []
+    monkeypatch.setattr(
+        er, "_run_repair_install", lambda specs, r: installs.append(specs) or True
+    )
+
+    er.recover_if_needed(project_root=root, argv=[])
+
+    assert installs == [["PyYAML==6.0.2"]]
+    assert not (root / ".update-incomplete.lock").exists()
+
+
+def test_fresh_recovery_lock_is_not_stolen(tmp_path):
+    root = _project(tmp_path)
+    lock = root / ".update-incomplete.lock"
+    lock.write_text("999999\n", encoding="utf-8")
+
+    assert er._claim_recovery_lock(root) is False
+    assert lock.read_text(encoding="utf-8").strip() == "999999"
 
 
 

@@ -102,6 +102,35 @@ def test_recovery_self_lock_does_not_clear_core_marker_via_import_probes(
 
 
 
+def test_late_recovery_reclaims_stale_lock_instead_of_only_deleting(
+    tmp_path, monkeypatch
+):
+    # #86527: the late pass (main.py) shares ``_claim_recovery_lock`` with the
+    # early pass, so a >1h lock is broken and RE-claimed — recovery runs —
+    # rather than merely unlinked and skipped (the pre-fix shape).
+    import os
+    import time
+
+    monkeypatch.setattr(m, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    m._write_update_incomplete_marker()
+
+    lock = tmp_path / ".update-incomplete.lock"
+    lock.write_text("999999\n", encoding="utf-8")
+    old = time.time() - 3700
+    os.utime(lock, (old, old))
+
+    monkeypatch.setattr(m, "_windows_running_hermes_launcher_locked", lambda: False)
+
+    seen = {"install": False}
+    _stub_install_env(monkeypatch, m, seen)
+
+    m._recover_from_interrupted_install()
+
+    assert seen["install"] is True, "stale lock must be re-claimed; recovery runs"
+    assert not lock.exists(), "lock released after recovery"
+
+
 def sys_executable_path():
     import sys
 

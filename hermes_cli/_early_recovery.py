@@ -496,20 +496,10 @@ def recover_if_needed(
 
         # Single-flight: share main.py's recovery lock so an early repair
         # never races a concurrent full recovery into the same shared venv.
+        # Stale-lock retry lives in _claim_recovery_lock (see #86527).
         lock_path = root / ".update-incomplete.lock"
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"{os.getpid()}\n".encode())
-            os.close(fd)
-        except FileExistsError:
-            try:
-                if time.time() - lock_path.stat().st_mtime > 3600:
-                    lock_path.unlink()
-            except OSError:
-                pass
+        if not _claim_recovery_lock(root):
             return
-        except OSError:
-            pass  # read-only fs / perms — proceed unlocked, install surfaces it
 
         try:
             specs = _pinned_specs(broken, root)
@@ -559,11 +549,30 @@ def _claim_recovery_lock(root: Path) -> bool:
         return True
     except FileExistsError:
         try:
-            if time.time() - lock_path.stat().st_mtime > 3600:
-                lock_path.unlink()
+            stale = time.time() - lock_path.stat().st_mtime > 3600
+        except FileNotFoundError:
+            stale = True  # ponytail: lock vanished under us; retry acquire
         except OSError:
-            pass
-        return False
+            return False
+        if not stale:
+            return False
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass  # ponytail: already gone; the re-acquire below still applies
+        except OSError:
+            return False
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False  # another process won the race; it repairs
+        except OSError:
+            # Read-only fs / perms — proceed unlocked; the install itself
+            # surfaces the real problem.  Recoverable.
+            return True
     except OSError:
         # Read-only fs / perms — proceed unlocked; the install itself
         # surfaces the real problem.  Recoverable.

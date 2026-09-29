@@ -9029,27 +9029,14 @@ def _recover_from_interrupted_install() -> None:
         _clear_lazy_refresh_incomplete_marker()
         return
 
-    # Single-flight guard: atomically claim the recovery lock. If another
-    # process holds it, skip — it is running the same reinstall into the same
-    # shared venv right now. A crashed holder leaves a stale lock; break it
-    # after an hour (well past any realistic install) so recovery can't be
-    # wedged forever.
-    lock_path = PROJECT_ROOT / ".update-incomplete.lock"
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        os.close(fd)
-    except FileExistsError:
-        try:
-            if _time.time() - lock_path.stat().st_mtime > 3600:
-                lock_path.unlink()
-        except OSError:
-            pass
+    # Single-flight guard: claim the shared recovery lock through the same
+    # stdlib-only helper the early pass uses, so the stale-lock retry lives in
+    # exactly one place (#86527). If another process holds a fresh lock, skip —
+    # it is running the same reinstall into the same shared venv right now. A
+    # crashed holder leaves a stale lock; the helper breaks it after an hour
+    # and re-claims, so recovery can't be wedged forever.
+    if not _early_recovery_mod._claim_recovery_lock(PROJECT_ROOT):
         return
-    except OSError as exc:
-        # Couldn't create the lock (read-only fs, perms). Proceed unlocked —
-        # the install itself will surface the real problem.
-        logger.debug("Could not create install-recovery lock: %s", exc)
 
     saved_stdout_fd = None
     saved_sys_stdout = sys.stdout
@@ -9076,10 +9063,7 @@ def _recover_from_interrupted_install() -> None:
                 os.close(saved_stdout_fd)
             except OSError:
                 pass
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+        _early_recovery_mod._release_recovery_lock(PROJECT_ROOT)
 
 
 def _recover_lazy_refresh_marker_locked() -> None:
