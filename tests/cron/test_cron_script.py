@@ -448,6 +448,7 @@ class TestCronjobToolScript:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
+        (cron_env / "scripts" / "some_script.py").write_text('print("hi")\n')
         create_result = json.loads(cronjob(
             action="create",
             schedule="every 1h",
@@ -468,6 +469,7 @@ class TestCronjobToolScript:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
+        (cron_env / "scripts" / "data_collector.py").write_text('print("hi")\n')
         cronjob(
             action="create",
             schedule="every 1h",
@@ -588,6 +590,57 @@ class TestCronjobToolScriptValidation:
         ))
         assert result["success"] is False
         assert "escapes" in result["error"].lower() or "traversal" in result["error"].lower()
+
+    def test_create_with_missing_script_rejected(self, cron_env, monkeypatch):
+        """#105760: a typo'd/misplaced script must fail at creation, not at fire."""
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        result = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="typo_name.py",
+        ))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_update_with_missing_script_rejected(self, cron_env, monkeypatch):
+        """#105760: same existence check on update."""
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        (cron_env / "scripts" / "real.py").write_text('print("hi")\n')
+        created = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="real.py",
+        ))
+        assert created["success"] is True
+
+        result = json.loads(cronjob(
+            action="update",
+            job_id=created["job_id"],
+            script="gone.py",
+        ))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_absolute_path_error_names_profile_scripts_dir(self, cron_env, monkeypatch):
+        """#105760: the error must name the resolved profile dir, not ~/.hermes/scripts/."""
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        result = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="/abs/evil.py",
+        ))
+        assert result["success"] is False
+        assert "~/.hermes/scripts/" not in result["error"]
+        assert str(cron_env / "scripts") in result["error"]
 
 
 class TestRunJobEnvVarCleanup:
