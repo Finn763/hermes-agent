@@ -1191,6 +1191,43 @@ def _default_live_venv(root: Path) -> Path:
     return primary
 
 
+def _live_venv_references_backup(live: Path, candidate: Path) -> bool:
+    """True when the live venv's top-level site-packages entries point into *candidate*.
+
+    A live venv can reference a parked ``venv.stale.runtime-*`` tree by path
+    (e.g. top-level symlinks from a local cutover). Deleting such a tree
+    dangles the live venv silently, so callers skip instead (issue #119366).
+    """
+    try:
+        resolved_candidate = candidate.resolve()
+    except OSError:
+        return False
+    # ponytail: O(n) top-level scan only (.pth-referenced paths not followed;
+    # extend here if a non-symlink reference shape shows up).
+    site_dirs = list(live.glob("lib/python*/site-packages"))
+    windows_site = live / "Lib" / "site-packages"
+    if windows_site.is_dir():
+        site_dirs.append(windows_site)
+    for site_dir in site_dirs:
+        try:
+            entries = list(site_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_symlink():
+                    continue
+                target = entry.resolve()
+            except OSError:
+                continue
+            try:
+                target.relative_to(resolved_candidate)
+            except ValueError:
+                continue
+            return True
+    return False
+
+
 def _sweep_stale_runtime_backups(
     live: Path,
     *,
@@ -1226,6 +1263,12 @@ def _sweep_stale_runtime_backups(
         except OSError:
             continue
         if age < min_age_seconds:
+            continue
+        if _live_venv_references_backup(live, candidate):
+            print(
+                f"  ⚠ Skipping sweep of stale runtime backup {candidate.name}:"
+                " live venv still references it by path"
+            )
             continue
         _remove_tree(candidate, boundary=root)
 
@@ -1376,7 +1419,13 @@ def repair_vulnerable_runtime(
             f"(SQLite {current.sqlite_version_string} → {final_version})"
         )
         if backup is not None and backup.exists():
-            _remove_tree(backup, boundary=root)
+            if _live_venv_references_backup(live, backup):
+                print(
+                    f"  ⚠ Keeping runtime backup {backup.name}:"
+                    " live venv still references it by path"
+                )
+            else:
+                _remove_tree(backup, boundary=root)
         return RuntimeRepairResult(
             "repaired",
             sqlite_before=current.sqlite_version_string,
