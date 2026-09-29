@@ -2286,10 +2286,48 @@ def dispatch(
     board: Optional[str] = Query(None),
 ):
     board = _resolve_board(board)
+    # Honour kanban.max_in_progress / max_in_progress_per_profile /
+    # default_assignee from config (#127446) — same semantics as
+    # ``hermes kanban dispatch`` (_cmd_dispatch) and the gateway tick,
+    # so the manual nudge can't fan out past the configured cap.
+    # ponytail: local coerce mirrors _cmd_dispatch; hoist to kanban_db
+    # if a third dispatch entry point needs it.
+    try:
+        from hermes_cli.config import load_config
+
+        _cfg = load_config()
+        _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+
+        def _coerce_positive_int(value):
+            if value is None:
+                return None
+            try:
+                ival = int(value)
+            except (TypeError, ValueError):
+                return None
+            return ival if ival >= 1 else None
+
+        default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
+        max_in_progress_per_profile = _coerce_positive_int(
+            _kanban_cfg.get("max_in_progress_per_profile")
+        )
+        max_in_progress = kanban_db.resolve_max_in_progress(
+            _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
+        )
+    except Exception:
+        default_assignee = None
+        max_in_progress_per_profile = None
+        max_in_progress = None
     conn = _conn(board=board)
     try:
         result = kanban_db.dispatch_once(
-            conn, dry_run=dry_run, max_spawn=max_n, board=board,
+            conn,
+            dry_run=dry_run,
+            max_spawn=max_n,
+            max_in_progress=max_in_progress,
+            default_assignee=default_assignee,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+            board=board,
         )
         # DispatchResult is a dataclass.
         try:

@@ -27,8 +27,8 @@ from hermes_cli import kanban_db as kb
 # ---------------------------------------------------------------------------
 
 
-def _load_plugin_router():
-    """Dynamically load plugins/kanban/dashboard/plugin_api.py and return its router."""
+def _load_plugin_module():
+    """Dynamically load plugins/kanban/dashboard/plugin_api.py and return the module."""
     repo_root = Path(__file__).resolve().parents[2]
     plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
@@ -40,7 +40,12 @@ def _load_plugin_router():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    return mod.router
+    return mod
+
+
+def _load_plugin_router():
+    """Dynamically load plugins/kanban/dashboard/plugin_api.py and return its router."""
+    return _load_plugin_module().router
 
 
 @pytest.fixture
@@ -513,6 +518,68 @@ def test_dispatch_dry_run(client):
     body = r.json()
     # DispatchResult is serialized as a dataclass dict.
     assert isinstance(body, dict)
+
+
+def test_dispatch_passes_config_caps_to_dispatch_once(monkeypatch):
+    """#127446: POST /dispatch must honour kanban.max_in_progress /
+    max_in_progress_per_profile / default_assignee from config — the same
+    values ``hermes kanban dispatch`` and the gateway tick pass. No DB
+    touched: _conn and dispatch_once are both stubbed."""
+    from unittest.mock import MagicMock
+
+    mod = _load_plugin_module()
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "max_in_progress": 1,
+                "max_in_progress_per_profile": 2,
+                "default_assignee": "default",
+            }
+        },
+    )
+    monkeypatch.setattr(mod, "_conn", lambda board=None: MagicMock())
+    captured: dict = {}
+    monkeypatch.setattr(
+        kb,
+        "dispatch_once",
+        lambda conn, **kw: (captured.update(kw), kb.DispatchResult())[1],
+    )
+    mod.dispatch(dry_run=True, max_n=8, board=None)
+    assert captured.get("max_in_progress") == 1
+    assert captured.get("max_in_progress_per_profile") == 2
+    assert captured.get("default_assignee") == "default"
+    assert captured.get("max_spawn") == 8
+    assert captured.get("dry_run") is True
+
+
+def test_dispatch_tolerates_invalid_config_caps(monkeypatch):
+    """#127446: garbage cap values must not 500 the nudge button — they
+    coerce to unset (memory-derived default / None), same as the CLI."""
+    from unittest.mock import MagicMock
+
+    mod = _load_plugin_module()
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "max_in_progress": "bogus",
+                "max_in_progress_per_profile": 0,
+                "default_assignee": "   ",
+            }
+        },
+    )
+    monkeypatch.setattr(mod, "_conn", lambda board=None: MagicMock())
+    captured: dict = {}
+    monkeypatch.setattr(
+        kb,
+        "dispatch_once",
+        lambda conn, **kw: (captured.update(kw), kb.DispatchResult())[1],
+    )
+    mod.dispatch(dry_run=True, max_n=8, board=None)
+    assert captured.get("default_assignee") is None
+    assert captured.get("max_in_progress_per_profile") is None
+    assert captured.get("max_in_progress") == kb.resolve_max_in_progress(None)
 
 
 # ---------------------------------------------------------------------------
