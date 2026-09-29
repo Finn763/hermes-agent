@@ -128,6 +128,55 @@ describe('project scope', () => {
     enterProject('p_abc')
     expect(window.localStorage.getItem('hermes.desktop.projectScope')).toBe('p_abc')
   })
+
+  it('anchors the live workspace at the entered project root (#117890)', () => {
+    // Opening/selecting a project must move the session workspace + Files pane
+    // into the project's folder. Only the sidebar click path did this (via its
+    // own sync); palette/follow-in entry left the workspace behind at ~/.hermes.
+    $projectTree.set([
+      {
+        color: null,
+        icon: null,
+        id: 'p_root',
+        isAuto: false,
+        label: 'project_name',
+        path: '/home/user/Projects/project_name',
+        previewSessions: [],
+        repos: [],
+        sessionCount: 0
+      }
+    ])
+    $currentCwd.set('/home/user/.hermes')
+    enterProject('p_root')
+    expect($currentCwd.get()).toBe('/home/user/Projects/project_name')
+  })
+
+  it('leaves the workspace alone for the path-less Home bucket', () => {
+    $currentCwd.set('/home/user/.hermes')
+    enterProject(NO_PROJECT_ID)
+    expect($currentCwd.get()).toBe('/home/user/.hermes')
+  })
+
+  it('keeps a workspace already inside the project (worktree session)', () => {
+    // A session running in one of the project's worktrees must not get yanked
+    // back to the project root when its project is (re-)entered.
+    $projectTree.set([
+      {
+        color: null,
+        icon: null,
+        id: 'p_root',
+        isAuto: false,
+        label: 'project_name',
+        path: '/home/user/Projects/project_name',
+        previewSessions: [],
+        repos: [],
+        sessionCount: 0
+      }
+    ])
+    $currentCwd.set('/home/user/Projects/project_name/.worktrees/fix-x')
+    enterProject('p_root')
+    expect($currentCwd.get()).toBe('/home/user/Projects/project_name/.worktrees/fix-x')
+  })
 })
 
 describe('projects RPC profile forwarding', () => {

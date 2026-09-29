@@ -24,9 +24,11 @@ import {
   requestFreshSession
 } from '@/store/profile'
 import {
+  $currentCwd,
   $selectedStoredSessionId,
   $sessions,
   sessionMatchesStoredId,
+  setCurrentCwd,
   setSessions,
   workspaceCwdForNewSession
 } from '@/store/session'
@@ -161,6 +163,22 @@ export const $projectScope = persistentAtom<string>(PROJECT_SCOPE_KEY, ALL_PROJE
 // point). Never opens a session.
 export function enterProject(id: string): void {
   $projectScope.set(id)
+
+  // Anchor the live workspace (session cwd + Files pane) at the entered
+  // project's root, so opening/selecting a project actually moves the session
+  // into its folder (#117890). This is the shared entry point — sidebar
+  // clicks, the palette's goToProject, and followActiveSessionCwd all route
+  // through here — so one guard covers every caller. New-session cwd already
+  // resolves from scope; the path-less Home bucket intentionally keeps the
+  // current workspace. A workspace already inside the project (e.g. a session
+  // sitting in one of its worktrees) is left alone — anchoring would yank the
+  // Files pane away from where the session actually runs. ponytail: no
+  // per-caller sync; sidebar's own sync is now a harmless no-op duplicate.
+  const cwd = projectRootCwd($projectTree.get().find(node => node.id === id))
+
+  if (cwd && !isUnderPath(cwd, $currentCwd.get())) {
+    setCurrentCwd(cwd)
+  }
 
   // Only explicit, persisted projects (ids are `p_<hex>`) become active. Auto
   // projects (ids are filesystem paths) and the Home bucket have no durable row
