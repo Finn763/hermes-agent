@@ -620,3 +620,44 @@ def test_other_profile_home_does_not_bridge_process_config(tmp_path, monkeypatch
 
     # The other profile's .env value stands; the process config was not applied.
     assert os.getenv("TERMINAL_ENV") == "docker"
+
+
+def test_local_backend_config_cwd_does_not_repin_launch_dir(tmp_path, monkeypatch):
+    """Regression for #86411: on the local backend the launch dir is
+    authoritative (#19214). cli.py force-exports it at startup, but every
+    later load_hermes_dotenv() re-applied config.yaml's explicit
+    terminal.cwd over it (e.g. via relay_runtime's per-turn gateway.run
+    import), silently moving the agent mid-turn."""
+    launch = tmp_path / "some-project"
+    launch.mkdir()
+    configured = tmp_path / "config-home"
+    configured.mkdir()
+    home = _seed_terminal_home(
+        tmp_path, monkeypatch,
+        config_yaml="terminal:\n  backend: local\n  cwd: %s\n" % configured,
+    )
+
+    # Startup state: cli.py already exported the launch dir.
+    monkeypatch.setenv("TERMINAL_CWD", str(launch))
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("TERMINAL_CWD") == str(launch)
+
+
+def test_nonlocal_backend_config_cwd_still_bridged(tmp_path, monkeypatch):
+    """The #86411 guard is local-backend-only: docker still honors an
+    explicit terminal.cwd."""
+    configured = tmp_path / "config-home"
+    configured.mkdir()
+    home = _seed_terminal_home(
+        tmp_path, monkeypatch,
+        config_yaml="terminal:\n  backend: docker\n  cwd: %s\n" % configured,
+    )
+
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("TERMINAL_CWD") == str(configured)

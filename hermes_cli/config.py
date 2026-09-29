@@ -3618,6 +3618,11 @@ def apply_terminal_config_to_env(
     for cfg_key, env_var in TERMINAL_CONFIG_ENV_MAP.items():
         if cfg_key not in terminal_cfg:
             continue
+        if cfg_key == "cwd" and terminal_backend.strip().lower() == "local":
+            # ponytail: local backend always uses the launch dir (#19214);
+            # bridging config cwd would let any later load_hermes_dotenv()
+            # re-pin it mid-turn (#86411). Non-local backends unaffected.
+            continue
         value = terminal_cfg[cfg_key]
         if not _terminal_config_value_is_bridgeable(cfg_key, value):
             continue
