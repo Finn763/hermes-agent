@@ -1173,16 +1173,12 @@ def build_proxy_config(
                 # don't want body inspection forced for every request.
                 "match_query": True,
                 "match_body": False,
-                # Fail closed (maxpetrusenko P1): when a request reaches an
-                # allowlisted upstream WITHOUT the proxy token present in a
-                # matched location, reject it instead of forwarding as-is.
-                # Without this, a real provider key that a sandbox process
-                # sent directly (not via the minted token) would still pass
-                # the proxy boundary to the allowed host. With require=true,
-                # iron-proxy returns ActionReject when no token swap fired
-                # (v0.39 secrets transform: replaceConfig.Require, enforced in
-                # TransformRequest — verified present in the pinned version).
-                "require": True,
+                # ponytail: require=False until iron-proxy defers the
+                # secrets check to the post-MITM request (as it does for
+                # aws_auth). v0.39 evaluates require against the synthetic
+                # header-less CONNECT, which can never carry the token,
+                # so require=True rejects every mapped CONNECT pre-MITM.
+                "require": False,
             },
             "rules": [{"host": h} for h in m.upstream_hosts],
         })

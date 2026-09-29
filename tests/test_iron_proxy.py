@@ -93,6 +93,18 @@ def test_build_proxy_config_custom_allowed_hosts(tmp_path):
     assert "openrouter.ai" in domains  # comes from the mapping
 
 
+def test_build_proxy_config_does_not_require_token_on_synthetic_connect(tmp_path):
+    cfg = ip.build_proxy_config(
+        mappings=[_sample_mapping("OPENAI_API_KEY")],
+        ca_cert=tmp_path / "ca.crt",
+        ca_key=tmp_path / "ca.key",
+    )
+    secrets = next(
+        t for t in cfg["transforms"] if t["name"] == "secrets"
+    )
+    assert secrets["config"]["secrets"][0]["replace"]["require"] is False
+
+
 # ---------------------------------------------------------------------------
 # Default SSRF deny list (regression: docs promise cloud metadata is denied)
 # ---------------------------------------------------------------------------
