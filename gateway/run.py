@@ -20701,6 +20701,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # session_entry.session_id while the old run is still unwinding.
             _run_start_session_id = session_entry.session_id
             _turn_started_monotonic = time.monotonic()
+            # Typing readiness (#119143): inbound enrichment (STT/vision)
+            # is done; let the adapter show typing for the agent run.
+            # ponytail: reuses _typing_paused via resume; getattr-guarded
+            # for bare test doubles without the method.
+            try:
+                _ready_adapter = self._adapter_for_source(source)
+                _resume = getattr(_ready_adapter, "resume_typing_for_chat", None)
+                if callable(_resume):
+                    _resume(source.chat_id)
+                elif _ready_adapter is not None:
+                    getattr(_ready_adapter, "_typing_paused", set()).discard(
+                        source.chat_id
+                    )
+            except Exception:
+                logger.debug("typing readiness signal failed (non-fatal)")
             agent_result = await self._run_agent(
                 message=message_text,
                 context_prompt=context_prompt,

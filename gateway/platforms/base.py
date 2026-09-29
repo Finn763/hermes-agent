@@ -6390,6 +6390,13 @@ class BasePlatformAdapter(ABC):
         # Gated per-platform: when typing_indicator=False the refresh loop is
         # never spawned, so no "typing…" / "is thinking…" status is shown.
         # typing_task stays None; _stop_typing_refresh already no-ops on None.
+        # Gate typing until the runner signals agent-run readiness
+        # (resume_typing_for_chat right before _run_agent): receiving,
+        # debounce/batching, and inbound STT enrichment stay invisible.
+        # Early returns that never start an agent turn never resume, so
+        # they produce zero typing (#119143).
+        # ponytail: reuses _typing_paused; no per-turn event object.
+        self.pause_typing_for_chat(event.source.chat_id)
         _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
         typing_task: Optional[asyncio.Task] = None
         if getattr(self.config, "typing_indicator", True):
