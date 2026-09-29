@@ -16522,6 +16522,74 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    async def _maybe_deliver_home_notice(self, source) -> None:
+        """Send the one-time 'no home channel' setup notice when none is set."""
+        platform_name = source.platform.value
+        env_key = _home_target_env_var(platform_name)
+        # Multiplex: home channel may live only in the profile secret
+        # scope / PlatformConfig, not process os.environ.
+        home_env = ""
+        try:
+            from agent.secret_scope import get_secret
+
+            home_env = (get_secret(env_key) or "").strip() if env_key else ""
+        except Exception:
+            home_env = ""
+        if not home_env:
+            home_env = (os.getenv(env_key) or "").strip() if env_key else ""
+        # Also honor in-memory / yaml home_channel on this platform.
+        try:
+            if not home_env and self.config.get_home_channel(source.platform):
+                home_env = "set"
+        except Exception:
+            pass
+        # Secondary-profile platforms (e.g. Slack on yolo) may only exist
+        # under that profile's loaded config — check after scope install.
+        if not home_env:
+            try:
+                from gateway.config import load_gateway_config as _lgc
+                prof = (getattr(source, "profile", None) or "").strip()
+                if prof and prof != "default":
+                    # Already inside profile scope for secondary handlers;
+                    # re-read live config for home_channel.
+                    _pcfg = _lgc()
+                    if _pcfg.get_home_channel(source.platform):
+                        home_env = "set"
+            except Exception:
+                pass
+        if not home_env:
+            # Home-channel setup is operator infrastructure, not user
+            # onboarding: only an explicitly configured admin may see it.
+            # Uses the existing scope-aware slash-access policy, so no new
+            # config keys or platform lists.
+            # ponytail: explicit allow_admin_from is the only operator signal;
+            # installs without one stop showing the hint until an admin is listed.
+            from gateway.slash_access import policy_for_source as _policy_for_source
+            _admin_policy = _policy_for_source(self.config, source)
+            if not (_admin_policy.enabled and _admin_policy.is_admin(source.user_id)):
+                logger.info(
+                    "No home channel is configured for %s; suppressing the setup notice for a "
+                    "first-time contact that is not an explicitly configured admin",
+                    platform_name,
+                )
+                return
+            # Slack dispatches all Hermes commands through a single
+            # parent slash command `/hermes`; bare `/sethome` is not
+            # registered and would fail with "app did not respond".
+            sethome_cmd = (
+                "/hermes sethome"
+                if source.platform == Platform.SLACK
+                else "/sethome"
+            )
+            notice = (
+                f"📬 No home channel is set for {platform_name.title()}. "
+                f"A home channel is where Hermes delivers cron job results "
+                f"and cross-platform messages.\n\n"
+                f"Type {sethome_cmd} to make this chat your home channel, "
+                f"or ignore to skip."
+            )
+            await self._deliver_platform_notice(source, notice)
+
     async def _resolve_async_delegation_session(
         self,
         session_entry: SessionEntry,
@@ -20544,56 +20612,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
-            platform_name = source.platform.value
-            env_key = _home_target_env_var(platform_name)
-            # Multiplex: home channel may live only in the profile secret
-            # scope / PlatformConfig, not process os.environ.
-            home_env = ""
-            try:
-                from agent.secret_scope import get_secret
-
-                home_env = (get_secret(env_key) or "").strip() if env_key else ""
-            except Exception:
-                home_env = ""
-            if not home_env:
-                home_env = (os.getenv(env_key) or "").strip() if env_key else ""
-            # Also honor in-memory / yaml home_channel on this platform.
-            try:
-                if not home_env and self.config.get_home_channel(source.platform):
-                    home_env = "set"
-            except Exception:
-                pass
-            # Secondary-profile platforms (e.g. Slack on yolo) may only exist
-            # under that profile's loaded config — check after scope install.
-            if not home_env:
-                try:
-                    from gateway.config import load_gateway_config as _lgc
-                    prof = (getattr(source, "profile", None) or "").strip()
-                    if prof and prof != "default":
-                        # Already inside profile scope for secondary handlers;
-                        # re-read live config for home_channel.
-                        _pcfg = _lgc()
-                        if _pcfg.get_home_channel(source.platform):
-                            home_env = "set"
-                except Exception:
-                    pass
-            if not home_env:
-                # Slack dispatches all Hermes commands through a single
-                # parent slash command `/hermes`; bare `/sethome` is not
-                # registered and would fail with "app did not respond".
-                sethome_cmd = (
-                    "/hermes sethome"
-                    if source.platform == Platform.SLACK
-                    else "/sethome"
-                )
-                notice = (
-                    f"📬 No home channel is set for {platform_name.title()}. "
-                    f"A home channel is where Hermes delivers cron job results "
-                    f"and cross-platform messages.\n\n"
-                    f"Type {sethome_cmd} to make this chat your home channel, "
-                    f"or ignore to skip."
-                )
-                await self._deliver_platform_notice(source, notice)
+            await self._maybe_deliver_home_notice(source)
         
         # -----------------------------------------------------------------
         # Voice channel awareness — deliver current voice channel state so
