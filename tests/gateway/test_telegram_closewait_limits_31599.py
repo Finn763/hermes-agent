@@ -162,7 +162,9 @@ def test_fallback_branch_forwards_tuned_limits_to_inner_transports(monkeypatch):
         assert isinstance(limits, httpx.Limits)
         assert limits.keepalive_expiry is not None
         assert limits.keepalive_expiry < 5.0
-        assert limits.max_connections == 512
+        # #82678: one fallback IP + two PTB clients = 4 pools; the
+        # 512-connection budget is derated across all pools (512 // 4).
+        assert limits.max_connections == 512 // 4
 
     for instance in instances:
         asyncio.run(instance.kwargs["httpx_kwargs"]["transport"].aclose())
