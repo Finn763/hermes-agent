@@ -77,7 +77,8 @@ def _cmd_list(_args) -> None:
             if isinstance(e, dict)
         }
 
-        print(f"Configured shell hooks ({len(specs)} total):\n")
+        print(f"Configured shell hooks ({len(specs)} total)"
+              f"   allowlist: {shell_hooks.allowlist_path()}\n")
 
         for event in sorted(by_event.keys()):
             print(f"  [{event}]")
@@ -353,7 +354,8 @@ def _cmd_doctor(_args) -> None:
         print("No shell hooks configured — nothing to check.")
         return
 
-    print(f"Checking {len(specs)} configured shell hook(s)...\n")
+    print(f"Checking {len(specs)} configured shell hook(s)...")
+    print(f"Allowlist: {shell_hooks.allowlist_path()}\n")
 
     problems = 0
     for spec in specs:

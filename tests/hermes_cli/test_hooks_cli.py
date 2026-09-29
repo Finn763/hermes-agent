@@ -203,3 +203,15 @@ class TestHooksDoctor:
         )
         assert "not allowlisted" in out.lower()
         assert "skipped JSON smoke test" in out
+
+    def test_list_and_doctor_name_resolved_allowlist(self, tmp_path):
+        """`hooks list`/`doctor` must print allowlist_path() so a
+        wrong-home approval is distinguishable from no approval (#109179)."""
+        script = _hook_script(tmp_path, "#!/usr/bin/env bash\nprintf '{}\n'\n")
+        cfg = {"hooks": {"on_session_start": [{"command": str(script)}]}}
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            list_out = _run(SimpleNamespace(hooks_action="list"))
+            doctor_out = _run(SimpleNamespace(hooks_action="doctor"))
+        expected = str(shell_hooks.allowlist_path())
+        assert expected in list_out
+        assert expected in doctor_out
