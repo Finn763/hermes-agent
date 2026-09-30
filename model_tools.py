@@ -315,12 +315,27 @@ def _apply_toolset_selection(tools: set, names: List[str], quiet_mode: bool, *, 
 def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]], quiet_mode: bool) -> set:
     """Tool names requested by the toolset selection (before check_fn filtering)."""
     tools: set = set()
+    # The worker's own session owns the board task it was handed, which is what makes the lifecycle
+    # tools its sanctioned terminal transition (the delegate guard refuses `hermes kanban complete`
+    # from that same context). Disabled toolsets subtract LAST and at tool granularity, so a profile
+    # carrying ``kanban`` there -- what a minimal/worker profile writes -- would silently undo the
+    # injection below and leave the worker with no way to close its card.
+    worker_owns_task = bool(
+        os.environ.get("HERMES_KANBAN_TASK")
+        and not _is_delegated_child_context()
+        and _is_dispatcher_owned_worker()
+    )
+    # ponytail: exempt the whole kanban toolset for the owning session rather than
+    # re-adding the four lifecycle names; the orchestrator tools it also carries stay
+    # hidden by their own check_fn, so the wider grant is not observable.
+    effective_disabled_toolsets = list(disabled_toolsets) if disabled_toolsets else []
+    if worker_owns_task and "kanban" in effective_disabled_toolsets:
+        effective_disabled_toolsets.remove("kanban")
     if enabled_toolsets is not None:
         enabled = list(enabled_toolsets)
         # Dispatcher-spawned kanban workers always get the lifecycle handoff
         # tools, even when the assignee profile restricts its chat toolsets.
-        if (os.environ.get("HERMES_KANBAN_TASK") and not _is_delegated_child_context()
-                and _is_dispatcher_owned_worker() and "kanban" not in enabled):
+        if worker_owns_task and "kanban" not in enabled:
             enabled.append("kanban")
         _apply_toolset_selection(tools, enabled, quiet_mode, disable=False)
     else:
@@ -336,8 +351,8 @@ def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets:
     # toolset is stripped even when a composite (hermes-cli) re-enables it.
     # This ensures that even if a composite toolset (like hermes-cli) is enabled, any tools belonging to a
     # disabled toolset are strictly stripped out. See issue #17309.
-    if disabled_toolsets:
-        _apply_toolset_selection(tools, disabled_toolsets, quiet_mode, disable=True)
+    if effective_disabled_toolsets:
+        _apply_toolset_selection(tools, effective_disabled_toolsets, quiet_mode, disable=True)
     return tools
 
 
