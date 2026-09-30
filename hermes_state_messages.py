@@ -476,6 +476,8 @@ class SessionMessagesMixin:
                     session_id, msg, timestamp
                 ),
                 decode_row_fn=self._decoded_repair_row,
+                resolve_unaddressed_row_id_fn=lambda msg: self._resolve_unaddressed_row_id(
+                    conn, session_id, msg),
             )
             inserted, tool_calls_total = self._insert_message_rows(conn, session_id, inserted_rows)
             self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
@@ -983,6 +985,42 @@ class SessionMessagesMixin:
             if len(matches) == 1:
                 resolved.append(matches[0])
         return list(dict.fromkeys(resolved))
+
+    def _resolve_unaddressed_row_id(self, conn, session_id: str, message: Dict[str, Any]) -> Optional[int]:
+        """The active row a row-ADDRESS-less *message* is already stored as, or None.
+
+        ``_row_id`` is opt-in on restore, so a transcript re-persisted after an in-place rewrite (every
+        site that pops ``_DB_PERSISTED_MARKER`` to have the flush re-write the row) arrives with a
+        timestamp and a durable ``message_uid`` but no row address. The repair step had nothing to match
+        on and fell through to a fresh INSERT, storing the whole block a second time under new ids with
+        the ORIGINAL timestamps (#129065: a 163-row history block duplicated in a long desktop session,
+        the session's timestamp running backwards mid-history).
+
+        Identity is the same (role, content, tool_call_id, tool_calls) + timestamp tuple
+        :meth:`_resolve_carried_row_ids` already trusts for carried compaction messages, restricted to
+        the session's ACTIVE rows so archived/compacted history is never resurrected. A UNIQUE match is
+        required: several active rows with one identity are ambiguous and stay inserts, because dropping
+        a genuinely new message loses it while keeping a duplicate only costs a row.
+
+        ponytail: matches on stored identity, not on ``message_uid`` alone. A re-flush whose dicts lost
+        their uid (a copy site that does not carry identity) still resolves here; the uid-only shortcut
+        would be cheaper but leaves that whole duplication class open.
+        """
+        timestamp = coerce_epoch(message.get("timestamp"), field="message timestamp")
+        if timestamp is None:
+            return None
+        identity = self._row_identity(
+            message.get("role", "unknown"), message.get("content"), message.get("tool_call_id"),
+            _parse_tool_calls(message.get("tool_calls")))
+        matches = conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND active = 1 AND role = ? "
+            "AND timestamp IS ? AND tool_call_id IS ? AND tool_calls IS ? AND content IS ? LIMIT 2",
+            (
+                session_id, identity[0], timestamp, identity[2], identity[3],
+                self._encode_content(self._loaded_view_content(identity[0], identity[1])),
+            ),
+        ).fetchall()
+        return int(matches[0][0]) if len(matches) == 1 else None
 
     def _matching_active_ids(self, conn, session_id: str, message: Dict[str, Any]) -> List[int]:
         """Active row ids whose stored role and content equal *message*. Empty when it was never persisted."""

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from typing import Any, Callable, Dict, List, Mapping
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_metadata import (
@@ -96,17 +96,28 @@ def resolve_and_repair_transcript_batch(
     decode_content_fn: Callable[[Any], Any],
     serialize_message_fn: Callable[[Dict[str, Any], float], Mapping[str, Any]],
     decode_row_fn: Callable[[Mapping[str, Any]], Dict[str, Any]],
+    resolve_unaddressed_row_id_fn: Optional[Callable[[Dict[str, Any]], Optional[int]]] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve row-addressed rewrites without appending duplicates or replacing concurrent winners.
 
     A durable row snapshot is a compare-and-swap version for sanitizer rewrites. Watermark-compaction clones
     are matched by their copied payload identity, not timestamp alone. Legacy blank assistant rows retain the
-    narrow interrupted-stream content repair. Returns only rows that need fresh inserts.
+    narrow interrupted-stream content repair. A dict carrying no ``_row_id`` is still matched against the
+    session's active rows through ``resolve_unaddressed_row_id_fn`` before it is treated as new, so a
+    re-persisted restored block rewrites its rows instead of appending a second copy of the whole block
+    (#129065). Returns only rows that need fresh inserts.
     """
     inserted_rows: List[Dict[str, Any]] = []
     for msg in messages:
         existing_row_id = msg.get("_row_id") if isinstance(msg, dict) else None
         role = msg.get("role", "unknown") if isinstance(msg, dict) else "unknown"
+        if not isinstance(existing_row_id, int) and resolve_unaddressed_row_id_fn is not None:
+            # No row address: the block may still be durable (restore is opt-in on ``_row_id``). Ask the
+            # store to name the active row this message already IS before falling through to an insert.
+            resolved = resolve_unaddressed_row_id_fn(msg)
+            if isinstance(resolved, int):
+                msg["_row_id"] = resolved
+                existing_row_id = resolved
         target_row = None
         if isinstance(existing_row_id, int):
             target_row = _active_message_row(conn, session_id, existing_row_id, role)
