@@ -206,3 +206,137 @@ def test_custom_provider_context_avoids_false_shrink_warning(monkeypatch):
     assert "shrinks" in result3.warning_message
     # Must not honor the unused 1M custom override when no providers were passed.
     assert "1,048,576" not in result3.warning_message
+
+
+def test_cold_read_note_on_a_large_session_that_will_not_compress(monkeypatch):
+    """A switch costs a full re-read even when compression is not coming: the new route answers from
+    an empty prefix cache. The summary names that cost instead of leaving the stall unexplained."""
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._estimate_tokens",
+        lambda *a, **k: 90_000,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000,
+    )
+    cc = _compressor(monkeypatch, context_length=200_000)  # trigger at 150k
+    agent = SimpleNamespace(
+        context_compressor=cc,
+        compression_enabled=True,
+        base_url="",
+        api_key="",
+    )
+    result = _result(model="large-model")
+    merge_preflight_compression_warning(result, agent=agent)
+
+    assert "no warm prefix cache" in result.warning_message
+    assert "90,000 tokens" in result.warning_message
+    # Below the trigger, so nothing about compression belongs in the note.
+    assert "preflight compression" not in result.warning_message
+
+
+def test_no_cold_read_note_on_a_small_session(monkeypatch):
+    """A prefill on a small history is instant; the summary stays quiet."""
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._estimate_tokens",
+        lambda *a, **k: 12_000,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000,
+    )
+    cc = _compressor(monkeypatch, context_length=200_000)
+    agent = SimpleNamespace(
+        context_compressor=cc,
+        compression_enabled=True,
+        base_url="",
+        api_key="",
+    )
+    result = _result(model="large-model")
+    merge_preflight_compression_warning(result, agent=agent)
+
+    assert not result.warning_message
+
+
+def test_compression_warning_is_not_doubled_by_the_cold_read_note(monkeypatch):
+    """At or above the trigger the compression warning is the whole answer; the re-read is implied."""
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._estimate_tokens",
+        lambda *a, **k: 160_000,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000,
+    )
+    cc = _compressor(monkeypatch, context_length=200_000)
+    agent = SimpleNamespace(
+        context_compressor=cc,
+        compression_enabled=True,
+        base_url="",
+        api_key="",
+    )
+    result = _result(model="large-model")
+    merge_preflight_compression_warning(result, agent=agent)
+
+    assert "preflight compression" in result.warning_message
+    assert "no warm prefix cache" not in result.warning_message
+
+
+def test_cold_read_note_survives_disabled_compression(monkeypatch):
+    """Compression off removes the promise of a compress, not the re-read: the whole history still
+    goes to the new route, so the switch summary keeps naming the cost."""
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000,
+    )
+    cc = _compressor(monkeypatch, context_length=200_000)  # trigger at 150k
+    cc.last_prompt_tokens = 180_000
+    agent = SimpleNamespace(
+        context_compressor=cc,
+        compression_enabled=False,
+        base_url="",
+        api_key="",
+    )
+    result = _result(model="large-model")
+    merge_preflight_compression_warning(result, agent=agent)
+
+    assert "no warm prefix cache" in result.warning_message
+    assert "180,000 tokens" in result.warning_message
+    assert "preflight compression" not in result.warning_message
+
+
+def test_cold_read_note_reaches_a_token_heavy_protected_length_history(monkeypatch):
+    """A history inside the protected head/tail cannot be compressed — but it is still read. Sizing
+    comes from the real ``_estimate_tokens`` here: a small message *count* is not a small payload."""
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000,
+    )
+    cc = _compressor(monkeypatch, context_length=200_000)  # trigger at 150k
+    # 24 == protect_first_n + protect_last_n + 1: the count that used to suppress the estimate.
+    messages = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 40_000}
+        for i in range(24)
+    ]
+    agent = SimpleNamespace(
+        context_compressor=cc,
+        compression_enabled=True,
+        base_url="",
+        api_key="",
+    )
+    result = _result(model="large-model")
+    merge_preflight_compression_warning(result, agent=agent, messages=messages)
+
+    assert "no warm prefix cache" in result.warning_message
+    assert "preflight compression" not in result.warning_message
+
+
+def test_estimate_tokens_sizes_a_protected_length_history(monkeypatch):
+    """The protected-length early return belonged to the compression decision, not to sizing."""
+    from hermes_cli.context_switch_guard import _estimate_tokens
+
+    cc = _compressor(monkeypatch, context_length=200_000)
+    agent = SimpleNamespace(context_compressor=cc)
+
+    assert _estimate_tokens(agent, [{"role": "user", "content": "x" * 40_000}]) > 1_000
+    assert _estimate_tokens(agent, None) is None  # no history and no recorded counters

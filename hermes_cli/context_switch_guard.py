@@ -7,6 +7,13 @@ from typing import Any, Callable, List, Optional
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
 from hermes_cli.model_switch import ModelSwitchResult, resolve_display_context_length
 
+# The switch summary is where the user learns what the next turn costs. Below the compression
+# trigger there is still a cost: the first reply ships the whole history to a route whose prefix
+# cache is cold (provider caches are per model/route), so a hosted prefill re-reads it at ~2-5k
+# tok/s and the largest sessions feel that as a stall. Flagged once the session is at least halfway
+# to the trigger this same summary already quotes. Calibration knob, not a contract.
+COLD_READ_THRESHOLD_FRACTION = 0.5
+
 
 def _append_warning(result: ModelSwitchResult, text: str) -> None:
     if result.warning_message:
@@ -30,10 +37,6 @@ def _estimate_tokens(agent: Any, messages: Optional[List[dict]]) -> Optional[int
         return None
 
     if messages is not None:
-        protect = (
-            int(getattr(cc, "protect_first_n", 3)) + int(getattr(cc, "protect_last_n", 20)) + 1)
-        if len(messages) <= protect:
-            return None
         try:
             from agent.model_metadata import estimate_request_tokens_rough
 
@@ -52,6 +55,37 @@ def _estimate_tokens(agent: Any, messages: Optional[List[dict]]) -> Optional[int
     return session_prompt if session_prompt > 0 else None
 
 
+def _history_can_shrink(cc: Any, messages: Optional[List[dict]]) -> bool:
+    """Whether preflight compression could actually drop anything from this payload.
+
+    The compressor never touches the protected head/tail, so a history that fits entirely inside
+    them cannot be shrunk however many tokens it holds. That is a fact about *compression*, not
+    about the payload the new route still has to read — hence this gates the compression promise
+    alone, never the cold-read note.
+    """
+    if messages is None:
+        return True
+    protect = (
+        int(getattr(cc, "protect_first_n", 3)) + int(getattr(cc, "protect_last_n", 20)) + 1)
+    return len(messages) > protect
+
+
+def _append_cold_read_note(result: ModelSwitchResult, estimate: int, threshold: int) -> None:
+    """Note the pre-read a switch costs when no compression is on the way.
+
+    Nothing in the delay is something Hermes rebuilds: the new route answers from an empty prefix
+    cache, so the cost is the history itself being re-read. Small sessions answer from a cold cache
+    fast enough that the line would be noise, hence the floor.
+    """
+    if estimate < int(threshold * COLD_READ_THRESHOLD_FRACTION):
+        return
+    _append_warning(
+        result,
+        f"Session is ~{estimate:,} tokens; the first reply on {result.new_model} re-reads them "
+        f"before it answers — a route that has not served this session has no warm prefix cache, "
+        f"so expect a delay on large sessions.")
+
+
 def merge_preflight_compression_warning(
     result: ModelSwitchResult,
     *,
@@ -64,8 +98,6 @@ def merge_preflight_compression_warning(
     configured_base_url: str | None = None) -> None:
     """If the next user message will likely preflight-compress, append a warning."""
     if not result.success or agent is None:
-        return
-    if not getattr(agent, "compression_enabled", True):
         return
 
     cc = getattr(agent, "context_compressor", None)
@@ -101,9 +133,19 @@ def merge_preflight_compression_warning(
 
     new_threshold = _threshold_tokens(cc, result.new_model, new_ctx, result.target_provider)
     if estimate < new_threshold:
+        _append_cold_read_note(result, estimate, new_threshold)
         return
 
-    if int(getattr(cc, "_ineffective_compression_count", 0) or 0) >= 2:
+    # A compression notice is a promise that the next turn will compress; the cold-read note is a
+    # plain statement about the cost the switch already carries. Only the promise needs the
+    # compressor to be able to run — the payload is sent either way. Same for the suppression rules:
+    # they decide whether to promise compression, not whether the switch costs a re-read.
+    can_promise_compression = (
+        bool(getattr(agent, "compression_enabled", True))
+        and _history_can_shrink(cc, messages)
+        and int(getattr(cc, "_ineffective_compression_count", 0) or 0) < 2)
+    if not can_promise_compression:
+        _append_cold_read_note(result, estimate, new_threshold)
         return
 
     parts: list[str] = []
