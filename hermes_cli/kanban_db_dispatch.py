@@ -695,6 +695,11 @@ def finalize_killed_worker_session(
 
     Best-effort: never raises, never blocks the reclaim. Call AFTER the kanban
     write txn commits so the two DB locks are never held together.
+
+    Windows caveat: until the tree-kill fix (#124362 / #128384) lands, reclaim
+    can kill only the launcher and leave the real worker running. We still stamp
+    ``ended_at`` here, which turns that worker's own ``end_session`` into a no-op
+    and loses its real outcome — a bounded window, closed by landing tree-kill.
     # ponytail: heartbeat-payload lookup only, no task_runs column migration.
     """
     try:
@@ -860,9 +865,11 @@ def detect_stale_running(
 
     now = int(time.time())
     reclaimed: list[str] = []
+    killed_sessions: list[tuple[str, Optional[int], Optional[str]]] = []
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
+        "       t.assignee, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
@@ -932,6 +939,11 @@ def detect_stale_running(
             )
             _kb._append_event(conn, tid, "stale", payload, run_id=run_id)
             reclaimed.append(tid)
+            killed_sessions.append((tid, run_id, _kb._row_get(row, "assignee")))
+
+    # Post-commit: a stale worker was killed without flushing its own session.
+    for task_id, run_id, assignee in killed_sessions:
+        finalize_killed_worker_session(conn, task_id, run_id, assignee, "kanban_stale_reclaim")
 
     return reclaimed
 
@@ -1226,6 +1238,9 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
+    # ``(task_id, run_id, assignee)`` of workers that died without flushing
+    # their own session; the dispatcher ends those after the txn commits.
+    killed_sessions: list[tuple[str, Optional[int], Optional[str]]] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> _CrashSweep:
@@ -1270,6 +1285,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 metadata=dict(dead.event_payload),
             )
             _kb._append_event(conn, row["id"], dead.event_kind, dead.event_payload, run_id=run_id)
+            sweep.killed_sessions.append((row["id"], run_id, row["assignee"]))
             sweep.exited_hook_payloads.append({
                 "task_id": row["id"],
                 "assignee": row["assignee"],
@@ -1389,6 +1405,9 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
     sweep = _reclaim_dead_workers(conn, board=board)
+    # Post-commit: these workers died without flushing their own session.
+    for task_id, run_id, assignee in sweep.killed_sessions:
+        finalize_killed_worker_session(conn, task_id, run_id, assignee, "kanban_crashed")
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;

@@ -120,3 +120,61 @@ def test_heartbeat_carries_worker_session_id(tmp_path, monkeypatch):
             (t,),
         ).fetchone()
         assert json.loads(row["payload"])["worker_session_id"] == "s-hb"
+
+
+def test_stale_running_ends_worker_session(tmp_path, monkeypatch):
+    """detect_stale_running kills the worker, so it must end the session too."""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+    prof = tmp_path / "prof4"
+    kb = _make_board(tmp_path, monkeypatch, prof)
+    sdb = _open_state(prof)
+    try:
+        sdb.create_session(session_id="s-stale", source="kanban")
+        with kbc.connect() as conn:
+            t, _host = _run_task(kb, conn)
+            run_id = kb._current_run_id(conn, t)
+            _record_heartbeat_with_session(kb, kbd, conn, t, run_id, "s-stale")
+            # Dead pid + no heartbeat ever: eligible without a 5s grace sleep.
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, last_heartbeat_at = NULL, worker_pid = ? WHERE id = ?",
+                (int(time.time()) - 100, 1999999, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? WHERE id = ?",
+                (int(time.time()) - 100, run_id),
+            )
+            out = kbd.detect_stale_running(conn, stale_timeout_seconds=1, signal_fn=lambda _p, _s: None)
+            assert out == [t]
+        row = sdb._read_all("SELECT ended_at, end_reason FROM sessions WHERE id='s-stale'", [])[0]
+        assert row["ended_at"] is not None
+        assert row["end_reason"] == "kanban_stale_reclaim"
+    finally:
+        sdb.close()
+
+
+def test_crashed_worker_ends_session(tmp_path, monkeypatch):
+    """The crashed-worker sweep reclaims a dead pid and must end its session."""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+    prof = tmp_path / "prof5"
+    kb = _make_board(tmp_path, monkeypatch, prof)
+    sdb = _open_state(prof)
+    try:
+        sdb.create_session(session_id="s-crash", source="kanban")
+        with kbc.connect() as conn:
+            t, _host = _run_task(kb, conn)
+            run_id = kb._current_run_id(conn, t)
+            _record_heartbeat_with_session(kb, kbd, conn, t, run_id, "s-crash")
+            conn.execute(
+                "UPDATE tasks SET worker_pid = ?, started_at = ? WHERE id = ?",
+                (1999999, int(time.time()) - 100, t),
+            )
+            monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 1)
+            out = kbd.detect_crashed_workers(conn)
+            assert out == [t]
+        row = sdb._read_all("SELECT ended_at, end_reason FROM sessions WHERE id='s-crash'", [])[0]
+        assert row["ended_at"] is not None
+        assert row["end_reason"] == "kanban_crashed"
+    finally:
+        sdb.close()
