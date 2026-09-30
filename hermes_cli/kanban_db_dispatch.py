@@ -711,6 +711,10 @@ def finalize_killed_worker_session(
         try:
             home = resolve_profile_env(str(assignee))
         except Exception:
+            _kb._log.debug(
+                "kanban: finalize skipped for %s run %s: profile %r unresolved",
+                task_id, run_id, assignee, exc_info=True,
+            )
             return
         from pathlib import Path as _Path
 
@@ -728,6 +732,10 @@ def finalize_killed_worker_session(
             try:
                 db.end_session(tip, reason)
             except Exception:
+                _kb._log.debug(
+                    "kanban: finalize failed for %s run %s (session %s)",
+                    task_id, run_id, tip, exc_info=True,
+                )
                 return
         finally:
             try:
