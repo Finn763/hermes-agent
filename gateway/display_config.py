@@ -177,7 +177,11 @@ def _norm_cleanup_progress(value: Any) -> bool:
 
 
 def _norm_progress_timer_interval(value: Any) -> float:
-    """Seconds between timer ticks, floored at the progress-edit throttle (never 0 = never fires)."""
+    """Seconds between timer ticks, floored at the progress-edit throttle (never 0 = never fires).
+
+    ponytail: a float interval renders a fractional second at the first tick ("0.5s"); the floor
+    keeps whole-second values on the common path and the formatter still reads fine if not.
+    """
     try:
         seconds = float(value)
     except (TypeError, ValueError):

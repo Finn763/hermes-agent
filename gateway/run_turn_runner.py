@@ -639,10 +639,12 @@ class TurnRunner:
         return f"{_PROGRESS_TIMER_PREFIX} {format_duration_compact(st.timer_index * st.timer_interval)}"
 
     def _progress_body(self, st, now: Optional[float] = None) -> str:
-        """The bubble's text: accumulated tool lines, then the elapsed timer when one is due.
+        """The bubble's text: accumulated tool lines, then the elapsed timer when one has a value.
 
         The timer is composed at render time and never joins ``progress_lines``, so it cannot be
         deduped, counted toward the dedup suffix, or replayed into a rolled-over continuation bubble.
+        ponytail: an overflow roll keeps the timer measuring from the FIRST bubble, so a very long
+        turn reports total elapsed progress work rather than restarting per continuation message.
         """
         body = self._progress_text(st.progress_lines)
         line = self._progress_timer_line(st, time.monotonic() if now is None else now)
@@ -792,7 +794,7 @@ class TurnRunner:
             await self._send_progress_text(st, msg)
             return True
         # First tool: send all accumulated text as a new message; editing unsupported: just this line.
-        result = await self._send_progress_text(st, "\n".join(st.progress_lines) if st.can_edit else msg)
+        result = await self._send_progress_text(st, self._progress_body(st) if st.can_edit else msg)
         if result.success and result.message_id:
             st.progress_msg_id = result.message_id
         return True
