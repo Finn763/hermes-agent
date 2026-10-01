@@ -622,14 +622,19 @@ class TurnRunner:
         return self._progress_timer_index(st.bubble_started_at, now, st.timer_interval) > st.timer_index
 
     def _progress_timer_line(self, st, now: float) -> str:
-        """Render the timer line and advance the rendered index, or "" when nothing new to show.
+        """The bubble's current timer value: the last whole *interval* its clock reached.
 
-        Only a boundary crossing produces a value, which is what keeps a tool line landing between
-        ticks from moving the number under the user.
+        Only a boundary crossing moves the value, but every render re-emits it — the number must
+        persist under a tool line that lands between ticks rather than blinking out and back. A
+        bubble that has not reached its first boundary yet has no value (never a premature "0s").
         """
-        if not self._progress_timer_due(st, now):
+        if not st.timer_interval or st.bubble_started_at is None:
             return ""
-        st.timer_index = self._progress_timer_index(st.bubble_started_at, now, st.timer_interval)
+        index = self._progress_timer_index(st.bubble_started_at, now, st.timer_interval)
+        if index > st.timer_index:
+            st.timer_index = index
+        if st.timer_index < 1:
+            return ""
         from agent.usage_pricing import format_duration_compact
         return f"{_PROGRESS_TIMER_PREFIX} {format_duration_compact(st.timer_index * st.timer_interval)}"
 
@@ -700,7 +705,7 @@ class TurnRunner:
     def _reset_progress_bubble(self, st) -> None:
         """Content bubble landed — close the tool-progress bubble so the next tool starts fresh
         below it; else tool edits hit the ORIGINAL message above (out of order)."""
-st.progress_msg_id, st.progress_lines = None, []
+        st.progress_msg_id, st.progress_lines = None, []
         # A new bubble restarts the timer from its own first progress event; it is not the turn's age.
         st.bubble_started_at, st.timer_index = None, 0
         self._ctx.last_progress_msg[0], self._ctx.repeat_count[0] = None, 0

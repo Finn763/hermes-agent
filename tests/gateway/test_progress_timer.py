@@ -15,7 +15,7 @@ from gateway.config import Platform
 from gateway.turn_context import TurnContext
 
 _TICK = 5.0
-# Digits at the head of the last line: the rendered elapsed seconds, whatever unit wraps it.
+# Digits anywhere in the line: the rendered elapsed seconds, whatever marker or unit wraps it.
 _ELAPSED = re.compile(r"(\d+)")
 
 
@@ -45,11 +45,17 @@ def _open_bubble(runner, *, timer, interval=_TICK):
     return st
 
 
-def _elapsed_seconds(body):
-    """Whole seconds the rendered timer carries, or None when the body carries no timer."""
-    if len(body.splitlines()) < 2:
+def _elapsed_seconds(st, body):
+    """Whole seconds the rendered timer carries, or None when the body carries no timer.
+
+    The timer only ever appears as lines BEYOND the accumulated tool lines, so the count of body
+    lines against the buffer is what says whether a timer is present — no marker is matched, which
+    keeps this from freezing the rendering.
+    """
+    lines = body.splitlines()
+    if len(lines) <= len(st.progress_lines):
         return None
-    match = _ELAPSED.match(body.splitlines()[-1])
+    match = _ELAPSED.search(lines[-1])
     return int(match.group(1)) if match else None
 
 
@@ -58,26 +64,26 @@ def test_timer_value_tracks_whole_intervals_since_the_bubbles_first_event():
     st = _open_bubble(runner, timer=True)
 
     # Before the first boundary there is no value at all — not a premature "0s".
-    assert _elapsed_seconds(runner._progress_body(st, now=100.0)) is None
+    assert _elapsed_seconds(st, runner._progress_body(st, now=100.0)) is None
 
     # A tool line inside the interval must not invent or move the number.
     runner._progress_absorb(st, "tool two", now=103.0)
-    assert _elapsed_seconds(runner._progress_body(st, now=104.9)) is None
+    assert _elapsed_seconds(st, runner._progress_body(st, now=104.9)) is None
 
     # One whole interval of wall clock since the bubble opened.
-    assert _elapsed_seconds(runner._progress_body(st, now=105.0)) == 5
+    assert _elapsed_seconds(st, runner._progress_body(st, now=105.0)) == 5
     runner._progress_absorb(st, "tool three", now=107.0)
-    assert _elapsed_seconds(runner._progress_body(st, now=107.5)) == 5
+    assert _elapsed_seconds(st, runner._progress_body(st, now=107.5)) == 5
 
     # Two whole intervals, still measured from the bubble's first event and not the tool's.
-    assert _elapsed_seconds(runner._progress_body(st, now=110.0)) == 10
-    assert _elapsed_seconds(runner._progress_body(st, now=110.0)) == 10
+    assert _elapsed_seconds(st, runner._progress_body(st, now=110.0)) == 10
+    assert _elapsed_seconds(st, runner._progress_body(st, now=110.0)) == 10
 
     # A content message closes the bubble; the next one restarts from its own first event.
     runner._reset_progress_bubble(st)
     runner._progress_absorb(st, "tool four", now=200.0)
-    assert _elapsed_seconds(runner._progress_body(st, now=200.0)) is None
-    assert _elapsed_seconds(runner._progress_body(st, now=205.0)) == 5
+    assert _elapsed_seconds(st, runner._progress_body(st, now=200.0)) is None
+    assert _elapsed_seconds(st, runner._progress_body(st, now=205.0)) == 5
 
 
 def test_no_timer_line_without_the_operator_opt_in():
@@ -85,4 +91,4 @@ def test_no_timer_line_without_the_operator_opt_in():
     st = _open_bubble(runner, timer=False)
     runner._progress_absorb(st, "tool two", now=104.0)
     assert runner._progress_body(st, now=1_000.0) == "tool one\ntool two"
-    assert _elapsed_seconds(runner._progress_body(st, now=1_000.0)) is None
+    assert _elapsed_seconds(st, runner._progress_body(st, now=1_000.0)) is None
