@@ -664,6 +664,7 @@ def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
         prompt_cache_retention; /v1/chat/completions returns 0 cached
         tokens (measured 0% vs 93-99% on /responses with retention).
       - api.anthropic.com / ``…/anthropic`` suffixes speak native Messages.
+      - MiniMax's official ``/v1`` bases speak OpenAI chat completions.
       - Kimi's ``/coding`` endpoint speaks native Messages.
       - AWS Bedrock runtime hosts speak Converse.
 
@@ -684,6 +685,12 @@ def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
         return "anthropic_messages"
     if hostname == "api.anthropic.com" or url_lower.endswith("/anthropic"):
         return "anthropic_messages"
+    # MiniMax's official /v1 bases are OpenAI-compatible. The minimax
+    # overlays default to anthropic_messages, which shadows an explicit
+    # /v1 URL and sends Messages wire at an OpenAI endpoint (#27345).
+    # ponytail: exact official hosts + /v1 suffix only; other paths stay on overlay.
+    if hostname in ("api.minimax.io", "api.minimaxi.com") and url_lower.endswith("/v1"):
+        return "chat_completions"
     # Official OpenAI host family: canonical + data-residency regional hosts
     # (us./eu.api.openai.com) all mandate the Responses API for reasoning
     # models with tools. Shared predicate keeps this lane in lockstep with

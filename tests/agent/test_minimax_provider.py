@@ -233,6 +233,43 @@ class TestMinimaxApiMode:
         assert result == "chat_completions"
 
 
+class TestMinimaxV1OpenAIWire:
+    """MiniMax's official global endpoint is OpenAI-compatible (#27345).
+
+    A user who configures the documented https://api.minimax.io/v1 base
+    must resolve to chat_completions. Before the fix the minimax overlay
+    transport (anthropic_messages) shadowed the explicit /v1 URL, so
+    Hermes sent Anthropic Messages wire at an OpenAI-compat endpoint and
+    every call failed with an API error despite a correct key.
+    """
+
+    def test_global_v1_resolves_chat_completions(self):
+        from hermes_cli.providers import determine_api_mode
+        assert determine_api_mode("minimax", "https://api.minimax.io/v1", "MiniMax-M2.7") == "chat_completions"
+
+    def test_cn_v1_resolves_chat_completions(self):
+        from hermes_cli.providers import determine_api_mode
+        assert determine_api_mode("minimax-cn", "https://api.minimaxi.com/v1", "MiniMax-M2.7") == "chat_completions"
+
+    def test_host_mandate_pins_v1(self):
+        from hermes_cli.providers import host_mandated_api_mode
+        assert host_mandated_api_mode("https://api.minimax.io/v1") == "chat_completions"
+        assert host_mandated_api_mode("https://api.minimaxi.com/v1/") == "chat_completions"
+
+    def test_fallback_path_follows_v1(self):
+        from hermes_cli.runtime_provider import _fallback_api_mode
+        assert _fallback_api_mode("minimax", "https://api.minimax.io/v1", "MiniMax-M2.7") == "chat_completions"
+
+    def test_anthropic_suffix_still_wins(self):
+        from hermes_cli.providers import determine_api_mode
+        assert determine_api_mode("minimax", "https://api.minimax.io/anthropic", "MiniMax-M2.7") == "anthropic_messages"
+
+    def test_lookalike_host_not_mandated(self):
+        from hermes_cli.providers import host_mandated_api_mode
+        assert host_mandated_api_mode("https://minimax.io.evil.example.com/v1") is None
+        assert host_mandated_api_mode("https://gateway.example.com/api.minimax.io/v1") is None
+
+
 class TestMinimaxMaxOutput:
     """Verify _get_anthropic_max_output returns correct limits for MiniMax models.
 
