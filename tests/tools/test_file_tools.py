@@ -345,6 +345,77 @@ class TestWindowsMsysPathResolution:
         assert str(resolved) == "/home/don/.env"
 
 
+class TestWindowsUnixAbsolutePathRejected:
+    """#20927 — a foreign-profile ``Users/<name>`` path handed to file tools
+    on Windows must fail loud, never silently resolve drive-relative
+    (``\\Users\\zimu\\...``) and report success for a file the user can
+    never find."""
+
+    @staticmethod
+    def _mock_home(monkeypatch, name="somebody"):
+        import hermes_constants
+
+        monkeypatch.setattr(
+            hermes_constants, "get_subprocess_home",
+            lambda: f"C:\\Users\\{name}",
+        )
+        monkeypatch.setattr(
+            "os.path.expanduser", lambda p: f"C:\\Users\\{name}"
+        )
+
+    @pytest.mark.windows_only
+    def test_resolve_rejects_unix_absolute_path(self, monkeypatch):
+        import tools.file_tools as file_tools
+
+        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": False)
+        self._mock_home(monkeypatch)
+
+        with pytest.raises(ValueError, match="Unix-style.*Windows|Windows.*Unix-style"):
+            file_tools._resolve_path_for_task("/Users/zimu/Desktop/ls/x.md")
+
+    @pytest.mark.windows_only
+    def test_drive_qualified_foreign_profile_still_resolves(self, monkeypatch):
+        import tools.file_tools as file_tools
+
+        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": False)
+        self._mock_home(monkeypatch)
+
+        # Drive-qualified (or MSYS-translated) paths are real locations the
+        # tool reports honestly — only the drive-relative macOS guess is a
+        # phantom, so these must keep resolving.
+        assert "Mark" in str(
+            file_tools._resolve_path_for_task("C:/Users/Mark/project/app.py")
+        )
+        assert "Mark" in str(
+            file_tools._resolve_path_for_task("/c/Users/Mark/project/app.py")
+        )
+
+    @pytest.mark.windows_only
+    def test_resolve_allows_own_profile_and_tmp(self, monkeypatch):
+        import tools.file_tools as file_tools
+
+        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": False)
+        self._mock_home(monkeypatch)
+
+        assert "somebody" in str(
+            file_tools._resolve_path_for_task("/Users/somebody/Desktop/ls/x.md")
+        )
+        # /tmp-style MSYS paths keep the old behavior — not a profile guess.
+        file_tools._resolve_path_for_task("/tmp/will-be-created-neg-5.txt")
+
+    @pytest.mark.windows_only
+    def test_write_file_tool_returns_error_not_silent_success(self, monkeypatch):
+        import tools.file_tools as file_tools
+
+        self._mock_home(monkeypatch)
+
+        result = json.loads(
+            file_tools.write_file_tool("/Users/zimu/Desktop/ls/x.md", "x", task_id="t-20927-red")
+        )
+        assert "error" in result
+        assert "files_modified" not in result
+
+
 # ---------------------------------------------------------------------------
 # Tool result hint tests (#722)
 # ---------------------------------------------------------------------------

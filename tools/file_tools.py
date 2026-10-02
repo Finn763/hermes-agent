@@ -370,6 +370,46 @@ def _resolve_base_dir(
     return base.resolve()
 
 
+def _windows_foreign_profile_error(expanded: str, original: str) -> str | None:
+    """Reject a drive-relative ``Users/<name>`` path aimed at another profile.
+
+    ``/Users/zimu/...`` (macOS guess) silently lands on a drive-relative
+    phantom dir on Windows (#20927). Compare the ``Users/<name>`` segment
+    against this host's home; return an error string, or ``None`` when the
+    path is fine. Drive-qualified paths (``C:\\Users\\...``, MSYS ``/c/...``)
+    and UNC shares are real locations the tool reports honestly, so they are
+    left alone. Pure path check — no I/O. No-op off Windows.
+    """
+    if sys.platform != "win32" or not expanded:
+        return None
+    text = expanded.replace("/", "\\")
+    if text.startswith("\\\\"):
+        return None  # UNC share — not a local profile.
+    if not expanded.startswith(("/", "\\")):
+        return None  # Drive-qualified or relative — a real Windows path (or
+        # workspace-anchored); the tool reports it honestly, so no phantom.
+    rest = text.lstrip("\\")
+    segs = rest.split("\\")
+    if len(segs) < 2 or segs[0].lower() != "users" or not segs[1]:
+        return None
+    try:
+        from hermes_constants import get_subprocess_home
+        home = get_subprocess_home()
+    except Exception:
+        home = None
+    home = home or os.path.expanduser("~")
+    if not home:
+        return None
+    me = home.replace("/", "\\").rstrip("\\").split("\\")[-1]
+    if segs[1].lower() == me.lower():
+        return None
+    return (
+        f"Unix-style absolute path {original!r} is not valid on Windows: it "
+        f"points at user '{segs[1]}' but this host's home is '{home}'. Use a "
+        "drive-letter path under your own profile or ~/...."
+    )
+
+
 def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | PurePosixPath:
     """Resolve *filepath* against the task's absolute base directory.
 
@@ -395,6 +435,13 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     if sys.platform == "win32":
         import ntpath
 
+        _foreign = _windows_foreign_profile_error(expanded, filepath)
+        if _foreign is not None:
+            # ponytail: reject instead of anchoring under cwd/drive — a
+            # foreign-profile Users/<name> path on Windows is a model-side
+            # wrong-OS guess (#20927); any silent mapping lands the edit
+            # where nobody looks. /tmp-style MSYS paths keep old behavior.
+            raise ValueError(_foreign)
         if ntpath.isabs(expanded):
             return Path(ntpath.normpath(expanded))
         joined = ntpath.join(str(_resolve_base_dir(task_id, container_paths=False)), expanded)
@@ -2270,6 +2317,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         # check below still runs.
         try:
             _resolved = str(_resolve_path_for_task(path, task_id))
+        except ValueError as e:
+            # Semantically invalid path for this host (e.g. #20927:
+            # Unix-absolute on Windows). Fail loud — falling back to the
+            # raw path would silently write to a drive-relative phantom.
+            return tool_error(str(e))
         except Exception:
             _resolved = None
 
