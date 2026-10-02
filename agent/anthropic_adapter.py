@@ -580,6 +580,11 @@ def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> 
     return False
 
 
+def _is_stepfun_reasoning_model(model: str | None) -> bool:
+    # ponytail: substring gate only; per-model table if StepFun ships non-3.7 reasoning ids
+    return "step-3.7" in (model or "").strip().lower()
+
+
 def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     """Return True for DeepSeek's Anthropic-compatible endpoint.
 
@@ -3089,7 +3094,7 @@ def build_anthropic_kwargs(
     # silently hides reasoning text that Hermes surfaces in its CLI. We
     # request "summarized" so the reasoning blocks stay populated — matching
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
-    if reasoning_config and isinstance(reasoning_config, dict):
+    if reasoning_config and isinstance(reasoning_config, dict) and not _is_stepfun_reasoning_model(model):
         if reasoning_config.get("enabled") is False:
             # "Thinking off". Adaptive models think by DEFAULT, so omitting the
             # parameter is not a disable — it silently leaves thinking on and
