@@ -1253,7 +1253,10 @@ describe('mergeFinalAssistantText', () => {
 
     const result = mergeFinalAssistantText(parts, '')
 
-    expect(result.filter(p => p.type === 'text')).toHaveLength(0)
+    // Empty completion carries nothing new — the streamed deltas ARE the
+    // reply and must stay visible (#37795).
+    expect(result).toBe(parts)
+    expect(result.filter(p => p.type === 'text')).toHaveLength(1)
     expect(result.filter(p => p.type === 'reasoning')).toHaveLength(1)
   })
 })

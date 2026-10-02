@@ -725,6 +725,11 @@ export function useMessageStream({
         const hasInlineError = nextMessages.some(m => m.role === 'assistant' && m.error && !m.hidden)
         const lastVisible = [...nextMessages].reverse().find(m => !m.hidden)
         const unresolvedUserTail = lastVisible?.role === 'user'
+        // ponytail: visible streamed text + empty final means the completion
+        // carried nothing new — hydrating would overwrite the live bubble
+        // with a stale snapshot (#37795).
+        const lastAssistant = [...nextMessages].reverse().find(m => m.role === 'assistant' && !m.hidden)
+        const hasVisibleAssistantText = Boolean(lastAssistant && chatMessageText(lastAssistant).trim())
         // Having streamed the reply normally means this window owns the whole
         // turn and re-reading stored history would be wasted work. That only
         // holds for a turn it STARTED: an adopted one (resumed onto a session
@@ -734,7 +739,7 @@ export function useMessageStream({
           !completionError &&
           !hasInlineError &&
           !unresolvedUserTail &&
-          (state.adoptedRunningTurn || !state.sawAssistantPayload || !finalText)
+          (state.adoptedRunningTurn || !state.sawAssistantPayload || (!finalText && !hasVisibleAssistantText))
 
         return {
           ...state,

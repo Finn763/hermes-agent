@@ -155,6 +155,13 @@ export function mergeFinalAssistantText(
   finalText: string,
   fallbackTimestamp?: number
 ): ChatMessagePart[] {
+  // ponytail: empty final keeps streamed deltas as-is; single shared guard
+  // covers every caller. An empty completion (long-prompt truncation,
+  // reasoning-only finals) must not blank an already-visible bubble (#37795).
+  if (!finalText) {
+    return parts
+  }
+
   const dedupeReference = normalizeWs(finalText)
 
   const streamedText = normalizeWs(
@@ -192,10 +199,6 @@ export function mergeFinalAssistantText(
 
     return !(r && dedupeReference.startsWith(r))
   })
-
-  if (!finalText) {
-    return kept
-  }
 
   const finalPart = assistantTextPart(finalText, previousText?.timestamp ?? fallbackTimestamp)
 
