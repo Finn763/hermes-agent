@@ -153,6 +153,13 @@ import type { RosterProfileMetadata } from './connection-registry'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
+import {
+  buildDockTile,
+  dockTileAlreadyPresent,
+  dockTileUrl,
+  shouldAttemptRelocate,
+  shouldPinDock,
+} from './macos-app-placement'
 import { formatDesktopLogLine } from './desktop-log-line'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
 import {
@@ -4026,6 +4033,99 @@ function runningAppBundle() {
   } // -> .../X.app
 
   return dir.endsWith('.app') ? dir : null
+}
+
+// ---------------------------------------------------------------------------
+// macOS first-launch placement: move into /Applications and pin to the Dock
+// (#42501; root-caused in #41518). The DMG and CLI-built apps launch from
+// wherever the user left them (a DMG mount, ~/Downloads) -- which means
+// Gatekeeper translocation, no Dock tile, and the app "disappearing" from the
+// macOS apps menu. On first packaged launch we relocate into /Applications
+// (Electron relaunches from there) and pin the canonical copy to the Dock.
+// Both macOS-only, packaged-only, best-effort, run at most once.
+// ponytail: execFileSync defaults/killall-Dock restart kept naive (matches the
+// pre-regression behavior); injectable exec for unit tests if this ever needs
+// finer failure simulation.
+const DOCK_PINNED_MARKER = 'dock-pinned.json'
+
+// Move the bundle into /Applications and relaunch. Returns true when a
+// relaunch is underway (caller must stop init). `existsAndRunning` -> another
+// copy owns the slot; don't fight it. `exists` -> stale copy; replace it.
+function maybeRelocateToApplications(): boolean {
+  if (
+    !shouldAttemptRelocate({
+      isMac: IS_MAC,
+      isPackaged: IS_PACKAGED,
+      noAutoMove: process.env.HERMES_DESKTOP_NO_AUTO_MOVE === '1',
+      isInApplicationsFolder: app.isInApplicationsFolder(),
+    })
+  )
+    return false
+  try {
+    const moved = app.moveToApplicationsFolder({ conflictHandler: (type: string) => type !== 'existsAndRunning' })
+    if (moved) rememberLog('[install] relocated into /Applications; relaunching')
+    return moved
+  } catch (err) {
+    rememberLog(`[install] move to /Applications skipped: ${(err as Error).message}`)
+    return false
+  }
+}
+
+// Pin the /Applications copy to the Dock once. macOS has no Electron API for
+// this, so we append to com.apple.dock's persistent-apps and restart the Dock.
+// Guarded by a userData marker + membership check so we never duplicate tiles.
+function maybePinToDock(): void {
+  const marker = path.join(app.getPath('userData'), DOCK_PINNED_MARKER)
+  let bundle: string | null = null
+  try {
+    bundle = app.isInApplicationsFolder() ? runningAppBundle() : null
+  } catch {
+    return
+  }
+  if (
+    !shouldPinDock({
+      isMac: IS_MAC,
+      isPackaged: IS_PACKAGED,
+      noDockPin: process.env.HERMES_DESKTOP_NO_DOCK_PIN === '1',
+      markerExists: fileExists(marker),
+      isInApplicationsFolder: true,
+      bundle,
+    })
+  )
+    return
+
+  const url = dockTileUrl(bundle as string)
+  const done = (note?: object) => {
+    try {
+      fs.writeFileSync(marker, JSON.stringify({ bundle, pinnedAt: new Date().toISOString(), ...note }) + '\n')
+    } catch {
+      // best-effort; we re-check next launch (membership guard dedupes)
+    }
+  }
+
+  try {
+    const apps = execFileSync('defaults', ['read', 'com.apple.dock', 'persistent-apps'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }) as unknown as string
+    if (dockTileAlreadyPresent(apps, url)) return done({ alreadyPresent: true })
+  } catch {
+    // persistent-apps may not exist yet; -array-add creates it
+  }
+
+  try {
+    execFileSync('defaults', ['write', 'com.apple.dock', 'persistent-apps', '-array-add', buildDockTile(url)], {
+      stdio: 'ignore',
+    })
+    // Flush the write through cfprefsd before restarting the Dock, otherwise
+    // the Dock reloads stale prefs and our tile is lost in the race.
+    execFileSync('defaults', ['read', 'com.apple.dock', 'persistent-apps'], { stdio: 'ignore' })
+    execFileSync('killall', ['Dock'], { stdio: 'ignore' })
+    done()
+    rememberLog(`[install] pinned to Dock: ${url}`)
+  } catch (err) {
+    rememberLog(`[install] Dock pin skipped: ${(err as Error).message}`)
+  }
 }
 
 // ── Pre-flight state.db integrity guard (#68474) ─────────────────────
@@ -16159,6 +16259,11 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
+  // macOS: relocate into /Applications before anything else so setup + state
+  // land in the final location; on success this relaunches, so bail here.
+  if (maybeRelocateToApplications()) return
+  maybePinToDock()
+
   // Warm the login-shell PATH resolution immediately so it usually completes
   // before the backend start path awaits the same single-flight promise.
   void ensureLoginShellPath()
