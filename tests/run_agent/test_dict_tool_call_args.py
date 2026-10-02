@@ -76,3 +76,21 @@ def test_tool_call_validation_accepts_dict_arguments(monkeypatch):
     # The exact suffix wording is owned by conversation_loop; this test only
     # cares that the model's actual text ('done') survives at the start.
     assert result["final_response"].startswith("done")
+
+
+def test_tool_call_argument_parser_accepts_structured_values():
+    from agent.tool_executor import _parse_tool_arguments
+
+    args, error = _parse_tool_arguments({"action": "send", "target": "telegram:user", "message": "Test"})
+
+    assert error is None
+    assert args == {"action": "send", "target": "telegram:user", "message": "Test"}
+
+
+def test_tool_call_argument_parser_rejects_non_object_values():
+    from agent.tool_executor import _parse_tool_arguments
+
+    args, error = _parse_tool_arguments(["telegram:user", "Test"])
+
+    assert args == {}
+    assert error is not None
