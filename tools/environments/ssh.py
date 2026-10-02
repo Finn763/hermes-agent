@@ -43,6 +43,52 @@ def _ensure_ssh_available() -> None:
         )
 
 
+def _pub_fields(key_text: str) -> tuple[str, str] | None:
+    fields = key_text.strip().split()
+    if len(fields) < 2:
+        return None
+    return fields[0], fields[1]
+
+
+def _stale_pub_warning(key_path: str) -> str | None:
+    # ponytail: compares type+blob only; comment drift ignored. Upgrade path:
+    # full fingerprint compare if openssh changes sidecar semantics.
+    """Best-effort stale `<key>.pub` sidecar check (#25391).
+
+    ``ssh-keygen -lf <private>`` and ``ssh -i <private>`` prefer the
+    adjacent ``<private>.pub`` when present, so a stale sidecar produces a
+    wrong fingerprint / wrong identity while ``ssh-keygen -y`` looks fine.
+    Non-blocking: missing/unreadable sidecar or keygen failure -> None.
+    """
+    if not key_path:
+        return None
+    priv = Path(key_path).expanduser()
+    pub = priv.with_name(f"{priv.name}.pub")
+    if not pub.exists():
+        return None
+    try:
+        r = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(priv)],
+            capture_output=True, input="", text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        sidecar = pub.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    derived, stored = _pub_fields(r.stdout), _pub_fields(sidecar)
+    if not derived or not stored or derived == stored:
+        return None
+    return (
+        f"SSH public key sidecar {pub} does not match private key {priv}. "
+        f"Regenerate it: ssh-keygen -y -f {shlex.quote(str(priv))} > "
+        f"{shlex.quote(str(pub))}."
+    )
+
+
 class SSHEnvironment(BaseEnvironment):
     """Run commands on a remote machine over SSH.
 
@@ -75,6 +121,9 @@ class SSHEnvironment(BaseEnvironment):
         ).hexdigest()[:16]
         self.control_socket = self.control_dir / f"{_socket_id}.sock"
         _ensure_ssh_available()
+        self._key_sidecar_warning = _stale_pub_warning(self.key_path)
+        if self._key_sidecar_warning:
+            logger.warning(self._key_sidecar_warning)
         self._establish_connection()
         self._remote_home = self._detect_remote_home()
 
@@ -121,6 +170,8 @@ class SSHEnvironment(BaseEnvironment):
             )
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
+                if getattr(self, "_key_sidecar_warning", None):
+                    error_msg = f"{error_msg}\n{self._key_sidecar_warning}"
                 raise EnvironmentConnectionError(
                     f"SSH connection failed: {error_msg}",
                     retry_hint=(

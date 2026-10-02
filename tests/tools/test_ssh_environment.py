@@ -191,6 +191,65 @@ class TestSSHPreflight:
         assert env.user == "alice"
 
 
+class TestStalePubSidecar:
+    """#25391: `ssh-keygen -lf <priv>` prefers adjacent `<priv>.pub`,
+    so a stale sidecar misreports the fingerprint while `-y` looks fine."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_connection(self, monkeypatch):
+        real_run = subprocess.run
+
+        def _run(cmd, *a, **k):
+            if isinstance(cmd, list) and cmd[:1] in (["ssh"], ["scp"]):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+        monkeypatch.setattr("tools.environments.ssh.subprocess.run", _run)
+        monkeypatch.setattr("tools.environments.base.time.sleep", lambda _: None)
+
+    def _gen(self, path, comment="t@t"):
+        r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "",
+                            "-f", str(path), "-C", comment, "-q"],
+                           capture_output=True)
+        assert r.returncode == 0, "ssh-keygen unavailable"
+
+    def test_stale_sidecar_detected(self, tmp_path):
+        priv = tmp_path / "k"
+        other = tmp_path / "o"
+        self._gen(priv, "good@t")
+        self._gen(other, "stale@t")
+        (tmp_path / "k.pub").write_text((tmp_path / "o.pub").read_text())
+        assert ssh_env._stale_pub_warning(str(priv)) is not None
+
+    def test_matching_sidecar_ok(self, tmp_path):
+        priv = tmp_path / "k"
+        self._gen(priv, "good@t")
+        assert ssh_env._stale_pub_warning(str(priv)) is None
+
+    def test_missing_sidecar_ok(self, tmp_path):
+        priv = tmp_path / "k"
+        self._gen(priv, "good@t")
+        (tmp_path / "k.pub").unlink()
+        assert ssh_env._stale_pub_warning(str(priv)) is None
+
+    def test_warning_appended_to_connection_error(self, tmp_path, monkeypatch):
+        from tools.environments.base import EnvironmentConnectionError
+        priv = tmp_path / "k"
+        other = tmp_path / "o"
+        self._gen(priv, "good@t")
+        self._gen(other, "stale@t")
+        (tmp_path / "k.pub").write_text((tmp_path / "o.pub").read_text())
+
+        def _fail(cmd, **kw):
+            if isinstance(cmd, list) and cmd[:1] == ["ssh"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="",
+                                                   stderr="Permission denied")
+            return real_run(cmd, **kw)
+        real_run = subprocess.run
+        monkeypatch.setattr("tools.environments.ssh.subprocess.run", _fail)
+        with pytest.raises(EnvironmentConnectionError, match=r"(?i)sidecar|\.pub"):
+            ssh_env.SSHEnvironment(host="h", user="u", key_path=str(priv))
+
+
 def _setup_ssh_env(monkeypatch, persistent: bool):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     monkeypatch.setenv("TERMINAL_SSH_HOST", _SSH_HOST)
