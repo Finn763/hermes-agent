@@ -167,8 +167,9 @@ def test_delegate_task_credentials_cfg_overrides_delegation_config(monkeypatch):
 
     seen = {}
 
-    def fake_resolve(cfg, parent_agent):
+    def fake_resolve(cfg, parent_agent, allow_runtime_inherit=True):
         seen["cfg"] = cfg
+        seen["allow_runtime_inherit"] = allow_runtime_inherit
         return {
             "model": cfg.get("model"), "provider": None, "base_url": None,
             "api_key": None, "api_mode": None, "command": None, "args": None,
@@ -197,6 +198,9 @@ def test_delegate_task_credentials_cfg_overrides_delegation_config(monkeypatch):
     parsed = json.loads(out)
     assert parsed["status"] == "dispatched"
     assert seen["cfg"] == override
+    # Per-call pins are explicit routing: the #26722 static-default guard
+    # must stay off for them.
+    assert seen["allow_runtime_inherit"] is False
 
 
 # ---------------------------------------------------------------------------

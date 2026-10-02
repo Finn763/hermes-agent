@@ -264,7 +264,11 @@ class TestDelegateTask(unittest.TestCase):
         self.assertIn("depth limit", result["error"].lower())
 
 
-    def test_child_inherits_runtime_credentials(self):
+    @patch("tools.delegate_tool._load_config")
+    def test_child_inherits_runtime_credentials(self, mock_cfg):
+        # Issue #26722: static delegation.base_url must not beat the parent's
+        # live runtime endpoint when no delegation.api_key pins the config.
+        mock_cfg.return_value = {"base_url": "http://127.0.0.1:8091/v1"}
         parent = _make_mock_parent(depth=0)
         parent.base_url = "https://chatgpt.com/backend-api/codex"
         parent.api_key="***"

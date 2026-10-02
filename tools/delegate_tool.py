@@ -3736,7 +3736,11 @@ def delegate_task(
     # without touching the global delegation pin.
     try:
         creds = _resolve_delegation_credentials(
-            credentials_cfg if credentials_cfg else cfg, parent_agent
+            credentials_cfg if credentials_cfg else cfg,
+            parent_agent,
+            # Per-call pins (e.g. auxiliary.review) are explicit routing —
+            # never second-guessed by the #26722 static-default guard.
+            allow_runtime_inherit=not credentials_cfg,
         )
     except ValueError as exc:
         return tool_error(str(exc))
@@ -4451,7 +4455,9 @@ def _resolve_child_credential_pool(
     return None
 
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
+def _resolve_delegation_credentials(
+    cfg: dict, parent_agent, allow_runtime_inherit: bool = True
+) -> dict:
     """Resolve credentials for subagent delegation.
 
     If ``delegation.base_url`` is configured, subagents use that direct
@@ -4489,6 +4495,29 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     _is_native_sdk_provider = _provider_lower in _NATIVE_SDK_PROVIDERS
 
     if configured_base_url and not _is_native_sdk_provider:
+        # Issue #26722: a bare delegation.base_url with no delegation.api_key
+        # is a static default, not an explicit pin. When the parent is live on
+        # a different endpoint (runtime override), the static URL + parent key
+        # mix can never authenticate — inherit the parent's runtime instead.
+        # An explicit delegation.api_key, a delegation.provider pin, or a
+        # per-call credentials_cfg pin still wins over the parent.
+        # ponytail: static-path-only guard; cross-provider routing is untouched.
+        if configured_api_key is None and allow_runtime_inherit:
+            _parent_live_url = _inherit_parent_base_url(
+                parent_agent, getattr(parent_agent, "base_url", None)
+            )
+            if _parent_live_url and _normalized_runtime_url(
+                _parent_live_url
+            ) != _normalized_runtime_url(configured_base_url):
+                return {
+                    "model": configured_model,
+                    "provider": None,
+                    "base_url": None,
+                    "api_key": None,
+                    "api_mode": None,
+                    "request_overrides": None,
+                    "max_output_tokens": None,
+                }
         # When delegation.api_key is not set, return None so _build_child_agent
         # falls back to the parent agent's API key via the credential inheritance
         # path (effective_api_key = override_api_key or parent_api_key). This
