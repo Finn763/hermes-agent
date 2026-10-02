@@ -34,6 +34,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 
 /** Default probe budget. 5s false-negativeed healthy Windows cold starts (#61764). */
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000
@@ -120,7 +122,11 @@ function execProbeSync(
  * @returns {string}
  */
 function hermesRuntimeImportProbe() {
-  return 'import yaml; import dotenv; import hermes_cli.config'
+  // dashboard_auth is the backend's first heavy import on the serve path
+  // (via web_server); --version exits through the ultrafast fast path
+  // before any of this loads, so a global install missing dashboard_auth
+  // answers --version fine and then crash-loops the backend (#40702).
+  return 'import yaml; import dotenv; import hermes_cli.config; import hermes_cli.dashboard_auth'
 }
 
 /**
@@ -133,9 +139,11 @@ function hermesRuntimeImportProbe() {
  * site-packages -- and the resolver returns a backend that immediately
  * dies on spawn.
  *
- * The probe intentionally imports hermes_cli.config, not just the top-level
- * package: a broken/empty Windows launcher venv can still see the source tree
- * through PYTHONPATH but lack PyYAML, then die on the first real CLI import.
+ * The probe intentionally imports through hermes_cli.dashboard_auth, not
+ * just the top-level package: a broken/empty Windows launcher venv can
+ * still see the source tree through PYTHONPATH but lack PyYAML, then die
+ * on the first real CLI import -- and a system-wide install missing
+ * dashboard_auth answers --version fine but crash-loops the backend (#40702).
  *
  * @param {string} pythonPath - Absolute path to a python.exe / python.
  * @param {object} [opts.env] - Additional environment for the probe.
@@ -190,9 +198,81 @@ function shouldTrustHermesOverride(hermesOverride?: string) {
   return typeof hermesOverride === 'string' && hermesOverride.trim().length > 0
 }
 
+/**
+ * Find the interpreter behind a Windows `hermes` console-script shim so the
+ * resolver can probe it directly instead of trusting `--version`.
+ *
+ * Both pip layouts are covered: `<prefix>\Scripts\python.exe` (venv) and
+ * `<prefix>\python.exe` (global CPython install, the #40702 repro shape
+ * `C:\Python313\Scripts\hermes.EXE`). Returns null when the command is not
+ * a Scripts\hermes(.exe) shim or no sibling interpreter exists on disk.
+ *
+ * Uses path.win32 so behaviour is identical on every CI platform.
+ */
+// ponytail: only Scripts\hermes(.exe) layouts get the import probe; other
+// wrappers (.cmd shims, nix store paths) keep the legacy --version check.
+function siblingPythonForHermesCommand(
+  hermesCommand: string,
+  opts: { exists?: (p: string) => boolean } = {}
+): string | null {
+  if (!hermesCommand || typeof hermesCommand !== 'string') {
+    return null
+  }
+
+  const win = path.win32
+  const command = String(hermesCommand)
+
+  if (!/^hermes(?:\.exe)?$/i.test(win.basename(command))) {
+    return null
+  }
+
+  const scriptsDir = win.dirname(command)
+
+  if (win.basename(scriptsDir).toLowerCase() !== 'scripts') {
+    return null
+  }
+
+  const exists =
+    opts.exists ||
+    ((p: string) => {
+      try {
+        return fs.statSync(p).isFile()
+      } catch {
+        return false
+      }
+    })
+
+  const prefix = win.dirname(scriptsDir)
+  const venvPython = win.join(prefix, 'Scripts', 'python.exe')
+
+  if (exists(venvPython)) {
+    return venvPython
+  }
+
+  const globalPython = win.join(prefix, 'python.exe')
+
+  if (exists(globalPython)) {
+    return globalPython
+  }
+
+  return null
+}
+
 function verifyHermesCli(hermesCommand: string, opts?: { shell?: boolean }) {
   if (!hermesCommand) {
     return false
+  }
+
+  // A Windows pip shim answers --version through the ultrafast fast path
+  // before heavy imports load, so --version cannot see a broken install
+  // missing dashboard_auth (#40702). When the interpreter behind the shim
+  // is on disk, run the import probe on it instead: failure falls through
+  // to bootstrap, which also un-breaks "Repair/Reinstall" (it re-resolved
+  // the same dead global binary every cycle).
+  const sibling = siblingPythonForHermesCommand(hermesCommand)
+
+  if (sibling) {
+    return canImportHermesCli(sibling)
   }
 
   try {
@@ -217,5 +297,6 @@ export {
   PROBE_TIMEOUT_MS,
   resolveProbeTimeoutMs,
   shouldTrustHermesOverride,
+  siblingPythonForHermesCommand,
   verifyHermesCli
 }

@@ -19,6 +19,7 @@ import {
   PROBE_TIMEOUT_MS,
   resolveProbeTimeoutMs,
   shouldTrustHermesOverride,
+  siblingPythonForHermesCommand,
   verifyHermesCli
 } from './backend-probes'
 
@@ -57,6 +58,42 @@ test('hermes runtime import probe checks config dependencies', () => {
   // passed the old probe and produced an unrecoverable boot loop.
   assert.match(probe, /\bimport dotenv\b/)
   assert.match(probe, /\bimport hermes_cli\.config\b/)
+})
+
+// #40702: a system-wide hermes install can be broken in a way --version
+// never sees (the ultrafast version path exits before heavy imports), yet
+// the backend dies on its first real import with
+// ModuleNotFoundError: No module named 'hermes_cli.dashboard_auth'.
+// The import probe must cover the dashboard serve chain or the resolver
+// keeps handing boot to the dead global binary in a crash loop.
+test('hermes runtime import probe covers the dashboard serve chain', () => {
+  const probe = hermesRuntimeImportProbe()
+  assert.match(probe, /\bimport hermes_cli\.dashboard_auth\b/)
+})
+
+test('siblingPythonForHermesCommand finds the venv interpreter', () => {
+  const got = siblingPythonForHermesCommand('C:\\Proj\\venv\\Scripts\\hermes.exe', {
+    exists: p => p === 'C:\\Proj\\venv\\Scripts\\python.exe'
+  })
+
+  assert.equal(got, 'C:\\Proj\\venv\\Scripts\\python.exe')
+})
+
+test('siblingPythonForHermesCommand falls back to the global CPython layout', () => {
+  // #40702 repro shape: C:\Python313\Scripts\hermes.EXE has no
+  // Scripts\python.exe next to it; the interpreter is one level up.
+  const got = siblingPythonForHermesCommand('C:\\Python313\\Scripts\\hermes.EXE', {
+    exists: p => p === 'C:\\Python313\\python.exe'
+  })
+
+  assert.equal(got, 'C:\\Python313\\python.exe')
+})
+
+test('siblingPythonForHermesCommand ignores non-shim layouts', () => {
+  assert.equal(siblingPythonForHermesCommand('/usr/local/bin/hermes', { exists: () => true }), null)
+  assert.equal(siblingPythonForHermesCommand('C:\\Tools\\hermes.exe', { exists: () => true }), null)
+  assert.equal(siblingPythonForHermesCommand('C:\\Python313\\Scripts\\hermes.EXE', { exists: () => false }), null)
+  assert.equal(siblingPythonForHermesCommand('', { exists: () => true }), null)
 })
 
 test('explicit Hermes override is authoritative', () => {
