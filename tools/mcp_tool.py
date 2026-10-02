@@ -2396,6 +2396,7 @@ class MCPServerTask:
         "_reconnect_retries", "_session_proven", "_was_parked",
         "_inflight_tasks", "_reconnecting", "_suspect_reason",
         "_teardown_race", "_permanent_grace_used", "_stdio_child_pids",
+        "_sse_fallback_state", "_sse_fallback_config",
     )
 
     def __init__(self, name: str):
@@ -2455,6 +2456,11 @@ class MCPServerTask:
         # (#81995).
         self._stdio_child_pids: Set[int] = set()
         self._auth_type: str = ""
+        # One-shot SSE fallback state (#31346): None → "active" (currently
+        # retrying via SSE) → "used" (SSE failed, original transport
+        # restored). Module-level docstring in run() covers the trigger.
+        self._sse_fallback_state: Optional[str] = None
+        self._sse_fallback_config: dict = {}
         self._refresh_lock = asyncio.Lock()
         # MCP stdio sessions are a single JSON-RPC stream. Some servers emit
         # list_changed notifications during startup; if the notification
@@ -4106,6 +4112,40 @@ class MCPServerTask:
                 # (e.g. "BrokenPipeError: ").
                 root = _unwrap_exception_group(exc)
                 failure_class = _classify_mcp_failure(root)
+                # SSE-only server behind the default StreamableHTTP transport
+                # (#31346): such servers answer the initialize POST with 202
+                # "accepted" and post the result on the SSE stream, so the
+                # StreamableHTTP client waits out connect_timeout (surfacing
+                # later as an opaque CancelledError from the outer discovery
+                # timeout). Retry once via the SSE transport instead of
+                # burning the backoff ladder on the wrong protocol; if SSE
+                # also fails the original transport is restored below.
+                # ponytail: single in-memory retry only, add persistent
+                # transport probing if SSE-only servers get common.
+                if self._sse_fallback_state == "active":
+                    self._sse_fallback_state = "used"
+                    config = self._sse_fallback_config
+                    self._config = config
+                elif (
+                    not self._ready.is_set()
+                    and self.initialize_result is None
+                    and isinstance(root, TimeoutError)
+                    and self._is_http()
+                    and config.get("transport") != "sse"
+                    and sse_client is not None
+                    and self._sse_fallback_state is None
+                ):
+                    self._sse_fallback_state = "active"
+                    self._sse_fallback_config = config
+                    config = dict(config, transport="sse")
+                    self._config = config
+                    logger.info(
+                        "MCP server '%s': StreamableHTTP handshake timed out "
+                        "-- retrying once via SSE transport (set "
+                        "mcp_servers.%s.transport: sse to skip the probe)",
+                        self.name, self.name,
+                    )
+                    continue
                 if self._is_recycled_stdio():
                     logger.warning(
                         "MCP server '%s': lazy reconnect after stdio recycle "
