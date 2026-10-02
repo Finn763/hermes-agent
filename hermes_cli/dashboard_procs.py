@@ -356,6 +356,21 @@ def _kill_stale_dashboard_processes(
     if not pids:
         return {"matched": [], "killed": [], "failed": []}
 
+    # Target-side Desktop guard (#39188): the HERMES_DESKTOP_CHILD_PID
+    # exclusion above only works when the *caller* runs under Desktop. An
+    # external `hermes dashboard --stop` (legacy LaunchAgent, manual shell)
+    # carries no such env and would SIGTERM the embedded backend Desktop
+    # manages, looping the supervisor. Spare PIDs whose own environ
+    # carries HERMES_DESKTOP=1.
+    # ponytail: per-PID environ scan; fine, n is tiny, upgrade only if slow.
+    desktop_owned = {pid for pid in pids if _pid_is_desktop_backend(pid)}
+    if desktop_owned:
+        for pid in sorted(desktop_owned):
+            print(f"    - skipping Desktop-managed backend PID {pid} (HERMES_DESKTOP=1)")
+        pids = [pid for pid in pids if pid not in desktop_owned]
+        if not pids:
+            return {"matched": [], "killed": [], "failed": []}
+
     # Before killing, snapshot systemd cgroup info for each PID so we can
     # restart supervised services after the kill (the cgroup disappears
     # along with the process).  Only meaningful on Linux, and only when the
@@ -702,6 +717,32 @@ def _exclude_pids_from_env() -> set[int]:
         except ValueError:
             continue
     return out
+
+
+def _pid_is_desktop_backend(pid: int) -> bool:
+    """True when *pid*'s own environ marks it Desktop-spawned (#39188).
+
+    Desktop Electron spawns every backend with ``HERMES_DESKTOP=1``. The
+    caller-side ``HERMES_DESKTOP_CHILD_PID`` exclusion only works when the
+    *caller* runs under Desktop; an external ``hermes dashboard --stop``
+    (legacy LaunchAgent, manual shell) carries no such env and would
+    SIGTERM the embedded backend Desktop manages, dropping the
+    supervisor into a tight respawn/SIGTERM loop. Never raises.
+    """
+    try:
+        import psutil
+
+        try:
+            return psutil.Process(pid).environ().get("HERMES_DESKTOP") == "1"
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except (OSError, PermissionError):
+        return False
+    return b"HERMES_DESKTOP=1\x00" in raw or raw.endswith(b"HERMES_DESKTOP=1")
 
 
 # --- SSH remote-backend lock ownership -------------------------------------

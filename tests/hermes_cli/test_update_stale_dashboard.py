@@ -769,3 +769,63 @@ class TestPostUpdateStaleModuleReload:
 
         assert "hermes_cli._subprocess_compat" in reloaded
         assert "hermes_cli.dashboard_procs" in reloaded
+
+
+class TestStopSkipsDesktopSpawnedBackend:
+    """#39188: an external ``hermes dashboard --stop`` (legacy LaunchAgent,
+    manual shell — no HERMES_DESKTOP_CHILD_PID in the *caller* env) must
+    not SIGTERM the Desktop embedded backend (HERMES_DESKTOP=1 in the
+    *target* environ). Killing it drops the supervisor into a tight
+    respawn/SIGTERM loop."""
+
+    def test_stop_spares_desktop_backend_pid(self, monkeypatch, capsys):
+        import signal as _signal
+
+        monkeypatch.delenv("HERMES_DESKTOP_CHILD_PID", raising=False)
+        killed: list[tuple[int, int]] = []
+        taskkilled: list[int] = []
+
+        def fake_kill(pid, sig):
+            killed.append((pid, sig))
+            raise ProcessLookupError  # probe-after-SIGTERM: "process gone"
+
+        def fake_run(args, *a, **kw):
+            if isinstance(args, list) and args[:1] == ["taskkill"]:
+                taskkilled.append(int(args[2]))
+                return MagicMock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected subprocess.run call: {args}")
+
+        with patch("hermes_cli.main._find_stale_dashboard_pids",
+                   return_value=[11111, 22222]), \
+             patch("hermes_cli.dashboard_procs._pid_is_desktop_backend",
+                   side_effect=lambda pid: pid == 11111), \
+             patch("os.kill", side_effect=fake_kill), \
+             patch("subprocess.run", side_effect=fake_run):
+            result = _kill_stale_dashboard_processes(reason="requested via --stop")
+
+        if sys.platform == "win32":
+            assert taskkilled == [22222]
+        else:
+            sigterms = [pid for pid, sig in killed if sig == _signal.SIGTERM]
+            assert sigterms == [22222]
+        assert result["matched"] == [22222]
+        assert result["killed"] == [22222]
+        assert "11111" in capsys.readouterr().out
+
+    def test_helper_reads_target_environ(self, monkeypatch):
+        import types
+
+        from hermes_cli import dashboard_procs
+
+        fake_psutil = types.ModuleType("psutil")
+
+        class _FakeProc:
+            def __init__(self, pid):
+                pass
+
+            def environ(self):
+                return {"HERMES_DESKTOP": "1"}
+
+        fake_psutil.Process = _FakeProc
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+        assert dashboard_procs._pid_is_desktop_backend(99999) is True
