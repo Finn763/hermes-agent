@@ -20941,6 +20941,54 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 # Main Entry Point
 # ============================================================================
 
+def _kanban_worker_startup_guard() -> bool:
+    """Re-verify this worker still owns its dispatch claim (#22927).
+
+    The dispatcher claims ``ready -> running`` THEN spawns the worker;
+    in that window an operator (or another tick) can block / archive /
+    reclaim / reassign the task. Returns True iff the task is still
+    ``running`` under this worker's own run id + claim lock.
+
+    Fail-open on DB errors: a transient sqlite lock must never wedge a
+    worker at startup (same precedent as the image-ref enrichment
+    below). A genuinely missing task row returns False — no row, no work.
+    """
+    # ponytail: fail-open on infra errors; exit 0 reuses the clean-exit
+    # path (detect_crashed_workers skips non-running tasks, so no failure
+    # is charged). Dedicated sentinel exit code if dispatchers ever need
+    # to distinguish a stale-claim exit from real work.
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return True
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect()
+        try:
+            task = _kb.get_task(conn, task_id)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("kanban startup guard unavailable: %s", exc)
+        return True
+    if task is None or task.status != "running":
+        return False
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    if raw_run_id:
+        try:
+            if int(raw_run_id) != (task.current_run_id or -1):
+                return False
+        except ValueError:
+            return False
+    claim_lock = (os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if claim_lock and (task.claim_lock or "") != claim_lock:
+        return False
+    return True
+
+
 def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     """Drive a kanban goal_mode worker through the Ralph-style goal loop.
 
@@ -21416,6 +21464,16 @@ def main(
         # takes the deterministic approvals.single_query_mode path instead of
         # waiting the full timeout. See #86878.
         os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
+        if not _kanban_worker_startup_guard():
+            # Dispatch->startup race (#22927): the claim died while the
+            # worker process was spawning. Exit 0 — not a failure, so
+            # crash accounting leaves the task alone.
+            print(
+                "kanban worker: task changed state after dispatch; "
+                "exiting without running",
+                file=sys.stderr,
+            )
+            sys.exit(0)
         if not cli._claim_active_session("cli", stderr=bool(quiet)):
             sys.exit(1)
         try:
