@@ -398,6 +398,39 @@ class TestContinuousLoopSimulation:
         assert fake_recorder.cancelled >= 1
 
 
+    def test_transient_restart_failure_does_not_kill_loop(
+        self, fake_recorder, monkeypatch
+    ):
+        """#52573: one transient rec.start() failure must not end the session.
+
+        macOS CoreAudio can reject the mic re-open right after TTS
+        playback; the loop retries and stays alive, reporting listening.
+        """
+        import hermes_cli.voice as voice
+
+        monkeypatch.setattr(
+            voice,
+            "transcribe_recording",
+            lambda _p: {"success": True, "transcript": "hello world"},
+        )
+        monkeypatch.setattr(voice, "is_whisper_hallucination", lambda _t: False)
+
+        statuses = []
+        voice.start_continuous(
+            on_transcript=lambda _t: None,
+            on_status=lambda s: statuses.append(s),
+        )
+        assert fake_recorder.start_calls == 1
+
+        fake_recorder.fail_next_start = True
+        fake_recorder.last_callback()
+
+        assert voice.is_continuous_active() is True
+        assert fake_recorder.start_calls == 2
+        assert statuses[-1] == "listening"
+
+        voice.stop_continuous()
+
     def test_silent_cycles_do_not_count_while_tts_playing(self, fake_recorder, monkeypatch):
         """TTS speaking: the user is listening, not ignoring the mic."""
         import hermes_cli.voice as voice

@@ -844,9 +844,17 @@ def _continuous_on_silence() -> None:
     # back in the mic and gets re-submitted.
     if not _tts_playing.is_set():
         _debug("_continuous_on_silence: waiting for TTS to finish")
-        _tts_playing.wait(timeout=60)
+        _tts_finished = _tts_playing.wait(timeout=60)
         import time as _time
-        _time.sleep(0.3)
+        # ponytail: fixed gap, longer on darwin where CoreAudio HAL needs
+        # extra time to release the input stream; retry loop below covers
+        # the residual race if the gap is still short.
+        _time.sleep(1.0 if sys.platform == "darwin" else 0.3)
+        if not _tts_finished and not _tts_playing.is_set():
+            _debug(
+                "_continuous_on_silence: TTS wait timed out with audio "
+                "still playing — mic re-open will retry below"
+            )
 
         # User may have stopped the loop during the wait.
         with _continuous_lock:
@@ -858,11 +866,41 @@ def _continuous_on_silence() -> None:
         # Restart for the next turn.
         _debug(f"_continuous_on_silence: restarting loop (no_speech={no_speech})")
         _play_beep(frequency=880, count=1)
-        try:
-            rec.start(on_silence_stop=_continuous_on_silence)
-        except Exception as e:
-            logger.error("failed to restart continuous recording: %s", e)
-            _debug(f"_continuous_on_silence: restart raised {type(e).__name__}: {e}")
+        # ponytail: fixed 3-attempt retry with linear backoff; a single
+        # transient CoreAudio failure no longer kills the session, while a
+        # persistent failure still halts the loop below.
+        _restart_error: Exception | None = None
+        for _attempt in range(3):
+            try:
+                rec.start(on_silence_stop=_continuous_on_silence)
+                _restart_error = None
+                break
+            except Exception as e:
+                _restart_error = e
+                logger.warning(
+                    "continuous restart attempt %d/3 failed: %s", _attempt + 1, e
+                )
+                _debug(
+                    f"_continuous_on_silence: restart attempt {_attempt + 1}/3 "
+                    f"raised {type(e).__name__}: {e}"
+                )
+                import time as _retry_time
+                _retry_time.sleep(0.5 * (_attempt + 1))
+                with _continuous_lock:
+                    if not _continuous_active:
+                        _debug(
+                            "_continuous_on_silence: stopped during restart "
+                            "retry — abort"
+                        )
+                        return
+        if _restart_error is not None:
+            logger.error(
+                "failed to restart continuous recording: %s", _restart_error
+            )
+            _debug(
+                f"_continuous_on_silence: restart failed after 3 attempts: "
+                f"{_restart_error}"
+            )
             with _continuous_lock:
                 _continuous_active = False
             if on_status:
