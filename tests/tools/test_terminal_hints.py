@@ -27,6 +27,17 @@ class TestAnnotateFailureBasics:
         assert "python3" not in hint
 
 
+class TestTimeoutWithoutOutput:
+    def test_timeout_no_output_suggests_disambiguation(self):
+        hint = annotate_failure("ls -1f /Volumes/SSD/x", 124, "[Command timed out after 60s]")
+        assert "stat" in hint.lower()
+        assert "retry" in hint.lower()
+
+    def test_timeout_with_partial_output_keeps_generic_hint(self):
+        hint = annotate_failure("sleep 999", 124, "partial line\n[Command timed out after 60s]")
+        assert "timeout" in hint.lower()
+
+
 class TestGhUnknownJsonField:
     def test_field_name_extracted(self):
         out = 'Unknown JSON field: "authorAssociation"\nAvailable fields:\n  additions\n  author'

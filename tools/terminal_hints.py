@@ -250,6 +250,14 @@ def annotate_masked_success(command: str, output: str) -> Optional[str]:
     return None
 
 
+# ponytail: keyed on the timeout-marker text; re-check if _wait_for_process changes its marker.
+_TIMEOUT_MARKER_RE = re.compile(r"\[Command timed out after \d+s\]")
+
+
+def _is_timeout_without_output(output: str) -> bool:
+    return not _TIMEOUT_MARKER_RE.sub("", output or "").strip()
+
+
 def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]:
     """Return one short recovery hint for a failed command, or None.
 
@@ -272,4 +280,14 @@ def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]
                 continue
             if hint:
                 return hint
+    if exit_code == 124 and _is_timeout_without_output(output):
+        return (
+            "Exit 124: the command hit its timeout with no output captured, which "
+            "proves nothing about the target — run ONE bounded metadata probe "
+            "(`stat`/`df`) before any enumeration retry; if metadata works "
+            "while listing stalls, suspect the runtime/session/capture path "
+            "(on macOS gateways: volume scope or removable-volume permission) "
+            "and refresh the session instead of retrying equivalent listing "
+            "commands."
+        )
     return _EXIT_CODE_HINTS.get(exit_code)
