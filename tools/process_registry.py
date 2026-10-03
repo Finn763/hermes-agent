@@ -2940,6 +2940,24 @@ class ProcessRegistry:
 process_registry = ProcessRegistry()
 
 
+def reap_orphaned_background_sessions(*, registry=None, source="cli_shutdown") -> int:
+    """Kill all running background sessions. Best-effort: never raises.
+
+    CLI exit path (#48987): on Windows a live child whose cwd sits inside a
+    user folder holds a directory handle, so the folder cannot be deleted
+    afterwards even as Administrator (WinError 32, ERROR_SHARING_VIOLATION).
+    ``_run_cleanup`` already reaps browsers/MCP servers/async delegations —
+    background terminal sessions were the one class left behind, orphaning
+    cwd handles past Hermes exit.
+    """
+    try:
+        reg = registry if registry is not None else process_registry
+        return reg.kill_all(source=source)
+    except Exception:
+        logger.debug("reap_orphaned_background_sessions failed", exc_info=True)
+        return 0
+
+
 def _format_age(seconds: float) -> str:
     """Human-friendly elapsed string ('18m', '2h3m', '45s')."""
     try:

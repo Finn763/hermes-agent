@@ -1203,6 +1203,13 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
         except Exception:
             pass
         try:
+            # Reap local background sessions (#48987): orphaned children hold
+            # cwd directory handles on Windows, locking user folders past exit.
+            from tools.process_registry import reap_orphaned_background_sessions
+            reap_orphaned_background_sessions()
+        except Exception:
+            pass
+        try:
             from tools.async_delegation import interrupt_all as _interrupt_async_delegations
             _interrupt_async_delegations(reason="CLI shutdown")
         except Exception:
