@@ -348,6 +348,26 @@ def _create_overrides(params: dict) -> tuple:
     return model_override, reasoning_override, service_tier_override
 
 
+def _create_info_route(reasoning_override, service_tier_override) -> dict:
+    """Route echo for the ``session.create`` reply's ``info`` (#125346).
+    The result contract types ``info`` as ``SessionLiveInfo`` (which carries
+    reasoning_effort / service_tier / fast), but the create path built a
+    model/provider-only dict, so a desktop plugin reading the create reply
+    could not tell which effort or tier the next turn will run. Both create
+    result sites share this helper so the idempotent retry echoes the stored
+    overrides, not just the fresh create.
+    Deliberate ceiling: ``reasoning_effort_wire`` stays unset here (ponytail:
+    the wire level is the route entry clamp's answer and needs the built agent)."""
+    effort = ""
+    if isinstance(reasoning_override, dict):
+        if reasoning_override.get("enabled") is False:
+            effort = "none"
+        elif str(reasoning_override.get("effort") or "").strip():
+            effort = str(reasoning_override.get("effort") or "").strip()
+    tier = str(service_tier_override or "")
+    return {"reasoning_effort": effort, "service_tier": tier, "fast": tier == "priority"}
+
+
 def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> dict:
     """``session.create``; ``copy_parent_history`` (``session.branch_stored``) reads the parent's
     transcript server-side and omits it from the reply."""
@@ -390,6 +410,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
                            else {"messages": _history_to_messages(history, profile_home=session.get("profile_home"))}),
                         "info": {"model": override.get("model") if override else _session_default_model(session),
                                  **({"provider": override["provider"]} if override.get("provider") else {}),
+                                 **_create_info_route(session.get("create_reasoning_override"), session.get("create_service_tier_override")),
                                  "tools": {}, "skills": {}, "cwd": session["cwd"], "branch": git_probe.branch(session["cwd"]),
                                  "project": _project_info_for_cwd(session["cwd"]), "lazy": True,
                                  "desktop_contract": DESKTOP_BACKEND_CONTRACT,
@@ -502,6 +523,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
         # Reflect the override now so the client doesn't clobber its sticky pick.
         "info": {"model": override.get("model") if override else _session_default_model(_sessions[sid]),
                  **({"provider": override["provider"]} if override.get("provider") else {}),
+                 **_create_info_route(create_reasoning_override, create_service_tier_override),
                  "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
