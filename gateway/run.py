@@ -30796,6 +30796,51 @@ def _gateway_stderr_formatter() -> logging.Formatter:
 
 
   # ownership guard inserted below (PR #93084)
+def _hermes_profile_home_mismatch() -> Optional[str]:
+    """Return a refusal reason when HERMES_PROFILE disagrees with HERMES_HOME.
+
+    Gateway identity files (PID, lock, runtime status) are scoped to
+    HERMES_HOME alone; HERMES_PROFILE is otherwise only kanban authorship
+    attribution. Two gateways started under one HERMES_HOME with different
+    HERMES_PROFILE values therefore share ``{HERMES_HOME}/gateway.pid``, and
+    the second ``--replace`` SIGKILLs the first (#30155). Refuse that
+    cross-kill fail-loud instead of silently taking the sibling down.
+
+    Returns a human-readable reason only on PROVEN misconfiguration: the var
+    names a valid, existing profile whose resolved home differs from this
+    process's HERMES_HOME. Unset, matching, invalid, or not-on-disk values
+    (plain authorship tags) return None so legacy and attribution-only
+    deployments replace exactly as before.
+    # ponytail: env-based identity can't tell an attribution-only
+    # HERMES_PROFILE from a real profile name unless that profile exists;
+    # upgrade path is persisting profile identity in the pid record.
+    """
+    want = os.environ.get("HERMES_PROFILE", "").strip()
+    if not want:
+        return None
+    try:
+        from gateway.status import _get_process_hermes_home, _same_hermes_home
+        from hermes_cli.profiles import resolve_profile_env
+
+        expected = resolve_profile_env(want)
+    except Exception:
+        return None
+    try:
+        our_home = _get_process_hermes_home()
+        if _same_hermes_home(expected, our_home):
+            return None
+    except Exception:
+        return None
+    return (
+        f"HERMES_PROFILE={want!r} resolves to {expected}, but this process "
+        f"runs under HERMES_HOME={our_home}. Sharing one HERMES_HOME across "
+        "profiles shares one gateway.pid, so --replace would SIGKILL the "
+        "sibling gateway. Give each profile its own HERMES_HOME "
+        f"(e.g. HERMES_HOME={expected} or 'hermes -p {want} gateway run "
+        "--replace')."
+    )
+
+
 def _replace_target_belongs_to_other_profile(existing_pid: int) -> bool:
     """Return True when ``--replace`` must refuse to signal ``existing_pid``.
 
@@ -31025,6 +31070,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     existing_pid = get_running_pid()
     if existing_pid is not None and existing_pid != os.getpid():
         if replace:
+            # Profile/home mismatch gate (#30155): HERMES_PROFILE names a
+            # profile but identity files are HERMES_HOME-scoped, so a
+            # mismatched pair shares one gateway.pid with the sibling.
+            # Refuse before the ownership gate — our own launch env is
+            # already proof enough, no sibling probe needed.
+            _profile_mismatch = _hermes_profile_home_mismatch()
+            if _profile_mismatch is not None:
+                logger.error("Refusing --replace: %s", _profile_mismatch)
+                print(f"\nRefusing --replace: {_profile_mismatch}\n")
+                return False
             # Cross-profile ownership gate (#89315): never signal a live
             # process we cannot prove belongs to this HERMES_HOME. A poisoned
             # PID record steering --replace at another profile's gateway is
