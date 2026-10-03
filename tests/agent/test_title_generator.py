@@ -86,6 +86,53 @@ class TestGenerateTitle:
         assert is_titleable_user_message(msg) is True
         assert derive_title(msg) == "Review @file:notes.txt and fix the off-by-one"
 
+    @pytest.mark.parametrize("opener", [
+        "ok",
+        "OK.",
+        "MODEL-OK",
+        "model_ok",
+        "test",
+        "Test...",
+        "testing",
+        "ping",
+        "Reply with exactly OK",
+    ])
+    def test_connectivity_probe_opener_yields_no_title_and_no_model_call(self, opener):
+        """#125274: probe openers ("MODEL-OK", "Reply with exactly OK") carry no topical
+        signal — persisting them as the instant title reproduces the junk in the sidebar,
+        and spending a model call on them cannot recover intent that was never there."""
+        assert is_titleable_user_message(opener) is False
+        assert derive_title(opener) is None
+        with patch("agent.title_generator.call_llm") as mock_call:
+            assert generate_title(opener) is None
+            mock_call.assert_not_called()
+
+    @pytest.mark.parametrize("opener", [
+        '{"output": "=== diff stat (truncated) ..."}',
+        '{"bytes_written": 3780, "dir": "/tmp/x"}',
+        '[{"a": 1}]',
+    ])
+    def test_structured_blob_opener_skips_instant_title_but_keeps_model_shot(self, opener):
+        """#125274: a pasted JSON/tool-result opener has content the model can name, but the
+        first-line slice would persist the raw blob as the instant title — so derive refuses
+        while the background model path still gets its attempt."""
+        assert derive_title(opener) is None
+        assert is_titleable_user_message(opener) is True
+
+    @pytest.mark.parametrize("opener", [
+        "test the login flow",
+        "testing the deploy pipeline",
+        "[WIP] Fix build",
+        "(WIP) Fix build",
+        "Fix the login button on mobile",
+        "Q4 budget review notes for the meeting",
+    ])
+    def test_topical_lookalikes_still_title(self, opener):
+        """The probe/blob guards are exact-shape only: real prose that merely starts with a
+        probe word, and bracketed tags that merely open with `[`, must keep titling."""
+        assert is_titleable_user_message(opener) is True
+        assert derive_title(opener) is not None
+
     def test_title_input_budget_and_manual_attachments_stay_unread(self):
         title_input = build_title_input("Describe the release plan", "p" * MAX_TITLE_INPUT_CHARS)
 

@@ -333,6 +333,7 @@ def build_title_input(user_message: str, title_preview: str | None = None) -> st
 def is_titleable_user_message(user_message: str) -> bool:
     """False for machine-authored openers and turns that reduce to nothing once scaffolding is stripped."""
     return (isinstance(user_message, str) and bool(user_message.strip()) and not user_message.lstrip().startswith(_MACHINE_PREFIXES)
+            and not _is_content_free_probe(user_message)
             and bool(_summarize_user_message(user_message).strip())
             # An attachment-only opener (manual attach, no paste preview) is a
             # file drop, not a request: deriving its "title" from the message
@@ -340,11 +341,43 @@ def is_titleable_user_message(user_message: str) -> bool:
             and not _attachment_only_opener(user_message))
 
 
+# Connectivity probes and pasted machine output carry no topical signal: titling a session after them
+# reproduces the junk verbatim in the sidebar, tab strip and switcher (#125274). The guards below are
+# deliberately exact-shape — a lone probe token or a brace-led dump — so real prose that merely starts
+# with a probe word ("test the login flow") and bracketed tags ("[WIP] Fix build") keep titling, and a
+# structured dump still gets its model-title attempt (the model reads the content; the first-line slice
+# cannot). A refused opener leaves the session untitled, and untitled sessions are retried on the next
+# substantive turn, so the name arrives one turn late instead of wrong forever.
+_CONTENT_FREE_PROBE_RE = re.compile(r"(?i)^(?:ok|model[\s_-]*ok|test(?:ing)?|ping)\s*\d*\s*[.!\u2026]*$")
+_REPLY_WITH_EXACTLY_RE = re.compile(r"(?i)^(?:reply|respond)\s+with\s+exactly\b")
+_JSON_BRACE_OPENER_RE = re.compile(r"^\{")
+_JSON_ARRAY_OPENER_RE = re.compile(r"^\[\s*[\{[\"\d-]")
+
+
+def _is_content_free_probe(message: str) -> bool:
+    """A connectivity/machine probe ("ok", "MODEL-OK", "test", "Reply with exactly OK"): no intent
+    was ever in the text, so neither the instant slice nor a model call can name the session."""
+    text = (message or "").strip()
+    return bool(text) and (_CONTENT_FREE_PROBE_RE.match(text) is not None
+                            or _REPLY_WITH_EXACTLY_RE.match(text) is not None)
+
+
+def _is_structured_blob_opener(message: str) -> bool:
+    """A pasted JSON/tool-result dump as the opener: worth a model read, but the first-line slice
+    would persist the raw blob as the title. The array arm requires a structural second character so
+    bracketed tags ("[WIP] Fix build") are not mistaken for JSON."""
+    text = (message or "").lstrip()
+    return bool(_JSON_BRACE_OPENER_RE.match(text) or _JSON_ARRAY_OPENER_RE.match(text))
+
+
 def derive_title(user_message: str, title_preview: str | None = None) -> Optional[str]:
     """Instant title: first meaningful line trimmed to a word boundary. No model, never fails."""
     # Attachment-only opener, no paste preview: a file drop has no topic —
     # refuse rather than name the session after the truncated path (#92068).
     if not title_preview and _attachment_only_opener(user_message):
+        return None
+    # Probe/blob opener: the slice IS the junk (#125274); the model path (or a later turn) names it.
+    if _is_content_free_probe(user_message) or _is_structured_blob_opener(user_message):
         return None
     line = " ".join(_first_line(build_title_input(user_message, title_preview)).split())
     if len(line) > MAX_DERIVED_TITLE_CHARS:
@@ -499,6 +532,10 @@ def generate_title(
         # refuse it rather than titling the session after the file path (#92068).
         not title_preview and _attachment_only_opener(user_snippet)
     ):
+        return None
+    if _is_content_free_probe(user_snippet):
+        # Probe opener (#125274): no topical signal, so no model call — the session stays
+        # untitled until a substantive turn names it, instead of burning one call per session.
         return None
     language = _title_language()
     # str.replace, not str.format: the prompt embeds literal JSON braces.
