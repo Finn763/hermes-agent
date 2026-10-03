@@ -941,6 +941,13 @@ PLATFORM_HINTS = {
         "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
         "inline, audio files as voice messages, and other files as attachments."
     ),
+    "dingtalk": (
+        "You are on DingTalk (钉钉). Markdown replies render — bold, code "
+        "blocks, and links work, but tables are NOT supported, so prefer "
+        "bullet lists or labeled key:value pairs. Proactive (non-reply) "
+        "messages arrive as plain text via the robot webhook, so keep them "
+        "short and avoid markdown there."
+    ),
     "weixin": (
         "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
         "it improves readability, but keep the message compact and chat-friendly. You can send media files natively: "

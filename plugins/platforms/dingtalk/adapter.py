@@ -286,6 +286,12 @@ class DingTalkAdapter(BasePlatformAdapter):
         self._card_sdk: Optional[Any] = None
         self._robot_sdk: Optional[Any] = None
         self._robot_code: str = extra.get("robot_code") or self._client_id
+        # Static robot webhook for proactive sends when no session_webhook is
+        # cached (cron/out-of-process). Plain text only — markdown and AI
+        # Cards need a live session_webhook.
+        self._static_webhook_url: str = extra.get("webhook_url") or os.getenv(
+            "DINGTALK_WEBHOOK_URL", ""
+        )
 
         # Message deduplication
         self._dedup = MessageDeduplicator(max_size=1000)
@@ -1035,6 +1041,11 @@ class DingTalkAdapter(BasePlatformAdapter):
         if not session_webhook:
             webhook_info = self._get_valid_webhook(chat_id)
             if not webhook_info:
+                if self._static_webhook_url:
+                    # ponytail: plain-text static fallback; markdown/AI Cards
+                    # need a live session_webhook (batchSend needs robot perms
+                    # + live creds, unverifiable here).
+                    return await self._send_via_static_webhook(content)
                 logger.warning(
                     "[%s] No valid session_webhook for chat_id=%s",
                     self.name, chat_id,
@@ -1121,6 +1132,30 @@ class DingTalkAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[%s] Send error: %s", self.name, e)
             return SendResult(success=False, error=str(e))
+
+    async def _send_via_static_webhook(self, content: str) -> SendResult:
+        """Proactive fallback: POST plain text to the static robot webhook."""
+        if not self._http_client:
+            return SendResult(success=False, error="HTTP client not initialized")
+        try:
+            resp = await self._http_client.post(
+                self._static_webhook_url,
+                json={
+                    "msgtype": "text",
+                    "text": {"content": content[: self.MAX_MESSAGE_LENGTH]},
+                },
+                timeout=15.0,
+            )
+            if resp.status_code < 300:
+                return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            body = resp.text
+            return SendResult(
+                success=False, error=f"HTTP {resp.status_code}: {body[:200]}"
+            )
+        except httpx.TimeoutException:
+            return SendResult(
+                success=False, error="Timeout sending message to DingTalk"
+            )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """DingTalk does not support typing indicators."""

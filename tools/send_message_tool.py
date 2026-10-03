@@ -1285,7 +1285,17 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.SMS:
             result = await _registry_standalone_send("sms", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.DINGTALK:
-            result = await _registry_standalone_send("dingtalk", pconfig, chat_id, chunk, thread_id)
+            # Live gateway adapter first (session_webhook), standalone static
+            # webhook fallback for out-of-process cron — same shape as Slack.
+            result = await _send_via_adapter(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+                media_files=media_files,
+                force_document=force_document,
+            )
         elif platform == Platform.FEISHU:
             result = await _registry_standalone_send("feishu", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.WECOM:
