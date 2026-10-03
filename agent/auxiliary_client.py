@@ -7518,9 +7518,13 @@ def resolve_vision_provider_client(
 
         # Fall back through aggregators (uses their dedicated vision model,
         # not the user's main model) when main provider has no client.
+        # NOTE: every candidate is tried, including main_provider itself.
+        # Step 1 above only ever tried the main provider with the *chat*
+        # model (or its provider vision default); when that was skipped as
+        # text-only the provider was never attempted with its own default
+        # vision model, so skipping it here strands text-only mains on
+        # aggregator providers (e.g. openrouter) with no fallback (#56995).
         for candidate in _VISION_AUTO_PROVIDER_ORDER:
-            if candidate == main_provider:
-                continue  # already tried above
             sync_client, default_model = _resolve_strict_vision_backend(candidate)
             if sync_client is not None:
                 return _finalize(candidate, sync_client, default_model)
@@ -9506,8 +9510,10 @@ def _call_llm_impl(
             )
         if client is None:
             raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
+                "This model can't view images and no vision fallback is "
+                "configured — set auxiliary.vision (provider/model) or "
+                "OPENROUTER_API_KEY so image analysis has a backend. "
+                f"(task={task} provider={resolved_provider})"
             )
         resolved_provider = effective_provider or resolved_provider
     else:
@@ -10329,8 +10335,10 @@ async def _async_call_llm_impl(
             )
         if client is None:
             raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
+                "This model can't view images and no vision fallback is "
+                "configured — set auxiliary.vision (provider/model) or "
+                "OPENROUTER_API_KEY so image analysis has a backend. "
+                f"(task={task} provider={resolved_provider})"
             )
         resolved_provider = effective_provider or resolved_provider
     else:
