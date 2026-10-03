@@ -400,3 +400,28 @@ test('describeRendererLifecycleEvent sanitizes unknown fields', () => {
     '[renderer:main] render-process-gone reason=killed exitCode=1 (expected teardown)'
   )
 })
+
+// #41251: a non-sandbox crash loop (e.g. exit -36861) suppresses reload with a
+// dead-end line that names no exit code and no next step, leaving a blank
+// window. The suppression line must carry the discriminating detail + a hint.
+test('crash-loop suppression names the exit code and a recovery hint (#41251)', async () => {
+  const win = makeFakeWindow()
+  const { logs, options } = makeOptions(win, 'main', {
+    reloadWindowMs: 60_000,
+    reloadMax: 1,
+    now: () => 1000
+  })
+
+  installWindowRendererLifecycle(win, options)
+
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 })
+  await flushDeferred()
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 })
+  await flushDeferred()
+
+  const suppressed = logs.filter(line => /suppressing reload/.test(line))
+
+  assert.equal(suppressed.length, 1)
+  assert.match(suppressed[0], /-36861/)
+  assert.match(suppressed[0], /no-sandbox|DISABLE_GPU/i)
+})

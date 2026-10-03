@@ -218,8 +218,12 @@ export function installWindowRendererLifecycle(
 
     if (!decision.reload) {
       if (decision.suppressedReason === 'crash-loop') {
+        const lastReason = String(details?.reason ?? '?')
+        const lastExit = details?.exitCode === undefined ? '?' : String(details.exitCode)
+        // ponytail: hint text only; sandbox relaunch stays gated on the
+        // breakpoint signature in main.ts so unknown exits never drop the sandbox.
         log(
-          `[renderer:${kind}] suppressing reload: ${budgetRef.current.length} crashes within ${reloadWindowMs}ms (likely a crash loop)`
+          `[renderer:${kind}] suppressing reload: ${budgetRef.current.length} crashes within ${reloadWindowMs}ms (likely a crash loop; last reason=${lastReason} exitCode=${lastExit}; try --no-sandbox or HERMES_DESKTOP_DISABLE_GPU=1 and see desktop.log)`
         )
         onCrashLoopSuppressed?.(details)
       }
