@@ -1,0 +1,5 @@
+name: docx
+description: "Word document parser (requires python-docx)"
+manifest_version: 1
+pip_dependencies:
+  - python-docx

@@ -1,0 +1,5 @@
+name: pdf
+description: "PDF document parser (requires pymupdf or pdfplumber)"
+manifest_version: 1
+pip_dependencies:
+  - pymupdf

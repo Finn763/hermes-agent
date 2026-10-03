@@ -383,6 +383,15 @@ vision = []
 # any existing requests for the `pty` extra resolve cleanly
 # without pulling in extra packages.
 pty = []
+# Workspace document parsers (issue #5850) — optional backends for the
+# PDF/DOCX parser plugins. Both parsers degrade gracefully when their
+# backend is missing (is_available() False, parse() None), so this extra
+# is lazy-installed at first use, never in [all]. Upper bounds per the
+# dependency pinning policy (AGENTS.md); no bare >= floor.
+workspace-docs = [
+  "pymupdf>=1.20.0,<2",
+  "python-docx>=1.0.0,<2",
+]
 # CVE-2026-48710 (BadHost): Starlette is pulled transitively by mcp's
 # sse-starlette / HTTP-SSE stack (and by fastapi in the `web` extra). Before
 # 1.0.1, a malformed Host header makes `request.url.path` desync from the path
