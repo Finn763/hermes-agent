@@ -1266,6 +1266,15 @@ class TestTaskCompletionGuidance:
         prompt = agent._build_system_prompt()
         assert TASK_COMPLETION_GUIDANCE in prompt
 
+    def test_tool_failure_steers_skills_first(self):
+        """#24012: on tool failure the guidance must steer to known
+        solutions first — not to unverified alternatives."""
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+        lowered = TASK_COMPLETION_GUIDANCE.lower()
+        assert "try an alternative" not in lowered
+        assert "consult known solutions" in lowered
+        assert "documented approach" in lowered
+
 
 
 
