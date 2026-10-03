@@ -22,9 +22,10 @@
 #     (chown, profile reconcile, dashboard toggle) and sets up the
 #     supervision tree before any service starts. Bypassing it skips
 #     all of that setup and the gateway will not work correctly.
-#   - The gateway's API server is off unless you uncomment API_SERVER_KEY
-#     and API_SERVER_HOST. See docs/user-guide/api-server.md before doing
-#     this on an internet-facing host.
+#   - The gateway's API server is off until you set a usable API_SERVER_KEY
+#     (min 16 chars — the key alone enables it). Set API_SERVER_HOST and
+#     API_SERVER_PORT to bind beyond the defaults. See docs/user-guide/api-server.md
+#     before doing this on an internet-facing host.
 #
 services:
   gateway:
