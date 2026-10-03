@@ -368,7 +368,12 @@ class WeComAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 await self._read_events()
-                backoff_idx = 0
+                if not self._running:
+                    return
+                # _read_events returned with the loop still running: the
+                # socket died cleanly underneath us. Reconnect (same path as
+                # an exception) instead of spinning on a dead socket (#33287).
+                raise RuntimeError("WeCom websocket closed")
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -391,8 +396,10 @@ class WeComAdapter(BasePlatformAdapter):
 
     async def _read_events(self) -> None:
         """Read websocket frames until the connection closes."""
-        if not self._ws:
-            raise RuntimeError("WebSocket not connected")
+        if not self._ws or self._ws.closed:
+            # ponytail: any already-dead socket raises — a silent return here
+            # made _listen_loop reset backoff and hot-spin forever (#33287).
+            raise RuntimeError("WeCom websocket closed")
 
         while self._running and self._ws and not self._ws.closed:
             msg = await self._ws.receive()
@@ -453,7 +460,15 @@ class WeComAdapter(BasePlatformAdapter):
         """Send a raw JSON frame over the active websocket."""
         if not self._ws or self._ws.closed:
             raise RuntimeError("WeCom websocket is not connected")
-        await self._ws.send_json(payload)
+        try:
+            await self._ws.send_json(payload)
+        except (ConnectionResetError, RuntimeError, OSError) as exc:
+            # aiohttp raises "Cannot write to closing transport" while the
+            # socket is half-closed (closed == False). Map it to the same
+            # retryable not-connected error callers already handle.
+            if "closing transport" in str(exc) or isinstance(exc, ConnectionResetError):
+                raise RuntimeError("WeCom websocket is not connected") from exc
+            raise
 
     async def _send_request(self, cmd: str, body: Dict[str, Any], timeout: float = REQUEST_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Send a JSON request and await the correlated response."""
