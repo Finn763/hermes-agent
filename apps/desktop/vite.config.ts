@@ -16,6 +16,9 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 import fs from 'fs'
 import { createRequire } from 'module'
+// Canonicalize the cwd when the checkout sits under a Windows directory
+// junction (#44902); must run before Vite resolves the HTML entry.
+import './scripts/canonicalize-build-cwd.mjs'
 
 // `hgui` symlinks a worktree's node_modules to the main checkout. Vite realpaths
 // those before enforcing server.fs.allow, so codicon/font assets resolve outside
