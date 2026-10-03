@@ -201,3 +201,33 @@ class TestColonProviderPrefixIsStrippedLikeSlash:
     ])
     def test_non_matching_colon_untouched(self, model, provider):
         assert normalize_model_for_provider(model, provider) == model
+
+
+class TestIssue12140RegionalVariantPrefixStripping:
+    """minimax-cn / kimi-coding-cn accept their base vendor's prefix (#12140)."""
+
+    @pytest.mark.parametrize("model,expected", [
+        ("minimax/minimax-m2.7", "minimax-m2.7"),
+        ("MiniMax/MiniMax-M2.7", "MiniMax-M2.7"),
+        ("minimax/MiniMax-M2.7", "MiniMax-M2.7"),
+    ])
+    def test_minimax_cn_strips_minimax_prefix(self, model, expected):
+        assert normalize_model_for_provider(model, "minimax-cn") == expected
+
+    @pytest.mark.parametrize("model,expected", [
+        ("kimi/kimi-k2-turbo-preview", "kimi-k2-turbo-preview"),
+        ("moonshot/kimi-k2", "kimi-k2"),
+        ("kimi-coding/kimi-k2", "kimi-k2"),
+    ])
+    def test_kimi_coding_cn_strips_base_vendor_prefix(self, model, expected):
+        assert normalize_model_for_provider(model, "kimi-coding-cn") == expected
+
+    @pytest.mark.parametrize("model,provider,expected", [
+        ("arbitrary/path", "minimax-cn", "arbitrary/path"),
+        ("minimax-m2.7", "minimax-cn", "minimax-m2.7"),
+        ("minimax/minimax-m2.7", "minimax", "minimax-m2.7"),
+        ("zai/glm-5.1", "zai", "glm-5.1"),
+        ("minimax-cn/minimax-m2.7", "minimax", "minimax-cn/minimax-m2.7"),
+    ])
+    def test_preserved_behaviours(self, model, provider, expected):
+        assert normalize_model_for_provider(model, provider) == expected

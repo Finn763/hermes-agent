@@ -123,6 +123,18 @@ def _normalize_provider_alias(provider_name: str) -> str:
         return raw
 
 
+# Regional variants share their base vendor's model namespace: a model written
+# with the base-vendor prefix (``minimax/minimax-m2.7`` from the aggregator
+# catalog) must still strip for the regional target (``minimax-cn``), else the
+# slash-bearing slug reaches the regional API and is rejected with
+# ``unknown model`` (#12140). Explicit map only, one direction.
+# ponytail: explicit map; generalize only if a third regional variant appears.
+_REGIONAL_VARIANT_ROOTS: dict[str, str] = {
+    "minimax-cn": "minimax",
+    "kimi-coding-cn": "kimi-coding",
+}
+
+
 def _strip_matching_provider_prefix(model_name: str, target_provider: str) -> str:
     """Strip ``provider/`` or ``provider:`` only when the prefix matches the target provider, so
     arbitrary slash-bearing ids aren't mangled while ``zai/glm-5.1`` is repaired for ``zai``. The colon
@@ -141,7 +153,12 @@ def _strip_matching_provider_prefix(model_name: str, target_provider: str) -> st
     if normalized_target == "custom":
         return remainder.strip() if prefix.strip().lower() == "custom" else model_name
     normalized_prefix = _normalize_provider_alias(prefix)
-    return remainder.strip() if normalized_prefix and normalized_prefix == normalized_target else model_name
+    if normalized_prefix and normalized_prefix == normalized_target:
+        return remainder.strip()
+    root = _REGIONAL_VARIANT_ROOTS.get(normalized_target)
+    if root and normalized_prefix == root:
+        return remainder.strip()
+    return model_name
 
 
 def detect_vendor(model_name: str) -> Optional[str]:
