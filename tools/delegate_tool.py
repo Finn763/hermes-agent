@@ -1860,6 +1860,10 @@ def _build_child_agent(
 
             parsed = parse_reasoning_effort(delegation_effort)
             if parsed is not None:
+                # #37629: effort override rebuilds the dict; keep parent's
+                # thinking_mode so a fixed-budget child doesn't flip adaptive.
+                if isinstance(parent_reasoning, dict) and parent_reasoning.get("thinking_mode") == "fixed" and parsed.get("enabled") is not False:
+                    parsed = {**parsed, "thinking_mode": "fixed"}
                 child_reasoning = parsed
             else:
                 logger.warning(

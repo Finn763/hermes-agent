@@ -3101,7 +3101,16 @@ def build_anthropic_kwargs(
         elif "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
-            if _supports_adaptive_thinking(model):
+            # ponytail: fixed-budget override scoped to the 4.6 family via the
+            # existing _NO_XHIGH list (the only adaptive models that still
+            # accept manual thinking); 4.7+ hits the API 400 on manual blocks
+            # so the flag is ignored there. Broaden the predicate if a future
+            # family re-allows manual thinking.
+            fixed_budget = (
+                reasoning_config.get("thinking_mode") == "fixed"
+                and any(v in model.lower() for v in _NO_XHIGH_CLAUDE_SUBSTRINGS)
+            )
+            if _supports_adaptive_thinking(model) and not fixed_budget:
                 kwargs["thinking"] = {
                     "type": "adaptive",
                     "display": "summarized",

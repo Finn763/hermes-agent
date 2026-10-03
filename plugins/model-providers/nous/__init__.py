@@ -114,7 +114,7 @@ class NousProfile(ProviderProfile):
         extra_body = {}
         if supports_reasoning:
             if reasoning_config is not None:
-                rc = dict(reasoning_config)
+                rc = {k: v for k, v in reasoning_config.items() if k != "thinking_mode"}
                 if rc.get("enabled") is False and self._cannot_disable_reasoning(model):
                     pass  # route rejects a disable — let the model think
                 else:

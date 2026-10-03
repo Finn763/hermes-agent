@@ -977,6 +977,42 @@ class TestBuildAnthropicKwargs:
         assert "temperature" not in kwargs
         assert kwargs["max_tokens"] == 4096
 
+    def test_fixed_thinking_mode_forces_manual_thinking_on_4_6(self):
+        """#37629: fixed + 4.6 model -> manual thinking with mapped budget."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high", "thinking_mode": "fixed"},
+        )
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert "output_config" not in kwargs
+        assert kwargs["temperature"] == 1
+
+    def test_fixed_thinking_mode_ignored_on_4_7(self):
+        """#37629: 4.7+ rejects manual thinking -> flag silently ignored."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-7",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high", "thinking_mode": "fixed"},
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert kwargs["output_config"] == {"effort": "high"}
+
+    def test_unknown_thinking_mode_stays_adaptive_on_4_6(self):
+        """Junk thinking_mode values must not change the default path."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high", "thinking_mode": "turbo"},
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+
 
 
 

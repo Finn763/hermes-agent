@@ -505,6 +505,34 @@ class TestResolveReasoningConfig:
         cfg = self._cfg(effort="medium", overrides={"gpt-5": "turbo-max"})
         assert resolve_reasoning_config(cfg, "gpt-5") == {"enabled": True, "effort": "medium"}
 
+    def test_thinking_mode_fixed_attached(self):
+        """#37629: agent.thinking_mode=fixed rides on the resolved config."""
+        from hermes_constants import resolve_reasoning_config
+        cfg = self._cfg(effort="high")
+        cfg["agent"]["thinking_mode"] = "fixed"
+        assert resolve_reasoning_config(cfg, "claude-sonnet-4-6") == {
+            "enabled": True, "effort": "high", "thinking_mode": "fixed",
+        }
+
+    def test_thinking_mode_absent_or_invalid_omitted(self):
+        """Default and junk thinking_mode values leave the config untouched."""
+        from hermes_constants import resolve_reasoning_config
+        assert resolve_reasoning_config(self._cfg(effort="high"), "claude-sonnet-4-6") == {
+            "enabled": True, "effort": "high",
+        }
+        cfg = self._cfg(effort="high")
+        cfg["agent"]["thinking_mode"] = "turbo"
+        assert resolve_reasoning_config(cfg, "claude-sonnet-4-6") == {
+            "enabled": True, "effort": "high",
+        }
+
+    def test_thinking_mode_not_attached_when_disabled(self):
+        """fixed is a modifier on effort, not a standalone toggle."""
+        from hermes_constants import resolve_reasoning_config
+        cfg = self._cfg(effort="none")
+        cfg["agent"]["thinking_mode"] = "fixed"
+        assert resolve_reasoning_config(cfg, "claude-sonnet-4-6") == {"enabled": False}
+
 
 class TestReasoningOverridesDefaultConfig:
     """Tests for the agent.reasoning_overrides default config key (Task 2)."""

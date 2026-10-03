@@ -1091,6 +1091,12 @@ agent:
   # Controls how much "thinking" the model does before responding.
   # Options: "xhigh" (max), "high", "medium", "low", "minimal", "none" (disable)
   reasoning_effort: "medium"
+
+  # Thinking mode (Claude 4.6 only, optional): "adaptive" (default, model may
+  # skip thinking on simple turns) or "fixed" (always think with a fixed
+  # budget mapped from reasoning_effort). Ignored on 4.7+ (API rejects manual
+  # thinking) and when reasoning_effort is unset/"none".
+  # thinking_mode: "adaptive"
   
   # Per-model reasoning effort overrides (optional dict)
   # Key: any sensible model spelling works (exact, dots↔dashes interchangeable,

@@ -1186,7 +1186,7 @@ VALID_REASONING_EFFORTS = (
 )
 
 
-def parse_reasoning_effort(effort) -> dict | None:
+def parse_reasoning_effort(effort, thinking_mode=None) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
     Valid levels: "none", "minimal", "low", "medium", "high", "xhigh", "max",
@@ -1197,6 +1197,9 @@ def parse_reasoning_effort(effort) -> dict | None:
     in config.yaml and YAML hands us a bool, which must mean disabled, not
     "fall back to the default and keep thinking").
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
+    When thinking_mode is "fixed" (agent.thinking_mode, #37629), it is passed
+    through on enabled results so 4.6 models can use budget-based thinking
+    instead of adaptive; 4.7+ ignores it. Any other value is dropped.
     """
     if effort is False:
         return {"enabled": False}
@@ -1209,7 +1212,10 @@ def parse_reasoning_effort(effort) -> dict | None:
     if effort in {"none", "false", "disabled"}:
         return {"enabled": False}
     if effort in VALID_REASONING_EFFORTS:
-        return {"enabled": True, "effort": effort}
+        result = {"enabled": True, "effort": effort}
+        if str(thinking_mode or "").strip().lower() == "fixed":
+            result["thinking_mode"] = "fixed"
+        return result
     return None
 
 
@@ -1382,15 +1388,18 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
             model = ""
 
     overrides = agent_cfg.get("reasoning_overrides") or {}
+    thinking_mode = agent_cfg.get("thinking_mode")  # #37629: modifier on effort
     per_model = resolve_per_model_reasoning_effort(model, overrides)
     if per_model is not None:
+        if per_model.get("enabled") is not False and str(thinking_mode or "").strip().lower() == "fixed":
+            per_model = {**per_model, "thinking_mode": "fixed"}
         return per_model
 
     # Global fallback — keep the raw value; coercing with ``or ""`` turns a
     # YAML boolean False into "", silently re-enabling thinking for users
     # who explicitly disabled it.
     effort = agent_cfg.get("reasoning_effort", "")
-    result = parse_reasoning_effort(effort)
+    result = parse_reasoning_effort(effort, thinking_mode=thinking_mode)
     if effort and str(effort).strip() and result is None:
         import logging
         logging.getLogger(__name__).warning(

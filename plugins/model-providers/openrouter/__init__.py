@@ -213,7 +213,7 @@ class OpenRouterProfile(ProviderProfile):
                     top_level["verbosity"] = effort
             elif reasoning_config is not None:
                 extra_body["reasoning"] = self._clamp_reasoning_to_catalog(
-                    dict(reasoning_config), model
+                    {k: v for k, v in reasoning_config.items() if k != "thinking_mode"}, model
                 )
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
