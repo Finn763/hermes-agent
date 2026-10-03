@@ -2926,6 +2926,21 @@ class FeishuAdapter(BasePlatformAdapter):
                 "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, state["session_key"], choice, user_name,
             )
+            # ponytail: best-effort global update only; callback response
+            # already covered the clicker, failures must not break approval.
+            if (count or choice == "deny") and self._client is not None:
+                message_id = str(state.get("message_id", "") or "")
+                if message_id:
+                    try:
+                        resolved = self._build_resolved_approval_card(choice=choice, user_name=user_name)
+                        body = self._build_update_message_body(
+                            msg_type="interactive",
+                            content=json.dumps(resolved, ensure_ascii=False),
+                        )
+                        request = self._build_update_message_request(message_id, body)
+                        await self._run_blocking(self._client.im.v1.message.update, request)
+                    except Exception:
+                        logger.debug("[Feishu] global approval card update failed", exc_info=True)
             if not count and choice != "deny":
                 # The card was already updated synchronously to "Approved" by
                 # the callback response, but nothing was waiting — the wait
