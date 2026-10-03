@@ -441,24 +441,34 @@ def _handle_send(args):
 
     used_home_channel = False
     if not chat_id:
-        home = config.get_home_channel(platform)
-        if not home and platform_name == "weixin":
-            wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
-            if wx_home:
-                from gateway.config import HomeChannel
-                home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
-        if home:
-            chat_id = home.chat_id
-            used_home_channel = True
+        # Bare "platform" target sent from inside a gateway session of the
+        # same platform means "reply here" (#23732) — prefer the session
+        # chat over the home channel. CLI/cron callers have no session, so
+        # their behavior is unchanged.
+        from gateway.session_context import get_session_env
+        _session_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        _session_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        if _session_platform == platform_name and _session_chat_id:
+            chat_id = _session_chat_id
         else:
-            home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(
-                platform_name, f"{platform_name.upper()}_HOME_CHANNEL"
-            )
-            return tool_error(
-                f"No home channel set for {platform_name} to determine where to send the message. "
-                f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
-                f"or set a home channel via: hermes config set {home_env} <channel_id>"
-            )
+            home = config.get_home_channel(platform)
+            if not home and platform_name == "weixin":
+                wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
+                if wx_home:
+                    from gateway.config import HomeChannel
+                    home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
+            if home:
+                chat_id = home.chat_id
+                used_home_channel = True
+            else:
+                home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(
+                    platform_name, f"{platform_name.upper()}_HOME_CHANNEL"
+                )
+                return tool_error(
+                    f"No home channel set for {platform_name} to determine where to send the message. "
+                    f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
+                    f"or set a home channel via: hermes config set {home_env} <channel_id>"
+                )
 
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:

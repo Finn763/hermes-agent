@@ -310,3 +310,131 @@ def test_plugin_parser_stays_authoritative_despite_fallback() -> None:
 
     assert chat_id is None
     assert error is not None
+
+
+def _feishu_home_config(home_chat_id="oc_homechannel"):
+    feishu_cfg = SimpleNamespace(enabled=True, token="test-token", extra={})
+    config = SimpleNamespace(
+        platforms={Platform.FEISHU: feishu_cfg},
+        get_home_channel=lambda _platform: SimpleNamespace(chat_id=home_chat_id),
+    )
+    return feishu_cfg, config
+
+
+def test_bare_feishu_target_prefers_current_session_over_home() -> None:
+    """#23732: a bare 'feishu' target sent from inside a gateway session must
+    go to that session's chat, not the home channel."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    feishu_cfg, config = _feishu_home_config()
+    tokens = set_session_vars(platform="feishu", chat_id="oc_sessionchat")
+    try:
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch(
+                 "tools.send_message_tool._send_to_platform",
+                 new=AsyncMock(return_value={"success": True}),
+             ) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "feishu",
+                        "message": "hello session",
+                    }
+                )
+            )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result["success"] is True
+    assert "note" not in result
+    send_mock.assert_awaited_once_with(
+        Platform.FEISHU,
+        feishu_cfg,
+        "oc_sessionchat",
+        "hello session",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
+
+
+def test_bare_feishu_target_without_session_still_uses_home() -> None:
+    """#23732 control: with no session bound, bare 'feishu' keeps the
+    documented home-channel behavior."""
+    from gateway.session_context import reset_session_vars
+
+    reset_session_vars()
+    feishu_cfg, config = _feishu_home_config()
+    with patch("gateway.config.load_gateway_config", return_value=config), \
+         patch("tools.interrupt.is_interrupted", return_value=False), \
+         patch("model_tools._run_async", side_effect=_run_async_immediately), \
+         patch(
+             "tools.send_message_tool._send_to_platform",
+             new=AsyncMock(return_value={"success": True}),
+         ) as send_mock, \
+         patch("gateway.mirror.mirror_to_session", return_value=True):
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": "feishu",
+                    "message": "hello home",
+                }
+            )
+        )
+
+    assert result["success"] is True
+    assert result["note"] == "Sent to feishu home channel (chat_id: oc_homechannel)"
+    send_mock.assert_awaited_once_with(
+        Platform.FEISHU,
+        feishu_cfg,
+        "oc_homechannel",
+        "hello home",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
+
+
+def test_bare_feishu_target_ignores_other_platform_session() -> None:
+    """#23732 guard: a session bound to another platform must not hijack a
+    bare 'feishu' target — it still goes home."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    feishu_cfg, config = _feishu_home_config()
+    tokens = set_session_vars(platform="telegram", chat_id="12345")
+    try:
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch(
+                 "tools.send_message_tool._send_to_platform",
+                 new=AsyncMock(return_value={"success": True}),
+             ) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "feishu",
+                        "message": "hello home",
+                    }
+                )
+            )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result["success"] is True
+    send_mock.assert_awaited_once_with(
+        Platform.FEISHU,
+        feishu_cfg,
+        "oc_homechannel",
+        "hello home",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
