@@ -922,6 +922,14 @@ async def _send_via_adapter(
     }
 
 
+def _wecom_chunk_delay_seconds() -> float:
+    """Inter-chunk pacing for WeCom standalone sends (#25060)."""
+    try:
+        return max(0.0, float(os.getenv("WECOM_SEND_CHUNK_DELAY_SECONDS", "1.0")))
+    except ValueError:
+        return 1.0
+
+
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None):
     """Route a message to the appropriate platform sender.
 
@@ -1275,7 +1283,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         )
 
     last_result = None
-    for chunk in chunks:
+    for _chunk_i, chunk in enumerate(chunks):
+        # ponytail: paced here, not one connection per chunk — reusing a
+        # single standalone connection across chunks is the upgrade path if
+        # WeCom ever rate-limits connection setup itself.
+        if platform == Platform.WECOM and _chunk_i:
+            await asyncio.sleep(_wecom_chunk_delay_seconds())
         if platform == Platform.WHATSAPP:
             result = await _registry_standalone_send("whatsapp", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.SIGNAL:

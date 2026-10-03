@@ -169,6 +169,9 @@ class WeComAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     SUPPORTS_MESSAGE_EDITING = False
+    # Cron/relay delivery truncates output for adapters without this flag
+    # (gateway/delivery.py); WeCom splits natively in send() below. (#25060)
+    splits_long_messages = True
     # Threshold for detecting WeCom client-side message splits.
     # When a chunk is near the 4000-char limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 3900
@@ -217,6 +220,13 @@ class WeComAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._device_id = uuid.uuid4().hex
         self._last_chat_req_ids: Dict[str, str] = {}
+        # Pacing between outbound chunks of one long message: back-to-back
+        # sends hit WeCom rate limits and later chunks are silently lost
+        # (#25060). Same knob shape as Weixin's send_chunk_delay_seconds.
+        self._send_chunk_delay_seconds = float(
+            extra.get("send_chunk_delay_seconds")
+            or env_float("WECOM_SEND_CHUNK_DELAY_SECONDS", 1.0)
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -1428,7 +1438,12 @@ class WeComAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send markdown to a WeCom chat via proactive ``aibot_send_msg``."""
+        """Send markdown to a WeCom chat via proactive ``aibot_send_msg``.
+
+        Long content is split into paced chunks (same helper as the other
+        adapters); a failed chunk aborts with delivered/total counts so the
+        loss is visible instead of silently partial (#25060).
+        """
         del metadata
 
         if not chat_id:
@@ -1441,16 +1456,31 @@ class WeComAdapter(BasePlatformAdapter):
                 reply_req_id = self._last_chat_req_ids[chat_id]
 
             if reply_req_id:
+                # ponytail: single reply send keeps legacy truncate; chunked
+                # reply threads have unknown req_id semantics — split there
+                # only if WeCom ever documents multi-message replies.
                 response = await self._send_reply_markdown(reply_req_id, content)
             else:
-                response = await self._send_request(
-                    APP_CMD_SEND,
-                    {
-                        "chatid": chat_id,
-                        "msgtype": "markdown",
-                        "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
-                    },
-                )
+                chunks = BasePlatformAdapter.truncate_message(content, self.MAX_MESSAGE_LENGTH)
+                response = None
+                for i, chunk in enumerate(chunks):
+                    if i:
+                        await asyncio.sleep(self._send_chunk_delay_seconds)
+                    response = await self._send_request(
+                        APP_CMD_SEND,
+                        {
+                            "chatid": chat_id,
+                            "msgtype": "markdown",
+                            "markdown": {"content": chunk},
+                        },
+                    )
+                    error = self._response_error(response)
+                    if error:
+                        return SendResult(
+                            success=False,
+                            error=f"WeCom chunk {i + 1}/{len(chunks)} failed "
+                            f"after {i} delivered: {error}",
+                        )
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:
