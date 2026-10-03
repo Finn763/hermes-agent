@@ -1700,19 +1700,28 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-5.5": 272_000, "gpt-5.4": 272_000, "gpt-5.2": 272_000, "gpt-5": 272_000,
 }
 # Codex OAuth advertises 272K for these families but ACCEPTS ~900K+ (verified live; gpt-5.5 and
-# gpt-5.4-mini genuinely reject >272K). 900K keeps ≥11K margin. OPT-IN ONLY via explicit ``-900k``
-# picker variants (a 900K default burned subscription usage); the suffix is stripped before the wire.
-# The bump fires ONLY when the resolved value is exactly the stale 272,000. ``gpt-5.6`` and the gpt-6
-# tiers are FAMILY PREFIXES so dated snapshots (``gpt-6-sol-2026-09-22``) inherit the bump (``-pro`` slugs
-# aren't routable on Codex); ``gpt-5.4`` is EXACT because gpt-5.4-mini enforces 272K. The gpt-6 tiers
-# carry the 5.6 verdict forward: they replace Sol/Terra/Luna on the same Codex route, and the live
-# catalog's ``max_context_window`` still caps the bump (#105443) if it publishes a lower ceiling.
+# gpt-5.4-mini genuinely reject >272K). OPT-IN ONLY via explicit ``-900k`` picker variants (a 900K
+# default burned subscription usage); the suffix is stripped before the wire. The bump fires ONLY when
+# the resolved value is exactly the stale 272,000. ``gpt-5.6`` is a FAMILY PREFIX so dated snapshots
+# (``gpt-5.6-sol-2026-07-09``) inherit the bump; every gpt-6 tier is EXACT with its own live receipt
+# below (``-pro`` slugs aren't routable on Codex, and a prefix would also match unrelated future slugs).
+# Dated snapshots of exact tiers inherit via snapshot-stripping in ``_verified_codex_ctx_for_slug``.
+# The live catalog's ``max_context_window`` still caps the bump (#105443) when it publishes a lower
+# ceiling (872,000 live 2026-09-28, #126483), so 900K is a ceiling, not the effective window.
 _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_PREFIXES: Dict[str, int] = {
-    "gpt-5.6": 900_000, "gpt-6-sol": 900_000, "gpt-6-luna": 900_000,
+    "gpt-5.6": 900_000,
 }
 _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT: Dict[str, int] = {
     "gpt-5.4": 900_000, "gpt-daybreak-blue-latest": 900_000,
-    "gpt-6-astra": 900_000,  # advertised 272K; 920,043 input OK, 1,000,043 rejected (live 2026-09-04)
+    # advertised 272K; 920,043 input OK, 1,000,043 rejected (live 2026-09-04), plus 689,512 OK
+    # (live 2026-09-28, #126483).
+    "gpt-6-astra": 900_000,
+    # advertised 272K; 909,312 input OK, ~995K (5.25M chars) rejected with context_length_exceeded
+    # (live 2026-09-28, #126483). 900K keeps ~9K margin below the observed acceptance point.
+    "gpt-6-sol": 900_000,
+    # advertised 272K; 689,512 input OK (live 2026-09-28, #126483). The 900K ceiling shares the
+    # Sol/Astra acceptance receipts on the same Codex route; the catalog max (872,000) binds lower.
+    "gpt-6-luna": 900_000,
     # advertised 272K; 918,137 input OK, ~931K rejected (live 2026-09-29), consistent with the 922K left by
     # the model page's 1.05M context minus 128K max output (derived, not a published input cap).
     # EXACT, not a prefix: the dotted slug is its own line and ``-pro`` is not routable.
@@ -1777,6 +1786,13 @@ def _verified_codex_ctx_for_slug(model_bare: str) -> Optional[int]:
     if base is None:
         return None
     exact = _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT.get(base)
+    if exact is None:
+        # Dated snapshots (``gpt-6-sol-2026-09-22``) inherit the base slug's exact receipt. Only
+        # snapshot-eligible bases strip here, so ``-pro`` slugs (never eligible) gain nothing.
+        for snapshot_base in _CODEX_900K_SNAPSHOT_BASES:
+            if base.startswith(snapshot_base + "-") and _CODEX_900K_SNAPSHOT_RE.match(base[len(snapshot_base) + 1:]):
+                exact = _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT.get(snapshot_base)
+                break
     if exact is not None:
         return exact
     return next((ctx for key, ctx in _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_PREFIXES.items() if base == key or base.startswith((key + "-", key + "."))), None)

@@ -94,3 +94,22 @@ def test_gpt61_sol_900k_is_opt_in_exact_and_billed_as_the_base():
     assert _CODEX_OAUTH_STALE_ADVERTISED_CTX < _verified_codex_ctx_for_slug("gpt-6.1-sol-900k") < 922_000  # 1.05M context - 128K max output
     assert _OFFICIAL_DOCS_PRICING[("openai", "gpt-6.1-sol-900k")] is _OFFICIAL_DOCS_PRICING[("openai", "gpt-6.1-sol")]
     assert _compression_threshold_for_model("gpt-6.1-sol-900k", provider="openai-codex") is None
+
+
+def test_gpt6_sol_luna_900k_caps_are_live_receipt_exact_entries():
+    """Issue #126483: sol/luna carry live 2026-09-28 receipts, not the 5.6 verdict carried forward."""
+    from agent.model_metadata import (
+        _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT as _EXACT,
+        _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_PREFIXES as _PREFIXES,
+    )
+
+    assert _EXACT["gpt-6-sol"] == 900_000
+    assert _EXACT["gpt-6-luna"] == 900_000
+    assert "gpt-6-sol" not in _PREFIXES and "gpt-6-luna" not in _PREFIXES
+    for variant in (
+        "gpt-6-sol-900k", "gpt-6-luna-900k", "openai/gpt-6-sol-900k",
+        "gpt-6-sol-2026-09-22-900k", "gpt-6-luna-2026-09-22-900k",
+    ):
+        assert _verified_codex_ctx_for_slug(variant) == 900_000, variant
+    assert _verified_codex_ctx_for_slug("gpt-6-sol") is None
+    assert _verified_codex_ctx_for_slug("gpt-5.5-900k") is None
