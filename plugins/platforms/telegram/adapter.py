@@ -598,6 +598,10 @@ class TelegramAdapter(BasePlatformAdapter):
     # Cap on inbound events held across a disconnect/reconnect window.
     # Bounds memory during extended outages; oldest events are dropped first.
     HELD_INBOUND_MAX = 64
+    # Max age of a held inbound event at redispatch. Older events are dropped
+    # instead of spawning an agent on stale state (#22899).
+    # ponytail: fixed 10-min TTL, not per-chat tunable; add config when needed.
+    HELD_INBOUND_MAX_AGE_S = 600.0
     _GENERAL_TOPIC_THREAD_ID = "1"
     # send() can race a disconnect/reconnect window: the final reply is
     # generated, Telegram drops, and send() used to fail immediately with
@@ -1062,6 +1066,19 @@ class TelegramAdapter(BasePlatformAdapter):
         if schedule and not self._should_drop_delayed_delivery():
             self._schedule_held_inbound_redispatch()
 
+    def _held_inbound_age_seconds(self, event: "MessageEvent") -> Optional[float]:
+        """Age of a held inbound event in seconds, None when unknowable."""
+        ts = getattr(event, "timestamp", None)
+        if ts is None:
+            return None
+        try:
+            now = datetime.now(timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (now - ts).total_seconds()
+        except Exception:
+            return None
+
     async def _redispatch_held_inbound(
         self, prior: Optional[asyncio.Task] = None
     ) -> None:
@@ -1104,6 +1121,16 @@ class TelegramAdapter(BasePlatformAdapter):
         allow_followup_schedule = True
         try:
             for idx, event in enumerate(events):
+                age = self._held_inbound_age_seconds(event)
+                max_age = float(getattr(self, "HELD_INBOUND_MAX_AGE_S", 600.0) or 600.0)
+                if age is not None and age > max_age:
+                    logger.warning(
+                        "[Telegram] Dropping stale held inbound (%d chars, age %.0fs > %.0fs)",
+                        len(getattr(event, "text", None) or ""),
+                        age,
+                        max_age,
+                    )
+                    continue
                 if self._is_permanent_fatal() or self._should_drop_delayed_delivery():
                     # Disconnect/fatal mid-drain — re-hold current + remainder
                     # (hold itself discards under permanent fatal).
