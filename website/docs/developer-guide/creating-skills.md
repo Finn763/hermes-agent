@@ -206,6 +206,12 @@ Each entry supports:
 - `description` (required) — explains what the setting controls
 - `default` (optional) — default value if the user doesn't configure it
 - `prompt` (optional) — prompt text shown during `hermes config migrate`; falls back to `description`
+- `env_key` (optional) — environment variable (process env or `~/.hermes/.env`) checked
+  FIRST, before `config.yaml` and the default. Useful for machine-specific values (paths,
+  shared tooling vars) the user already keeps in `.env` so they don't have to duplicate them
+  into `config.yaml`. Resolution order per entry: `.env`/`os.environ` (`env_key`) →
+  `config.yaml` (`skills.config.<key>`) → frontmatter `default`. Entries without `env_key`
+  resolve exactly as before.
 
 **How it works:**
 

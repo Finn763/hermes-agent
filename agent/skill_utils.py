@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import (
     get_config_path,
+    get_env_path,
     get_skills_dir,
     get_subprocess_home,
 )
@@ -661,8 +662,51 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
     return {key: hermes.get(key, []) for key in _CONDITION_KEYS}
 
 
+# ``env_key`` names a ``.env``/process-env variable a skill config var falls back to.
+# Only ``^[A-Za-z_][A-Za-z0-9_]*$`` is accepted: anything else is dropped at extract time
+# so a typo cannot become a lookup key.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _read_skill_env_value(env_key: str):
+    """Process-env/``.env`` value for *env_key*, or None when unset/blank.
+    Goes through ``agent.secret_scope`` (the shared ``.env`` tokenizer), never ``os.environ``
+    directly, so multiplexed profiles cannot borrow each other's ambient values; blank values
+    count as unset and fall through to ``config.yaml``."""
+    if not env_key or not _ENV_KEY_RE.match(env_key):
+        return None
+    try:
+        from agent.secret_scope import get_secret
+
+        val = get_secret(env_key)
+    except ImportError:
+        val = os.environ.get(env_key)
+    except Exception:
+        val = None
+        try:
+            from agent.secret_scope import load_env_file
+
+            file_val = load_env_file(get_env_path()).get(env_key)
+            if file_val is not None and str(file_val).strip():
+                return str(file_val)
+        except Exception:
+            pass
+        return None
+    if val is not None and str(val).strip():
+        return str(val)
+    try:
+        from agent.secret_scope import load_env_file
+
+        file_val = load_env_file(get_env_path()).get(env_key)
+        if file_val is not None and str(file_val).strip():
+            return str(file_val)
+    except Exception:
+        pass
+    return None
+
+
 def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract ``metadata.hermes.config`` declarations (key/description/default/prompt).
+    """Extract ``metadata.hermes.config`` declarations (key/description/default/prompt/env_key).
     Entries missing ``key`` or ``description`` are skipped; ``prompt`` defaults to the description."""
     raw = _hermes_metadata(frontmatter).get("config")
     if isinstance(raw, dict):
@@ -680,6 +724,9 @@ def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any
         entry: Dict[str, Any] = {"key": key, "description": desc}
         if item.get("default") is not None:
             entry["default"] = item["default"]
+        env_key = item.get("env_key")
+        if isinstance(env_key, str) and _ENV_KEY_RE.match(env_key.strip()):
+            entry["env_key"] = env_key.strip()
         prompt_text = item.get("prompt")
         entry["prompt"] = prompt_text.strip() if isinstance(prompt_text, str) and prompt_text.strip() else desc
         result[key] = entry
@@ -744,11 +791,22 @@ def _expand_skill_config_path(value: str) -> str:
 
 
 def resolve_skill_config_values(config_vars: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Map logical skill config keys to current values (or declared defaults);
-    path-like string values are ``~``/``$HOME``/``${VAR}`` expanded against the tool HOME."""
+    """Map logical skill config keys to current values (or declared defaults).
+    Precedence per var: ``.env``/process-env (``env_key``) first when declared and set,
+    then ``config.yaml`` (``skills.config.<key>``), then the frontmatter default; skills
+    without ``env_key`` resolve exactly as before. Path-like string values are
+    ``~``/``$HOME``/``${VAR}`` expanded against the tool HOME."""
     config = _load_raw_config()
     resolved: Dict[str, Any] = {}
     for var in config_vars:
+        env_key = var.get("env_key")
+        if isinstance(env_key, str) and env_key.strip():
+            env_val = _read_skill_env_value(env_key.strip())
+            if env_val is not None:
+                if "~" in env_val or "$" in env_val:
+                    env_val = _expand_skill_config_path(env_val)
+                resolved[var["key"]] = env_val
+                continue
         value = _resolve_dotpath(config, f"{SKILL_CONFIG_PREFIX}.{var['key']}")
         if value is None or (isinstance(value, str) and not value.strip()):
             value = var.get("default", "")

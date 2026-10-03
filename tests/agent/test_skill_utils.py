@@ -4,6 +4,7 @@
 import pytest
 
 from agent.skill_utils import (
+    extract_skill_config_vars,
     get_disabled_skill_names,
     get_external_skills_dirs,
     is_excluded_skill_path,
@@ -336,3 +337,146 @@ class TestBOMToleranceSiblingSites:
         assert fm is not None
         assert fm.get("name") == "bp"
 
+
+# -- env_key fallback for skill config vars (#6406) ---------------------------
+# A skill config var may declare ``env_key: SOME_VAR``; resolution is then
+# .env/process-env first, config.yaml second, frontmatter default last.
+# Skills without ``env_key`` resolve exactly as before (back-compat).
+
+
+def _fresh_skill_home(tmp_path, monkeypatch, *, config_text="", env_text=None):
+    """Point HERMES_HOME at a fresh temp home with the given config.yaml/.env."""
+    from agent import skill_utils
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir(exist_ok=True)
+    (hermes_home / "config.yaml").write_text(config_text, encoding="utf-8")
+    if env_text is not None:
+        (hermes_home / ".env").write_text(env_text, encoding="utf-8")
+    elif (hermes_home / ".env").exists():
+        (hermes_home / ".env").unlink()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    skill_utils._external_dirs_cache_clear()
+    getattr(skill_utils, "_raw_config_cache_clear", lambda: None)()
+    try:
+        from agent.secret_scope import invalidate_env_file_cache
+
+        invalidate_env_file_cache()
+    except Exception:
+        pass
+    return hermes_home
+
+
+class TestExtractSkillConfigEnvKey:
+    def test_valid_env_key_parsed_and_stripped(self):
+        vars_ = extract_skill_config_vars({
+            "metadata": {
+                "hermes": {
+                    "config": [
+                        {
+                            "key": "wiki.path",
+                            "description": "Wiki path",
+                            "default": "~/wiki",
+                            "env_key": "  LLM_WIKI_PATH  ",
+                        },
+                    ]
+                }
+            }
+        })
+        assert vars_[0]["env_key"] == "LLM_WIKI_PATH"
+
+    def test_invalid_env_key_dropped(self):
+        for bad in ["", "   ", "has space", "123BAD", "DASH-ED", 42, None]:
+            vars_ = extract_skill_config_vars({
+                "metadata": {
+                    "hermes": {
+                        "config": [
+                            {
+                                "key": "wiki.path",
+                                "description": "Wiki path",
+                                "env_key": bad,
+                            },
+                        ]
+                    }
+                }
+            })
+            assert "env_key" not in vars_[0], bad
+
+    def test_missing_env_key_absent(self):
+        vars_ = extract_skill_config_vars({
+            "metadata": {
+                "hermes": {
+                    "config": [
+                        {"key": "wiki.path", "description": "Wiki path"},
+                    ]
+                }
+            }
+        })
+        assert "env_key" not in vars_[0]
+
+
+class TestResolveSkillConfigEnvKey:
+    VAR = {
+        "key": "wiki.path",
+        "description": "Wiki path",
+        "default": "~/wiki",
+        "env_key": "LLM_WIKI_PATH",
+    }
+
+    def test_process_env_beats_config_and_default(self, tmp_path, monkeypatch):
+        _fresh_skill_home(
+            tmp_path,
+            monkeypatch,
+            config_text="skills:\n  config:\n    wiki:\n      path: /cfg/path\n",
+        )
+        monkeypatch.setenv("LLM_WIKI_PATH", "/env/path")
+        assert resolve_skill_config_values([dict(self.VAR)])["wiki.path"] == "/env/path"
+
+    def test_dotenv_file_honored_without_process_env(self, tmp_path, monkeypatch):
+        _fresh_skill_home(
+            tmp_path,
+            monkeypatch,
+            config_text="{}",
+            env_text="LLM_WIKI_PATH=/dotenv/vault\n",
+        )
+        monkeypatch.delenv("LLM_WIKI_PATH", raising=False)
+        assert (
+            resolve_skill_config_values([dict(self.VAR)])["wiki.path"]
+            == "/dotenv/vault"
+        )
+
+    def test_config_wins_when_env_unset(self, tmp_path, monkeypatch):
+        _fresh_skill_home(
+            tmp_path,
+            monkeypatch,
+            config_text="skills:\n  config:\n    wiki:\n      path: /cfg/path\n",
+            env_text="",
+        )
+        monkeypatch.delenv("LLM_WIKI_PATH", raising=False)
+        assert resolve_skill_config_values([dict(self.VAR)])["wiki.path"] == "/cfg/path"
+
+    def test_default_wins_when_nothing_set(self, tmp_path, monkeypatch):
+        home = _fresh_skill_home(tmp_path, monkeypatch, config_text="{}")
+        monkeypatch.delenv("LLM_WIKI_PATH", raising=False)
+        resolved = resolve_skill_config_values([dict(self.VAR)])["wiki.path"]
+        assert resolved.endswith("/wiki") and str(home) not in resolved
+
+    def test_blank_env_falls_through_to_config(self, tmp_path, monkeypatch):
+        _fresh_skill_home(
+            tmp_path,
+            monkeypatch,
+            config_text="skills:\n  config:\n    wiki:\n      path: /cfg/path\n",
+            env_text="LLM_WIKI_PATH=   \n",
+        )
+        monkeypatch.setenv("LLM_WIKI_PATH", "   ")
+        assert resolve_skill_config_values([dict(self.VAR)])["wiki.path"] == "/cfg/path"
+
+    def test_var_without_env_key_ignores_process_env(self, tmp_path, monkeypatch):
+        _fresh_skill_home(
+            tmp_path,
+            monkeypatch,
+            config_text="skills:\n  config:\n    wiki:\n      path: /cfg/path\n",
+        )
+        monkeypatch.setenv("LLM_WIKI_PATH", "/env/path")
+        var = {"key": "wiki.path", "description": "Wiki path", "default": "~/wiki"}
+        assert resolve_skill_config_values([var])["wiki.path"] == "/cfg/path"
