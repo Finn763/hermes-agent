@@ -25,11 +25,12 @@ import tempfile
 import threading
 import time
 import unicodedata
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Any, Literal, Optional, List, Tuple, Set
+from typing import Dict, Any, Callable, Literal, Optional, List, Tuple, Set
 
 import hermes_yaml as yaml
 
@@ -2120,6 +2121,25 @@ def atomic_config_replace(
         config_path, data, allow_omissions=True, extra_content_on_create=extra_content_on_create)
 
 
+_readonly_projection: ContextVar[
+    Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]
+] = ContextVar("hermes_readonly_projection", default=None)
+
+
+@contextmanager
+def readonly_config_scope(project: Callable[[Dict[str, Any]], Dict[str, Any]]):
+    """Project a copy of the cached config for read-only consumers inside the scope.
+    ``project`` receives a deepcopy and returns the dict ``load_config_readonly()`` serves;
+    the shared cache is never touched. ``load_config()``/``save_config()`` keep the persisted
+    view on purpose (ponytail: writers must never see or persist runtime-projected facts), so
+    consumers that should see the overlay must read via ``load_config_readonly()``."""
+    token = _readonly_projection.set(project)
+    try:
+        yield
+    finally:
+        _readonly_projection.reset(token)
+
+
 def load_config() -> Dict[str, Any]:
     """Load the merged configuration (DEFAULT_CONFIG + config.yaml + managed scope, env-expanded).
     Cached on the file signature; returns a deepcopy since most call sites mutate the result.
@@ -2131,7 +2151,11 @@ def load_config_readonly() -> Dict[str, Any]:
     """``load_config()`` without the defensive deepcopy (~half of the 265us cache-hit cost).
     **Mutating the returned dict (or any nested structure) corrupts the in-process cache for
     every subsequent caller** — only for code paths that never write to the result."""
-    return _load_config_impl(want_deepcopy=False)
+    cfg = _load_config_impl(want_deepcopy=False)
+    project = _readonly_projection.get()
+    if project is None:
+        return cfg
+    return project(copy.deepcopy(cfg))
 
 
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
