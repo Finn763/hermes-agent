@@ -7983,13 +7983,70 @@ KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
 # Patterns in last_failure_error that indicate a quota / auth blocker.
 # These errors won't resolve by retrying immediately — auto-block instead.
+# ``not configured`` / model-identity patterns cover provider/model
+# misconfiguration (#63504): a worker that dies on bad config must defer
+# like an auth blocker, not spin the retry loop.
 _RESPAWN_BLOCKER_RE = re.compile(
     r"\b(quota|rate[\s_\-]?limit|429|403|auth\w*|"
     r"unauthorized|forbidden|billing|subscription|"
     r"access[\s_]denied|permission[\s_]denied|"
-    r"invalid[\s_]api[\s_]key)\b",
+    r"invalid[\s_]api[\s_]key|not configured|"
+    r"invalid[\s_\-]?model|unknown[\s_\-]?model|"
+    r"unsupported[\s_\-]?model)\b",
     re.IGNORECASE,
 )
+
+# Provider/model startup-failure signature in a dead worker's log tail
+# (#63504: ``OpenAI Codex rejected grok-4.5`` / ``fallback to xai-oauth
+# failed because provider not configured``). Only consulted for workers
+# that died without a terminal kanban call, so a match means the run
+# never really started.
+_WORKER_STARTUP_CONFIG_ERROR_RE = re.compile(
+    r"(provider.{0,50}not configured|not configured|"
+    r"invalid.{0,20}model|unknown.{0,20}model|"
+    r"unsupported.{0,20}model|model.{0,30}not found|"
+    r"reject.{0,30}(model|grok)|fallback.{0,40}fail)",
+    re.IGNORECASE,
+)
+
+# How much of a dead worker's log to scan for the startup-failure
+# signature. The failure prints at the end; anything older is history.
+_WORKER_LOG_TAIL_BYTES = 8192
+
+
+def _worker_startup_config_hint(task_id: str) -> Optional[str]:
+    """Return the worker-log line showing a provider/model startup failure.
+
+    Scans only the tail of ``<board>/logs/<task_id>.log`` (the transcript
+    ``_default_spawn`` already preserves). Returns the first matching line
+    (whitespace-collapsed, capped at 200 chars), else None. Never raises:
+    a missing/unreadable log just means no hint.
+    """
+    try:
+        log_path = worker_logs_dir() / f"{task_id}.log"
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _WORKER_LOG_TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    for line in tail.splitlines():
+        if _WORKER_STARTUP_CONFIG_ERROR_RE.search(line):
+            line = " ".join(line.split())
+            return line[:200] if len(line) > 200 else line
+    return None
+
+
+def _startup_config_error_text(task_id: str, assignee: Optional[str], hint: str) -> str:
+    """Actionable blocker text for a worker killed by bad provider config."""
+    who = f"profile '{assignee}'" if assignee else "worker profile"
+    return (
+        "worker startup failed (provider/model not configured): "
+        f"{hint} — fix the {who} provider/model config, then unblock; "
+        f"full transcript in worker log {task_id}.log."
+        # ponytail: log-tail scan, last 8KB only; deeper history via `hermes kanban log`
+    )
 
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
@@ -8924,25 +8981,44 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # a retry usually completes; the corrective sentence below is
                 # surfaced to the retry worker via the prior-attempt error in
                 # ``build_worker_context`` (guidance approach from #61817).
-                protocol_violation = True
-                error_text = (
-                    "worker exited cleanly (rc=0) without calling "
-                    "kanban_complete or kanban_block — protocol violation. "
-                    "If the prior run already did the work, verify it and "
-                    "report the result via kanban_complete; a run that ends "
-                    "without a terminal kanban call counts as failed no "
-                    "matter what it did."
-                )
-                event_kind = "protocol_violation"
-                event_payload = {
-                    "pid": pid,
-                    "claimer": row["claim_lock"],
-                    "exit_code": code,
-                    # Durable marker for _protocol_violation_streak: _end_run
-                    # copies this payload into the run metadata, which is how
-                    # the violation-only retry budget is derived later.
-                    "protocol_violation": True,
-                }
+                config_hint = _worker_startup_config_hint(row["id"])
+                if config_hint is not None:
+                    # #63504: rc=0 but the log shows a provider/model
+                    # startup failure — the run never started, so this is
+                    # a config crash, not a protocol violation (spending
+                    # the violation retry budget here just loops on
+                    # broken config).
+                    protocol_violation = False
+                    error_text = _startup_config_error_text(
+                        row["id"], row["assignee"], config_hint,
+                    )
+                    event_kind = "crashed"
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "exit_code": code,
+                        "worker_log": f"{row['id']}.log",
+                    }
+                else:
+                    protocol_violation = True
+                    error_text = (
+                        "worker exited cleanly (rc=0) without calling "
+                        "kanban_complete or kanban_block — protocol violation. "
+                        "If the prior run already did the work, verify it and "
+                        "report the result via kanban_complete; a run that ends "
+                        "without a terminal kanban call counts as failed no "
+                        "matter what it did."
+                    )
+                    event_kind = "protocol_violation"
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "exit_code": code,
+                        # Durable marker for _protocol_violation_streak: _end_run
+                        # copies this payload into the run metadata, which is how
+                        # the violation-only retry budget is derived later.
+                        "protocol_violation": True,
+                    }
             elif kind == "rate_limited":
                 # Worker bailed because the provider rate-limited / exhausted
                 # quota (EX_TEMPFAIL sentinel). This is NOT a task failure —
@@ -8976,6 +9052,17 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
+                # #63504: startup crash (fast exit, signal, or vanished pid)
+                # with a provider/model error in the worker log is a config
+                # failure — stamp the actionable reason so the respawn guard
+                # defers and the breaker blocks with a fixable message
+                # instead of a bare "pid N not alive".
+                config_hint = _worker_startup_config_hint(row["id"])
+                if config_hint is not None:
+                    error_text = _startup_config_error_text(
+                        row["id"], row["assignee"], config_hint,
+                    )
+                    event_payload["worker_log"] = f"{row['id']}.log"
 
             retry_status = _retry_status_for_run(conn, row["id"])
             event_payload["retry_status"] = retry_status
