@@ -2413,3 +2413,97 @@ class TestGetByPrefix:
         result = registry.poll("4dae56ca")
         assert result["session_id"] == "proc_4dae56ca81f6"
         assert result["status"] == "running"
+
+
+# =========================================================================
+# systemd cgroup isolation for dashboard-spawned local executors (#70800)
+# =========================================================================
+class TestDashboardCgroupIsolation:
+    """Dashboard flavor of the #70716 gateway isolation.
+
+    Issue #70800: terminal-tool workers spawned by ``hermes dashboard``
+    (``hermes-dashboard.service``) share the dashboard cgroup, so a heavy
+    suite can throttle the HTTP control plane (MemoryHigh) and survive a
+    service restart.  Background spawns from the dashboard server process
+    itself must get their own transient scope, exactly like gateway spawns.
+    Runs unskipped on Windows: every OS interaction is mocked.
+    """
+
+    @pytest.fixture()
+    def _dashboard_identity(self, monkeypatch):
+        """Opt-in: mark this test as running AS the live dashboard server."""
+        import tools.process_registry as _pr
+
+        monkeypatch.setattr(_pr, "_IS_WINDOWS", False)
+        monkeypatch.setenv("_HERMES_DASHBOARD_SERVER_PID", str(os.getpid()))
+        monkeypatch.setattr(
+            "gateway.restart.is_gateway_supervisor_process",
+            lambda: True,
+        )
+
+    def _fake_popen_capture(self):
+        captured = {}
+
+        def fake_popen(argv, **kwargs):
+            captured["argv"] = list(argv)
+            captured["start_new_session"] = kwargs.get("start_new_session")
+            proc = MagicMock()
+            proc.pid = 4321
+            proc.stdout = iter([])
+            proc.stdin = MagicMock()
+            proc.poll.return_value = None
+            return proc
+
+        return fake_popen, captured
+
+    def _spawn(self, registry, monkeypatch, scope_available=True):
+        fake_popen, captured = self._fake_popen_capture()
+        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr(
+            "tools.process_registry._worker_memory_max_bytes",
+            lambda: 512 * 1024 * 1024,  # os.sysconf missing on Windows
+        )
+        monkeypatch.setattr(
+            "tools.process_registry._systemd_run_user_scope_available",
+            lambda: scope_available,
+        )
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        with (
+            patch("subprocess.Popen", side_effect=fake_popen),
+            patch("threading.Thread", return_value=MagicMock()),
+            patch.object(registry, "_write_checkpoint"),
+        ):
+            session = registry.spawn_local("echo hello", cwd="/tmp")
+        return session, captured
+
+    def test_wraps_in_systemd_scope_when_dashboard_supervised(
+        self, registry, monkeypatch, _dashboard_identity
+    ):
+        """RED on unfixed main: dashboard spawn must be scope-wrapped."""
+        session, captured = self._spawn(registry, monkeypatch)
+        argv = captured["argv"]
+        assert argv[0] == "/usr/bin/systemd-run", argv
+        assert "--scope" in argv
+        assert captured["start_new_session"] is True
+        assert session.systemd_unit == f"hermes-worker-{session.id}.scope"
+
+    def test_no_wrap_for_dashboard_child_process(
+        self, registry, monkeypatch, _dashboard_identity
+    ):
+        """A terminal child inherits the marker but owns another PID: no wrap."""
+        monkeypatch.setenv("_HERMES_DASHBOARD_SERVER_PID", "99999999")
+        _, captured = self._spawn(registry, monkeypatch)
+        assert captured["argv"] == ["/bin/bash", "-lic", "set +m; echo hello"]
+
+    def test_no_wrap_when_no_supervisor(self, registry, monkeypatch):
+        """Plain CLI (no supervisor markers) never wraps even with marker set."""
+        import tools.process_registry as _pr
+
+        monkeypatch.setattr(_pr, "_IS_WINDOWS", False)
+        monkeypatch.setenv("_HERMES_DASHBOARD_SERVER_PID", str(os.getpid()))
+        monkeypatch.setattr(
+            "gateway.restart.is_gateway_supervisor_process",
+            lambda: False,
+        )
+        _, captured = self._spawn(registry, monkeypatch)
+        assert captured["argv"] == ["/bin/bash", "-lic", "set +m; echo hello"]

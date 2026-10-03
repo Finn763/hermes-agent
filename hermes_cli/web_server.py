@@ -19472,6 +19472,13 @@ def start_server(
     ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
     bootstrap state. Neither is persisted or exported to child processes.
     """
+    # Server-identity marker (#70800): background terminal workers spawned by
+    # this process check it to decide systemd-scope cgroup isolation (see
+    # ``tools.process_registry._is_supervised_dashboard_process``). Children
+    # inherit the value but never match their own PID, so only the server
+    # itself wraps — never its terminal children.
+    os.environ["_HERMES_DASHBOARD_SERVER_PID"] = str(os.getpid())
+
     _apply_ssh_session_token(ssh_session_token or "")
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 

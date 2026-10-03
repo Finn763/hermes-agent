@@ -280,6 +280,41 @@ def _is_supervised_gateway_process() -> bool:
         return False
 
 
+def _is_supervised_dashboard_process() -> bool:
+    """Return whether this process is the supervised Hermes dashboard server.
+
+    Dashboard flavor of :func:`_is_supervised_gateway_process` (issue
+    #70800): terminal-tool workers spawned by ``hermes dashboard`` /
+    ``hermes serve`` (e.g. under ``hermes-dashboard.service`` with
+    ``MemoryHigh``) share the dashboard cgroup, so a heavy suite can
+    throttle the HTTP control plane and survive a service restart.
+
+    Identity comes from ``_HERMES_DASHBOARD_SERVER_PID``, stamped by
+    ``hermes_cli.web_server.start_server``. Terminal children inherit the
+    marker but own a different PID, so scopes stay limited to the server
+    itself — mirroring the gateway PID-file guard. Supervision is the same
+    generic systemd/s6/launchd markers (a dashboard unit sets
+    ``INVOCATION_ID`` just like a gateway unit does).
+    """
+    if os.environ.get("_HERMES_DASHBOARD_SERVER_PID") != str(os.getpid()):
+        return False
+
+    try:
+        from gateway.restart import is_gateway_supervisor_process
+
+        return is_gateway_supervisor_process()
+    except Exception as exc:
+        logger.debug("Could not verify supervised dashboard process identity: %s", exc)
+        return False
+
+
+def _is_supervised_server_process() -> bool:
+    """Return whether this process is a supervised Hermes server (gateway
+    #70716 or dashboard #70800) whose background workers need their own
+    systemd scope. Single guard for every spawn path below."""
+    return _is_supervised_gateway_process() or _is_supervised_dashboard_process()
+
+
 def _build_systemd_scope_argv(
     shell_argv: List[str],
     unit_suffix: str,
@@ -1080,14 +1115,15 @@ class ProcessRegistry:
                 pty_env["PYTHONUNBUFFERED"] = "1"
                 pty_argv = [user_shell, "-lic", f"set +m; {safe_command}"]
 
-                # Cgroup isolation for PTY mode (#70716, reviewer gap #1):
-                # Wrap the PTY command in a systemd scope so interactive
-                # executors get their own cgroup, same as pipe mode.
-                pty_in_supervised_gateway = (
-                    not _IS_WINDOWS and _is_supervised_gateway_process()
+                # Cgroup isolation for PTY mode (#70716, dashboard #70800,
+                # reviewer gap #1): wrap the PTY command in a systemd scope
+                # so interactive executors get their own cgroup, same as pipe
+                # mode.
+                pty_in_supervised_server = (
+                    not _IS_WINDOWS and _is_supervised_server_process()
                 )
                 pty_use_systemd_scope = (
-                    pty_in_supervised_gateway and _systemd_run_user_scope_available()
+                    pty_in_supervised_server and _systemd_run_user_scope_available()
                 )
 
                 if pty_use_systemd_scope:
@@ -1097,11 +1133,11 @@ class ProcessRegistry:
                     )
                     session.systemd_unit = f"hermes-worker-{session.id}.scope"
                     pty_scope_attempted = True
-                elif pty_in_supervised_gateway:
+                elif pty_in_supervised_server:
                     logger.debug(
                         "PTY background executor not isolated in a "
                         "systemd scope (systemd-run --user unavailable); "
-                        "worker shares the gateway cgroup."
+                        "worker shares the server cgroup."
                     )
 
                 pty_proc = _PtyProcessCls.spawn(
@@ -1155,16 +1191,16 @@ class ProcessRegistry:
         bg_env["PYTHONUNBUFFERED"] = "1"
         _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
 
-        # Cgroup isolation (#70716): when running in the live, supervised
-        # systemd gateway, wrap the worker in its own transient systemd
-        # scope so it gets a separate cgroup.  An OOM in the worker then
-        # kills only the worker instead of taking down the whole gateway
-        # cgroup (and the messaging control plane with it). This applies to
-        # both pipe mode and the PTY path above.
+        # Cgroup isolation (#70716, dashboard #70800): when running in a live,
+        # supervised systemd server (gateway or dashboard), wrap the worker
+        # in its own transient systemd scope so it gets a separate cgroup.
+        # An OOM in the worker then kills only the worker instead of taking
+        # down the whole server cgroup (and the messaging/HTTP control plane
+        # with it). This applies to both pipe mode and the PTY path above.
         shell_argv = [user_shell, "-lic", f"set +m; {safe_command}"]
-        in_supervised_gateway = not _IS_WINDOWS and _is_supervised_gateway_process()
+        in_supervised_server = not _IS_WINDOWS and _is_supervised_server_process()
         use_systemd_scope = (
-            in_supervised_gateway and _systemd_run_user_scope_available()
+            in_supervised_server and _systemd_run_user_scope_available()
         )
 
         if use_systemd_scope:
@@ -1190,15 +1226,16 @@ class ProcessRegistry:
         else:
             spawn_argv = shell_argv
             popen_start_new_session = True
-            if in_supervised_gateway:
+            if in_supervised_server:
                 # Running under a supervisor but could not get a private
-                # cgroup — the worker shares the gateway cgroup, so an OOM
-                # in the worker can still kill the whole gateway (#70716).
+                # cgroup — the worker shares the server cgroup, so an OOM
+                # in the worker can still kill the whole server (#70716,
+                # dashboard #70800).
                 logger.debug(
                     "Local background executor not isolated in a systemd scope "
-                    "(in_supervised_gateway=%s, systemd-run --user available=%s); "
-                    "worker shares the gateway cgroup.",
-                    in_supervised_gateway,
+                    "(in_supervised_server=%s, systemd-run --user available=%s); "
+                    "worker shares the server cgroup.",
+                    in_supervised_server,
                     _systemd_run_user_scope_available(),
                 )
 
