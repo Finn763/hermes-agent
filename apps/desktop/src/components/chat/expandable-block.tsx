@@ -35,8 +35,13 @@ export function ExpandableBlock({ children, className }: ExpandableBlockProps) {
         className={cn(
           // `scrollbar-overlay` opts out of the app-wide classic thin gutters so
           // this scroller keeps platform overlay bars (no always-on track).
-          'scrollbar-overlay overflow-y-auto overflow-x-auto',
-          expanded ? 'max-h-[40dvh]' : 'max-h-[7.5rem]',
+          'scrollbar-overlay overflow-x-auto',
+          // Collapsed: `overflow-y-clip`, NOT a scroll container — a nested
+          // vertical scroller traps wheel events while reading history, so the
+          // view stalls inside each code block then lurches (#42180). clip
+          // chains the wheel to the transcript; wide code still pans via x.
+          // ponytail: collapsed code is view-only; Expand restores the y-scroller.
+          expanded ? 'max-h-[40dvh] overflow-y-auto' : 'max-h-[7.5rem] overflow-y-clip',
           className
         )}
         ref={innerRef}

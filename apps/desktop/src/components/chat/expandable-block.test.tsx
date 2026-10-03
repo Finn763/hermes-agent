@@ -55,6 +55,31 @@ describe('ExpandableBlock', () => {
     expect(toggle.className).not.toContain('inset-x-0')
   })
 
+  it('does not trap vertical wheel in the transcript when collapsed (#42180)', () => {
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
+    const { container } = render(
+      <ExpandableBlock>
+        <pre data-testid="content">{'line\n'.repeat(20)}</pre>
+      </ExpandableBlock>
+    )
+
+    const inner = container.querySelector('[data-testid="content"]')!.parentElement!
+
+    // Collapsed: a vertical scroll container here traps wheel events while
+    // reading history — the view stalls inside the code block then lurches.
+    // overflow-y-clip is no scroll container (wheel chains to the transcript)
+    // while overflow-x-auto keeps wide-code panning.
+    expect(inner.className).toContain('overflow-y-clip')
+    expect(inner.className).not.toMatch(/(?:^|\s)overflow-y-auto(?:\s|$)/)
+    expect(inner.className).toContain('overflow-x-auto')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand' }))
+
+    // Expanded by choice: the reader is inside the code, so it scrolls.
+    expect(inner.className).toContain('overflow-y-auto')
+  })
+
   it('still toggles expanded state when the compact control is clicked', () => {
     vi.stubGlobal('ResizeObserver', TestResizeObserver)
 
