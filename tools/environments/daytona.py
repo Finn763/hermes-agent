@@ -125,6 +125,37 @@ class DaytonaEnvironment(BaseEnvironment):
     def _daytona_delete(self, remote_paths: list[str]) -> None:
         self._sandbox.process.exec(quoted_rm_command(remote_paths))
 
+    def _ensure_remote_directory(self, remote_path: str) -> None:
+        """Create the parent directory of a sandbox path, validating the result."""
+        # remote_path is a POSIX path on the sandbox; never run it through the
+        # host's Path (Windows would mangle the separators into backslashes).
+        parent = str(PurePosixPath(remote_path).parent)
+        self._sandbox.process.exec(quoted_mkdir_command([parent]))
+        if self._sandbox.process.exec(f"test -d {shlex.quote(parent)}").exit_code != 0:
+            raise ValueError(f"Daytona: parent path is not a directory: {parent}")
+
+    def upload_files(self, files: list[tuple[str, str]], *, timeout: int | None = None) -> int:
+        """Stage host files into the sandbox with one batched SDK upload."""
+        # timeout bounds the mkdir probe only: on this SDK pin upload_files()
+        # takes just the FileUpload list (see _daytona_bulk_upload), so there
+        # is no upload-side timeout to thread through.
+        from daytona.common.filesystem import FileUpload
+
+        if not files:
+            return 0
+        with self._lock:
+            self._ensure_sandbox_ready()
+            parents = unique_parent_dirs(files)
+            if parents:
+                mkdir = quoted_mkdir_command(parents)
+                if timeout is None:
+                    self._sandbox.process.exec(mkdir)
+                else:
+                    self._sandbox.process.exec(mkdir, timeout=timeout)
+            self._sandbox.fs.upload_files(
+                [FileUpload(source=host_path, destination=remote_path) for host_path, remote_path in files])
+            return len(files)
+
     def _ensure_sandbox_ready(self) -> None:
         """Restart sandbox if it was stopped (e.g., by a previous interrupt)."""
         self._sandbox.refresh_data()

@@ -42,7 +42,23 @@ def _patch_daytona_imports(monkeypatch):
     daytona_mod.Resources = MagicMock(name="Resources")
     daytona_mod.SandboxState = _SandboxState
 
-    monkeypatch.setitem(__import__("sys").modules, "daytona", daytona_mod)
+    class _FileUpload:
+        """Stub mirroring daytona.common.filesystem.FileUpload(source, destination)."""
+
+        def __init__(self, source, destination):
+            self.source = source
+            self.destination = destination
+
+    filesystem_mod = _types.ModuleType("daytona.common.filesystem")
+    filesystem_mod.FileUpload = _FileUpload
+    common_mod = _types.ModuleType("daytona.common")
+    common_mod.filesystem = filesystem_mod
+    daytona_mod.common = common_mod
+
+    modules = __import__("sys").modules
+    monkeypatch.setitem(modules, "daytona", daytona_mod)
+    monkeypatch.setitem(modules, "daytona.common", common_mod)
+    monkeypatch.setitem(modules, "daytona.common.filesystem", filesystem_mod)
     return daytona_mod
 
 
@@ -289,6 +305,65 @@ class TestEnsureSandboxReady:
         env._sandbox.state = "started"
         env._ensure_sandbox_ready()
         env._sandbox.start.assert_not_called()
+
+
+class TestUploadFiles:
+    """Public batch staging via the SDK ``fs.upload_files()`` API (issue #5996)."""
+
+    def test_batch_upload_builds_file_upload_objects(self, make_env, tmp_path):
+        env = make_env()
+        env._sandbox.process.exec.reset_mock()
+
+        host_a = tmp_path / "a.txt"
+        host_a.write_text("aaa", encoding="utf-8")
+        host_b = tmp_path / "b.txt"
+        host_b.write_text("bbb", encoding="utf-8")
+        files = [(str(host_a), "/root/stage/a.txt"), (str(host_b), "/root/stage/b.txt")]
+
+        assert env.upload_files(files) == 2
+
+        uploads = env._sandbox.fs.upload_files.call_args[0][0]
+        assert [(u.source, u.destination) for u in uploads] == files
+
+    def test_upload_creates_unique_parent_dirs(self, make_env, tmp_path):
+        env = make_env()
+        env._sandbox.process.exec.reset_mock()
+
+        host_file = tmp_path / "x.txt"
+        host_file.write_text("x", encoding="utf-8")
+        files = [
+            (str(host_file), "/root/stage/b/x.txt"),
+            (str(host_file), "/root/stage/a/x.txt"),
+            (str(host_file), "/root/stage/a/y.txt"),
+        ]
+
+        env.upload_files(files)
+
+        mkdir_cmd = env._sandbox.process.exec.call_args_list[0][0][0]
+        assert mkdir_cmd == "mkdir -p /root/stage/a /root/stage/b"
+
+    def test_ensure_remote_directory_rejects_file_parent(self, make_env):
+        env = make_env()
+        env._sandbox.process.exec.reset_mock()
+        env._sandbox.process.exec.side_effect = [
+            _make_exec_response(exit_code=0),  # mkdir -p
+            _make_exec_response(exit_code=1),  # test -d fails: parent is a file
+        ]
+
+        with pytest.raises(ValueError, match="not a directory"):
+            env._ensure_remote_directory("/root/blocked/file.txt")
+
+    def test_upload_verifies_sandbox_readiness(self, make_env, tmp_path, daytona_sdk):
+        env = make_env()
+        env._sandbox.state = daytona_sdk.SandboxState.STOPPED
+        env._sandbox.process.exec.reset_mock()
+        env._sandbox.start.reset_mock()
+
+        host_file = tmp_path / "x.txt"
+        host_file.write_text("x", encoding="utf-8")
+        env.upload_files([(str(host_file), "/root/stage/x.txt")])
+
+        env._sandbox.start.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
