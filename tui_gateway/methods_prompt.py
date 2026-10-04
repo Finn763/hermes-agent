@@ -1149,7 +1149,7 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     return _approval_reply(
-        rid, "approvals", lambda a: a.list_gateway_approvals(session["session_key"]))
+        rid, "approvals", lambda a: _pending_approval_payloads(session["session_key"]))
 
 
 @method("approval.received")
@@ -1318,6 +1318,18 @@ _PREVIEW_RESTART_HISTORY_NOTE = (
 
 
 # ── approvals ───────────────────────────────────────────────────────────────
+
+def _pending_approval_payloads(session_key: str) -> list[dict]:
+    """Client-safe pending approvals for ``approval.pending`` (the replay path).
+
+    Runs every queue entry through the same payload builder the push path uses, so
+    ``choices`` (and command redaction) are computed in one place. Returning the raw
+    entries dropped ``choices``, and a reconnecting client re-derived the buttons
+    itself — re-offering Session/Always for a scope the requester had withheld (#96703)."""
+    from tools.approval import list_gateway_approvals
+    from tui_gateway.server import _approval_request_payload
+    return [_approval_request_payload(entry) for entry in list_gateway_approvals(session_key)]
+
 
 def _approval_reply(rid, result_key, call):
     """``_ok({result_key: call(tools.approval)})``, 5004 on any failure."""

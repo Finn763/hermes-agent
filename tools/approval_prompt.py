@@ -316,7 +316,14 @@ def request_elicitation_consent(message: str, description: str, *,
             decision = _gw._await_gateway_decision(
                 session_key, notify_cb, {"command": message, "description": description,
                                          "pattern_key": "mcp_elicitation",
-                                         "pattern_keys": ["mcp_elicitation"]}, surface=surface)
+                                         "pattern_keys": ["mcp_elicitation"],
+                                         # Elicitation is a per-call confirmation — no pattern to remember,
+                                         # so only Once/Deny render (mirrors the CLI below). Carried on the
+                                         # entry data so the replay path (approval.pending) computes the
+                                         # same `choices`; without it a reconnecting client re-offers
+                                         # Session/Always for a scope the requester withheld (#96703).
+                                         "allow_session": False,
+                                         "allow_permanent": False}, surface=surface)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"
@@ -327,9 +334,11 @@ def request_elicitation_consent(message: str, description: str, *,
         return _consent(decision.get("choice"), "decline")
 
     # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
+    # allow_session=False likewise hides [s]ession; unlike the dangerous-command gate these are
+    # one-shot buttons (#96703).
     try:
         choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
-                                           allow_permanent=False, title=title)
+                                           allow_session=False, allow_permanent=False, title=title)
     except Exception as exc:
         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
         return "decline"

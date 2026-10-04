@@ -56,7 +56,26 @@ def _tool_is_read_only(server_name: str, tool_name: str) -> bool:
     return _core._tool_read_only_hints.get(_resolve_server_key(server_name), {}).get(tool_name) is True
 
 
-def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
+def _format_trust_gate_args(args: Any) -> str:
+    """Serialize trust-gate call args for the approval card (redacted, capped).
+
+    Args arrive as JSON, so the ``name=value`` error-string patterns miss
+    ``"api_key": "..."``-shaped secrets; redact through the shared redactor every
+    other egress of this field uses, with ``force=True`` because the approval card
+    is a safety boundary that must never echo a raw secret."""
+    try:
+        raw = json.dumps(args, sort_keys=True, default=str)
+    except Exception:
+        raw = str(args)
+    from agent.redact import redact_sensitive_text
+    raw = redact_sensitive_text(raw, force=True)
+    # ponytail: fixed 1500-char cap; per-tool caps if cards need tuning
+    if len(raw) > 1500:
+        return raw[:1500] + "... truncated"
+    return raw
+
+
+def _trust_gate_check(server_name: str, tool_name: str, args: Any = None) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
     else a ``tool_error``. Fail-closed: approval-system errors block."""
     from tools.mcp_tool_scope import _server_key
@@ -64,11 +83,14 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     trust = _core._server_trust_levels.get(_server_key(server_name), _core._TRUST_FULL)
     if trust != _core._TRUST_UNTRUSTED or _tool_is_read_only(server_name, tool_name):
         return None
+    message = (f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This tool is write-capable "
+               f"(no readOnlyHint=true annotation) and may modify external state.")
+    if args:
+        message += f"\nArguments:\n```json\n{_format_trust_gate_args(args)}\n```"
     try:  # lazy: tools.approval routes the prompt to whichever surface owns the session
         from tools.approval_prompt import request_elicitation_consent
         answer = request_elicitation_consent(
-            f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This tool is write-capable "
-            f"(no readOnlyHint=true annotation) and may modify external state.",
+            message,
             f"Server '{server_name}' is configured 'trust: untrusted'. "
             f"Approve to run '{tool_name}' once, or deny to block it.",
             surface=f"mcp-trust/{server_name}", title=f"MCP server '{server_name}' is asking")
@@ -558,7 +580,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
     def _handler(args: dict, **kwargs) -> str:
         # Security boundary: untrusted-server write tools need approval before ANY transport work (incl. lazy spawn).
-        error = _trust_gate_check(server_name, tool_name) or _check_circuit_breaker(server_name)
+        error = _trust_gate_check(server_name, tool_name, args) or _check_circuit_breaker(server_name)
         if error is not None:
             return error
         server, error = _acquire_call_server(server_name, tool_timeout)

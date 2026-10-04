@@ -588,6 +588,9 @@ def test_clear_pending_cancels_only_that_session(capture):
 
 
 def test_approval_pending_replays_unresolved_requests(server, monkeypatch):
+    """Replay goes through the same payload builder as the push path: ``choices`` are
+    computed server-side (here the default: no allow_* pins), never left for the client
+    to re-derive from a bare allow_session."""
     from tools import approval
 
     server._sessions["ui-1"] = {"session_key": "agent-1", "history": []}
@@ -598,7 +601,8 @@ def test_approval_pending_replays_unresolved_requests(server, monkeypatch):
         {"id": "r1", "method": "approval.pending", "params": {"session_id": "ui-1"}}
     )
 
-    assert response["result"] == {"approvals": pending}
+    assert response["result"] == {"approvals": [{"request_id": "req-1", "command": "danger",
+                                                 "choices": ["once", "session", "always", "deny"]}]}
 
 
 def test_approval_received_acknowledges_exact_request(server, monkeypatch):
