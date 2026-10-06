@@ -437,17 +437,14 @@ class GatewaySlashCommandsMixin(
 
         # Per-bot stop (#123928): a leading @bot token scopes the stop to that bot's profile
         # namespace. Profile ids are lowercase on disk, so the match is case-insensitive; any
-        # other (or no) argument keeps the historical room-wide behavior. Name resolution is the
-        # key namespace itself — ponytail: no roster/registry lookup; add one when display names
-        # diverge from profile ids.
-        target_ns: Optional[str] = None
-        args = (event.get_command_args() or "").strip()
-        if args.lstrip()[:1] == "@":
-            first = args.split(None, 1)[0].lstrip("@").rstrip(",.;:!?")
-            if first:
-                from gateway.session import _session_key_namespace
-                target_ns = _session_key_namespace(first.lower())
-        own_is_target = target_ns is None or session_key.startswith(target_ns + ":")
+        # other (or no) argument keeps the historical room-wide behavior. Resolution is shared
+        # with the busy fast-path and the pending-sentinel exit (resolve_stop_target) so the
+        # token can never be parsed two different ways. No roster/registry lookup;
+        # ponytail: add one when display names diverge from profile ids.
+        from gateway.session import resolve_stop_target
+        target_ns = resolve_stop_target(event.get_command_args())
+        own_is_target = not target_ns or any(
+            session_key.startswith(ns + ":") for ns in target_ns)
 
         async def _stop(key: str, invalidation_reason: str) -> None:
             await self._interrupt_and_clear_session(
@@ -470,9 +467,9 @@ class GatewaySlashCommandsMixin(
         # shaped key kept going. See `_chat_scoped_run_keys` for the shapes and isolation bounds;
         # both tiers are authorization-gated. A targeted stop scans the target bot's namespace, so
         # the caller's own and every other bot's runs are never matched.
-        runs = self._same_chat_runs(source, session_key, namespace=target_ns)
+        runs = self._same_chat_runs(source, session_key, namespaces=target_ns or None)
         fallback_keys = self._chat_scoped_run_keys(source, runs)
-        if target_ns is None:
+        if not target_ns:
             sibling_keys = self._sibling_thread_run_keys(source, runs)
             # Reason is per-stop, not per-key: a stop that only ever had thread siblings keeps
             # its own label for hook consumers, anything wider is a chat-scope stop.

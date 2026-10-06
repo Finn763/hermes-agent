@@ -104,3 +104,147 @@ async def test_bare_stop_keeps_own_profile_scope():
 
     assert [k for k, _ in interrupted] == [main_key]
     assert result == t("gateway.stop.stopped")
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (#123928): one shared target resolver for all /stop entries
+# ---------------------------------------------------------------------------
+
+
+def _event(text, source):
+    return MessageEvent(text=text, message_type=MessageType.TEXT, source=source)
+
+
+@pytest.mark.asyncio
+async def test_busy_stop_at_other_bot_delegates_and_spares_the_caller():
+    """P1 (review): while the caller's own session is running, ``/stop @work`` used to
+    take the busy hard-kill path and interrupt the CALLER. The target must go through
+    the shared resolver and stop only the named bot."""
+    stop_source, own_key = _slack_group("U-alice")
+    _, main_key = _slack_group("U-bob")
+    _, work_key = _slack_group("U-bob", profile="work")
+    runner, interrupted = _runner_with_runs([own_key, main_key, work_key], own_key)
+
+    result = await runner._busy_stop_command(
+        _event("/stop @work", stop_source), own_key, stop_source)
+
+    assert interrupted == [(work_key, "stop_command_targeted")]
+    assert result == t("gateway.stop.stopped")
+
+
+@pytest.mark.asyncio
+async def test_busy_stop_own_target_keeps_hard_kill_fast_path():
+    stop_source, own_key = _slack_group("U-alice")
+    runner, interrupted = _runner_with_runs([own_key], own_key)
+
+    result = await runner._busy_stop_command(
+        _event("/stop", stop_source), own_key, stop_source)
+
+    assert interrupted == [(own_key, "stop_command")]
+    assert result == t("gateway.stop.stopped")
+
+
+@pytest.mark.asyncio
+async def test_stop_at_main_reaches_the_default_bot():
+    """P2 (review): ``main`` is the default bot's spelling to users (its keys live under
+    ``agent:main``); ``/stop @main`` used to resolve to the marked ``agent:main~``
+    namespace only and silently stop nothing."""
+    stop_source, _ = _slack_group("U-alice")
+    _, main_key = _slack_group("U-bob")
+    _, work_key = _slack_group("U-bob", profile="work")
+
+    interrupted, result = await _stop("/stop @main", stop_source, [main_key, work_key])
+
+    assert interrupted == [(main_key, "stop_command_targeted")]
+    assert result == t("gateway.stop.stopped")
+
+
+@pytest.mark.asyncio
+async def test_stop_at_main_also_covers_the_marked_main_profile():
+    """The marked ``agent:main~`` namespace (a profile literally named ``main``) has no
+    other user-facing spelling: ``@main`` covers it and the default alike."""
+    stop_source, _ = _slack_group("U-alice")
+    _, main_key = _slack_group("U-bob")
+    _, marked_key = _slack_group("U-bob", profile="main")
+    assert marked_key.startswith("agent:main~:")
+
+    interrupted, result = await _stop("/stop @main", stop_source, [main_key, marked_key])
+
+    assert {key for key, _ in interrupted} == {main_key, marked_key}
+    assert result == t("gateway.stop.stopped")
+
+
+@pytest.mark.asyncio
+async def test_stop_at_default_still_names_the_default_bot():
+    stop_source, _ = _slack_group("U-alice")
+    _, main_key = _slack_group("U-bob")
+    _, work_key = _slack_group("U-bob", profile="work")
+
+    interrupted, result = await _stop("/stop @default", stop_source, [main_key, work_key])
+
+    assert interrupted == [(main_key, "stop_command_targeted")]
+
+
+@pytest.mark.asyncio
+async def test_pending_sentinel_stop_at_other_delegates_instead_of_unlocking():
+    """Review :693: a ``/stop @other`` arriving while the CALLER's session is only
+    starting (pending sentinel) used to force-clear the caller's sentinel; the target
+    must be delegated to the scoped handler instead."""
+    from types import SimpleNamespace
+
+    from gateway.run import _AGENT_PENDING_SENTINEL
+
+    stop_source, own_key = _slack_group("U-alice")
+    runner = object.__new__(GatewayRunner)
+    runner._running_agents = {}
+    released = []
+    runner._release_running_agent_state = lambda key: released.append(key)
+
+    async def _fake_busy_slash(event, source, quick_key):
+        return False, None
+
+    runner._hm_busy_slash_or_photo = _fake_busy_slash
+    runner._effective_busy_input_mode = lambda source: "interrupt"
+    runner._peek_session_state = lambda key: SimpleNamespace(
+        turn=SimpleNamespace(agent=_AGENT_PENDING_SENTINEL, started_ts=0))
+    delegated = []
+
+    async def _fake_stop_handler(event):
+        delegated.append(event.get_command_args())
+        return t("gateway.stop.stopped")
+
+    runner._handle_stop_command = _fake_stop_handler
+
+    result = await runner._hm_handle_running_session_message(
+        _event("/stop @work", stop_source), stop_source, own_key)
+
+    assert delegated == ["@work"]
+    assert released == []
+    assert result == t("gateway.stop.stopped")
+
+
+@pytest.mark.asyncio
+async def test_pending_sentinel_bare_stop_still_unlocks_the_session():
+    from types import SimpleNamespace
+
+    from gateway.run import _AGENT_PENDING_SENTINEL
+
+    stop_source, own_key = _slack_group("U-alice")
+    runner = object.__new__(GatewayRunner)
+    runner._running_agents = {}
+    released = []
+    runner._release_running_agent_state = lambda key: released.append(key)
+
+    async def _fake_busy_slash(event, source, quick_key):
+        return False, None
+
+    runner._hm_busy_slash_or_photo = _fake_busy_slash
+    runner._effective_busy_input_mode = lambda source: "interrupt"
+    runner._peek_session_state = lambda key: SimpleNamespace(
+        turn=SimpleNamespace(agent=_AGENT_PENDING_SENTINEL, started_ts=0))
+
+    result = await runner._hm_handle_running_session_message(
+        _event("/stop", stop_source), stop_source, own_key)
+
+    assert released == [own_key]
+    assert result is not None
