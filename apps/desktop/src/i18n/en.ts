@@ -11,6 +11,8 @@ import { enDiagnostics } from './en_diagnostics'
 import { enSettings } from './en_settings'
 import type { Translations } from './types'
 
+// The composition lines below match the pre-split en.ts top-level order, which is also this
+// object's enumeration order. Nothing walks the catalogue top level, so reordering is safe today.
 export const en: Translations = {
   connectors: enConnectors.connectors,
   sessionImport: enConnectors.sessionImport,
