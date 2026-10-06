@@ -29,6 +29,18 @@ def _kbd():
 
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
 
+# Connection-class transport failures, spotted by the exception name the aux
+# caller reports as "LLM error: <Name>" (APIConnectionError, ConnectError,
+# ConnectTimeout, ConnectionResetError, ...). The request never reached the
+# model: nothing about the card is broken and no tokens were billed, so these
+# must not consume the card's attempt budget — a few minutes of network blip
+# would otherwise starve it for the whole retry window (#118603 review).
+# Everything else (malformed/empty reply, DB reject, unavailable aux config,
+# HTTP 4xx/5xx) still counts toward the cap and is retried after the window.
+def _is_transient_error(reason: str) -> bool:
+    """True for connection-class failures that say nothing about the card."""
+    return "Connect" in (reason or "")
+
 
 @dataclass
 class _DispatcherSettings:
@@ -131,8 +143,8 @@ class _KanbanDispatcher:
 
     # A triage card whose decomposition keeps failing must not be retried on
     # every dispatcher tick forever (#118603): after this many consecutive
-    # failures the tick skips it (without spending per-tick budget) until the
-    # retry window elapses.
+    # counted failures the tick skips it (without spending per-tick budget)
+    # until the retry window elapses. Connection-class failures do not count.
     # ponytail: in-memory per process; persist a marker on the card if
     # restarts turn the residual ≤N bills/window into a leak again.
     _MAX_DECOMPOSE_ATTEMPTS = 3
@@ -296,7 +308,7 @@ class _KanbanDispatcher:
                                     slug, tid, self._MAX_DECOMPOSE_ATTEMPTS)
                                 continue
                             # Retry window elapsed: give the card a fresh budget so a
-                            # transient outage doesn't park it until restart.
+                            # stuck card doesn't park until restart.
                             del self._decompose_failures[(slug, tid)]
                         attempted += 1
                         successes += self._decompose_one(_decomp, slug, tid)
@@ -316,12 +328,19 @@ class _KanbanDispatcher:
             self._record_decompose_failure(slug, tid)
             return 0
         if not outcome.ok:
-            self._record_decompose_failure(slug, tid)
-            if self._decompose_failures.get((slug, tid), (0, 0.0))[0] <= 1:
-                logger.warning("kanban auto-decompose [%s]: %s failed: %s", slug, tid, outcome.reason)
+            if _is_transient_error(outcome.reason):
+                # Connection-class blip: nothing about the card is wrong and no
+                # bill happened, so retry it next tick instead of spending the
+                # card's attempt budget (#118603 review).
+                logger.debug("kanban auto-decompose [%s]: %s skipped (transient): %s",
+                             slug, tid, outcome.reason)
             else:
-                # Common no-op reasons (no aux client) must not spam logs every tick.
-                logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
+                self._record_decompose_failure(slug, tid)
+                if self._decompose_failures.get((slug, tid), (0, 0.0))[0] <= 1:
+                    logger.warning("kanban auto-decompose [%s]: %s failed: %s", slug, tid, outcome.reason)
+                else:
+                    # Common no-op reasons (no aux client) must not spam logs every tick.
+                    logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
             return 0
         self._decompose_failures.pop((slug, tid), None)
         if outcome.fanout and outcome.child_ids:

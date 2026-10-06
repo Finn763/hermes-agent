@@ -3,6 +3,9 @@
 Without a cap, ``auto_decompose_tick`` retries a card whose decomposition
 fails on *every* dispatcher tick, forever — burning dispatcher budget and
 (reported) re-billing one aux LLM call per tick with no cost attribution.
+Connection-class failures are exempt from the cap: the call never reached the
+model, so they are retried next tick instead of spending the card's budget
+(#118603 review).
 """
 
 from __future__ import annotations
@@ -41,9 +44,9 @@ def test_failing_triage_card_is_not_retried_every_tick_forever(monkeypatch):
     )
 
 
-def test_transient_failure_recovers_after_retry_window(monkeypatch):
-    """A card parked at the cap is retried once the window elapses, so a
-    transient upstream outage doesn't starve it until restart (#118603 review)."""
+def test_parked_card_is_retried_after_the_retry_window(monkeypatch):
+    """A counted failure (unusable reply) parks the card, but the retry window
+    grants a fresh budget so it does not stay parked until restart (#118603)."""
     monkeypatch.setattr(kwd, "_board_slugs", lambda kb: ["default"])
     now = [1_000_000.0]
     monkeypatch.setattr(kwd.time, "monotonic", lambda: now[0])
@@ -54,15 +57,15 @@ def test_transient_failure_recovers_after_retry_window(monkeypatch):
         if upstream_ok["v"]:
             return SimpleNamespace(ok=True, fanout=False, child_ids=None, reason=None)
         return SimpleNamespace(ok=False, fanout=False, child_ids=None,
-                               reason="LLM error: APIConnectionError")
+                               reason="LLM returned malformed JSON")
 
-    fake = SimpleNamespace(list_triage_ids=lambda: ["t_tmp"], decompose_task=fake_decompose)
+    fake = SimpleNamespace(list_triage_ids=lambda: ["t_parked"], decompose_task=fake_decompose)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_decompose", fake)
 
     dispatcher = _dispatcher()
     for _ in range(3):
         dispatcher.auto_decompose_tick(10)
-    assert dispatcher._decompose_failures[("default", "t_tmp")][0] == 3
+    assert dispatcher._decompose_failures[("default", "t_parked")][0] == 3
 
     # Upstream recovers, but the card stays parked inside the window.
     upstream_ok["v"] = True
@@ -72,6 +75,66 @@ def test_transient_failure_recovers_after_retry_window(monkeypatch):
     # Once the window elapses the card is retried and decomposes.
     now[0] += dispatcher._DECOMPOSE_RETRY_WINDOW_SECONDS + 1
     assert dispatcher.auto_decompose_tick(10) == 1
+
+
+def test_transient_connection_error_does_not_consume_the_budget(monkeypatch):
+    """A connection-class failure (the call never reached the model) must not
+    spend the card's attempt budget — once upstream is reachable again the very
+    next tick decomposes it, with no window wait (#118603 review)."""
+    monkeypatch.setattr(kwd, "_board_slugs", lambda kb: ["default"])
+
+    upstream_ok = {"v": False}
+
+    def fake_decompose(task_id, author=None):
+        if upstream_ok["v"]:
+            return SimpleNamespace(ok=True, fanout=False, child_ids=None, reason=None)
+        return SimpleNamespace(ok=False, fanout=False, child_ids=None,
+                               reason="LLM error: APIConnectionError")
+
+    fake = SimpleNamespace(list_triage_ids=lambda: ["t_blip"], decompose_task=fake_decompose)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_decompose", fake)
+
+    dispatcher = _dispatcher()
+    for _ in range(3):
+        assert dispatcher.auto_decompose_tick(10) == 0
+    assert ("default", "t_blip") not in dispatcher._decompose_failures, (
+        "a connection blip spent the card's attempt budget"
+    )
+
+    upstream_ok["v"] = True
+    assert dispatcher.auto_decompose_tick(10) == 1
+
+
+def test_transient_blip_neither_consumes_nor_resets_the_budget(monkeypatch):
+    """A blip in the middle of counted failures is free — and must not reset
+    the streak: a card that really cannot decompose still caps at 3 bills."""
+    monkeypatch.setattr(kwd, "_board_slugs", lambda kb: ["default"])
+    reasons = [
+        "LLM returned malformed JSON",
+        "LLM returned malformed JSON",
+        "LLM error: APIConnectionError",
+        "LLM returned malformed JSON",
+        "LLM returned malformed JSON",
+    ]
+    bills: list[str] = []
+
+    def fake_decompose(task_id, author=None):
+        bills.append(task_id)
+        return SimpleNamespace(ok=False, fanout=False, child_ids=None,
+                               reason=reasons[min(len(bills), len(reasons)) - 1])
+
+    fake = SimpleNamespace(list_triage_ids=lambda: ["t_mixed"], decompose_task=fake_decompose)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_decompose", fake)
+
+    dispatcher = _dispatcher()
+    for _ in range(8):
+        dispatcher.auto_decompose_tick(10)
+
+    assert len(bills) == 4, (
+        f"mixed-blip card billed {len(bills)} times; the blip must be free and "
+        "the three counted failures must park the card"
+    )
+    assert dispatcher._decompose_failures[("default", "t_mixed")][0] == 3
 
 
 def test_list_read_failure_keeps_the_failure_budgets(monkeypatch):
