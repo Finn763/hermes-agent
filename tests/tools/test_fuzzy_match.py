@@ -798,3 +798,18 @@ class TestEdittoolShapeSingleLineFailLoud:
         )
         assert count == 1 and err is None
         assert "return value.fixed()" in new
+
+    def test_wrong_token_single_line_trailing_newline_refused(self):
+        from tools.fuzzy_match import fuzzy_find_and_replace
+
+        content = "def f(v):\n    return value.strip()\n"
+        for old in (
+            "    return value.trim()\n",
+            "    return value.trim()\r\n",
+        ):
+            new, count, strategy, err = fuzzy_find_and_replace(
+                content, old, "    return value.fixed()"
+            )
+            assert count == 0, f"wrong anchor via {strategy} for {old!r}: {new!r}"
+            assert err is not None and "Could not find" in err
+            assert new == content
