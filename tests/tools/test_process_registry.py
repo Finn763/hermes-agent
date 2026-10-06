@@ -2511,7 +2511,7 @@ class TestSystemdCgroupIsolation:
             session = registry.spawn_local("echo hello", cwd="/tmp")
 
         argv = captured["argv"]
-        assert argv == ["/bin/bash", "-lic", "set +m; echo hello"], argv
+        assert argv == ["/bin/bash", "-c", "set +m; echo hello"], argv
         assert captured["start_new_session"] is True
         assert session.systemd_unit == ""
         assert scope_builds == [], "darwin must never build a systemd scope argv"

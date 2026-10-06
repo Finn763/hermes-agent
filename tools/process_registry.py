@@ -757,10 +757,11 @@ class ProcessRegistry:
         return "/tmp"
 
     def _scope_argv(self, session: ProcessSession, safe_command: str, unit_suffix: str, label: str) -> List[str]:
-        """Login-shell argv for *safe_command* (parity with LocalEnvironment: rc files
-        sourced, user tools on PATH), wrapped in a transient systemd scope when we are
-        the supervised gateway (own cgroup: an OOM kills only the worker, not the
-        gateway and its messaging control plane)."""
+        """Spawn argv for *safe_command*, wrapped in a transient systemd scope when we
+        are the supervised gateway (own cgroup: an OOM kills only the worker, not the
+        gateway and its messaging control plane). The shell is login (``-lic``) on
+        Linux/Windows and non-login (``-c``) on macOS/other POSIX (#105418); user tools
+        reach the worker via the session env snapshot, not by sourcing rc files here."""
         # ponytail: macOS/other POSIX use non-login -c (avoid .zprofile/.zshrc alias
         # rewrite, parity with foreground non-login + #67200); Linux/Windows keep -lic.
         login_flag = "-c" if (not _IS_LINUX and not _IS_WINDOWS) else "-lic"

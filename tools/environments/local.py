@@ -434,9 +434,9 @@ def _prepend_git_bash_dirs(existing_path: str) -> str:
     return _prepend_missing_path_entries(existing_path, _git_bash_bin_dirs())
 
 
-# POSIX-sh-family shells that understand spawn_local's ``[shell, "-lic", "set +m; …"]``
-# invocation; fish, csh/tcsh, nushell, elvish, xonsh would error, so _find_shell
-# falls back to bash for them.
+# POSIX-sh-family shells that understand spawn_local's ``[shell, <login flag>, "set +m; …"]``
+# invocation (``-lic`` on Linux/Windows, ``-c`` elsewhere, #105418); fish, csh/tcsh, nushell,
+# elvish, xonsh would error, so _find_shell falls back to bash for them.
 # (#42203)
 _SPAWN_COMPATIBLE_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "mksh"})
 
