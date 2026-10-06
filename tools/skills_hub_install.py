@@ -105,8 +105,10 @@ def _check_install_target(install_dir: Path) -> None:
       would make a later update/uninstall of the outer skill rmtree the inner one.
     - A stray regular file at the target: rmtree would raise NotADirectoryError.
     - A category bucket (dir without SKILL.md that holds other skills) must never
-      be silently wiped; a dir that directly contains SKILL.md is an existing
-      install and stays overwritable (hub installs are lock-guarded in do_install).
+      be silently wiped; a dir that directly contains SKILL.md is an existing install
+      and stays overwritable only when the lock file records it as a hub install
+      (``_lock_records_install_dir`` in ``install_from_quarantine``) — anything else
+      is user-authored/bundled content the install must not delete.
     """
     from tools.skills_hub import _skills_dir
     # Refuse to nest a skill inside an existing skill directory. Installing with ``--category
@@ -140,6 +142,32 @@ def _check_install_target(install_dir: Path) -> None:
                              f"Use a different --name or install into a subcategory.")
 
 
+def _lock_records_install_dir(install_dir: Path) -> bool:
+    """Whether the hub lock file records ``install_dir`` as an existing hub install.
+
+    Matched BY PATH (under any lock key), not by name: an update/reinstall may
+    overwrite the skill the lock says lives here, but nothing else in the tree may
+    be deleted by an install — not a user-authored (provenance ``agent``) skill, not
+    a bundled one, not a same-named stranger from a lookalike feed row (review on
+    #126991, which walked past the name-keyed ``get_installed`` gate in do_install).
+    """
+    from tools.skills_hub import HubLockFile, _skills_dir
+    try:
+        rel = install_dir.resolve().relative_to(_skills_dir().resolve()).as_posix()
+        entries = HubLockFile().list_installed()
+    except Exception:
+        return False
+    for entry in entries:
+        try:
+            recorded = _normalize_lock_install_path(
+                str(entry.get("install_path") or ""), str(entry.get("name") or ""))
+        except Exception:
+            continue
+        if recorded == rel:
+            return True
+    return False
+
+
 def install_from_quarantine(
     quarantine_path: Path, skill_name: str, category: str, bundle: SkillBundle, scan_result: ScanResult,
     scan_provenance: Optional[Dict[str, Any]] = None,
@@ -158,6 +186,16 @@ def install_from_quarantine(
     install_dir = _resolve_lock_install_path(install_rel_path, safe_skill_name)
     _check_install_target(install_dir)
     if install_dir.exists():
+        if (install_dir / "SKILL.md").exists() and not _lock_records_install_dir(install_dir):
+            # An existing skill dir the lock does not own: overwriting it would
+            # rmtree user-authored content with no confirmation (--yes sets
+            # skip_confirm), and the lock would then claim the intruder's install
+            # (review on #126991).
+            raise ValueError(
+                f"Refusing to overwrite '{install_dir.name}': it is an existing skill directory "
+                f"that the hub lock file does not record — it may be user-authored or bundled. "
+                f"Remove the directory manually or install under a different name."
+            )
         shutil.rmtree(install_dir)
 
     try:

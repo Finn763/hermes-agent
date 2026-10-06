@@ -8,14 +8,17 @@ interface CatalogInstallSwitchProps {
   installed: boolean
   installing: boolean
   disabled: boolean
+  /** Why this row cannot install (e.g. a different skill already holds the name).
+   *  Rendered as the tooltip so the disabled switch explains itself. */
+  blockedReason?: string
   onInstall: () => void
 }
 
 /** Turning it on installs. Installed entries normally show their owner's on/off
  *  switch instead; this one only stays checked (and disabled) as a fallback. */
-export function CatalogInstallSwitch({ name, installed, installing, disabled, onInstall }: CatalogInstallSwitchProps) {
+export function CatalogInstallSwitch({ name, installed, installing, disabled, blockedReason, onInstall }: CatalogInstallSwitchProps) {
   const { t } = useI18n()
-  const label = `${installed ? t.catalog.added : t.catalog.add} ${name}`
+  const label = blockedReason ?? `${installed ? t.catalog.added : t.catalog.add} ${name}`
 
   return (
     <Tip label={label}>

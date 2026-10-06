@@ -76,6 +76,7 @@ export const en: Translations = {
     installComplete: (name: string) => `“${name}” installed`,
     destinationChanged: 'The destination changed. Close this dialog and open the install link again.',
     installed: 'Installed',
+    sameNameInstalled: (name: string) => `A different skill named “${name}” is already installed.`,
     searchSkills: 'Search skills',
     searchPlugins: 'Search plugins',
     allSources: 'All sources',

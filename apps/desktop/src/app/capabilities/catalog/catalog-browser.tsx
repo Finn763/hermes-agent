@@ -44,6 +44,8 @@ interface CatalogBrowserProps {
   query?: string
   onQueryChange?: (value: string) => void
   isInstalled: (entry: CatalogEntry) => boolean
+  /** Reason to disable a row's install switch (shown as its tooltip). */
+  installBlocked?: (entry: CatalogEntry) => string | undefined
   onInstall: (entry: CatalogEntry) => void
   isInstalling?: (entry: CatalogEntry) => boolean
   installedEntries?: CatalogEntry[]
@@ -109,6 +111,7 @@ function mergeInstalled(
 export const CatalogBrowser = memo(function CatalogBrowser({
   kind,
   isInstalled,
+  installBlocked,
   onInstall,
   isInstalling,
   installedEntries,
@@ -203,10 +206,17 @@ export const CatalogBrowser = memo(function CatalogBrowser({
     }
 
     const installed = isInstalled(entry)
+    const blockedReason = installBlocked?.(entry)
 
     return (
       <CatalogInstallSwitch
-        disabled={Boolean(installedPending) || installed || (kind === 'skills' && !entry.installIdentifier)}
+        blockedReason={blockedReason}
+        disabled={
+          Boolean(installedPending) ||
+          installed ||
+          Boolean(blockedReason) ||
+          (kind === 'skills' && !entry.installIdentifier)
+        }
         installed={installed}
         installing={isInstalling?.(entry) ?? false}
         name={entry.name}

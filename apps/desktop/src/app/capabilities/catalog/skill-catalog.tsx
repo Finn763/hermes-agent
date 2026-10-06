@@ -27,6 +27,7 @@ interface SkillCatalogProps {
 
 export interface SkillCatalogInstallIndex {
   skillsById: Map<string, SkillInfo>
+  skillsByName: Map<string, SkillInfo>
   matchInstalled: (entry: CatalogEntry) => CatalogEntry | undefined
   officialFor: (entry: CatalogEntry) => CatalogEntry | undefined
   installedIdentifiers: Set<string>
@@ -52,6 +53,15 @@ export function isSkillEntryInstalled(entry: CatalogEntry, index: SkillCatalogIn
   const optional = index.officialFor(entry)
 
   return index.installedIdentifiers.has(optional?.identifier ?? entry.installIdentifier ?? entry.identifier)
+}
+
+/** Not-installed rows whose NAME is already held by a local skill: installing one
+ * would land on `skills/<name>`, which holds a DIFFERENT skill — the backend
+ * refuses to overwrite a directory the hub lock doesn't record (review on
+ * #126991). These rows stay un-greyed (they are not installed) but must not
+ * offer the install action; the tooltip carries the reason. */
+export function isSkillInstallBlocked(entry: CatalogEntry, index: SkillCatalogInstallIndex): boolean {
+  return !isSkillEntryInstalled(entry, index) && index.skillsByName.has(entry.name)
 }
 
 /** Public discovery and the profile's local skills share one browser. Management
@@ -269,6 +279,9 @@ function ScopedSkillCatalog({
       installedEntries={catalog.entries}
       installedPending={installedPending || identityPending}
       isInstalled={isInstalled}
+      installBlocked={entry =>
+        isSkillInstallBlocked(entry, catalog) ? t.catalog.sameNameInstalled(entry.name) : undefined
+      }
       isInstalling={entry => installing.has(installIdentifier(entry) ?? '')}
       kind="skills"
       matchInstalled={catalog.matchInstalled}

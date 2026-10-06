@@ -136,6 +136,7 @@ export interface Translations {
     installComplete: (name: string) => string
     destinationChanged: string
     installed: string
+    sameNameInstalled: (name: string) => string
     searchSkills: string
     searchPlugins: string
     allSources: string

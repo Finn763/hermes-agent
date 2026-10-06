@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest'
 import type { SkillInfo } from '@/types/hermes'
 
 import { type CatalogEntry, parseCatalog } from './catalog-data'
-import { isSkillEntryInstalled, type SkillCatalogInstallIndex } from './skill-catalog'
+import {
+  isSkillEntryInstalled,
+  isSkillInstallBlocked,
+  type SkillCatalogInstallIndex
+} from './skill-catalog'
 
 const HUB_IDENTIFIER = 'clawhub/hoyaryyj/kepano-defuddle'
 
@@ -30,6 +34,8 @@ function setupIndex() {
 
   const index: SkillCatalogInstallIndex = {
     skillsById,
+    // Mirrors the memo's skillsByName: the profile's local skills keyed by name.
+    skillsByName: new Map([['defuddle', hubSkill]]),
     // Mirrors the memo's matchInstalled: exact identifier hits only.
     matchInstalled: entry => installedByIdentifier.get(entry.installIdentifier ?? entry.identifier),
     officialFor: () => undefined,
@@ -89,5 +95,113 @@ describe('isSkillEntryInstalled', () => {
     const { unrelated, index } = setupIndex()
 
     expect(isSkillEntryInstalled(unrelated, index)).toBe(false)
+  })
+
+  it('recognizes a feed row through its identity match alone (disjunct 2)', () => {
+    const { installed } = setupIndex()
+    const hubSkill: SkillInfo = {
+      category: 'dev',
+      description: 'defuddle workflow',
+      enabled: true,
+      name: 'defuddle',
+      provenance: 'hub'
+    }
+
+    // Disjunct 3 says no (empty identifier set); only the matched-installed row
+    // recognizes this feed row.
+    const index: SkillCatalogInstallIndex = {
+      skillsById: new Map([[installed.id, hubSkill]]),
+      skillsByName: new Map([['defuddle', hubSkill]]),
+      matchInstalled: entry => (entry.identifier === HUB_IDENTIFIER ? installed : undefined),
+      officialFor: () => undefined,
+      installedIdentifiers: new Set()
+    }
+    const feedRow = parseCatalog('skills', [
+      {
+        name: 'defuddle',
+        description: 'same skill from the feed',
+        category: 'dev',
+        source: 'skills.sh',
+        identifier: HUB_IDENTIFIER
+      }
+    ])[0]
+
+    expect(isSkillEntryInstalled(feedRow, index)).toBe(true)
+  })
+
+  it('does not trust a matchInstalled hit whose row is not in skillsById', () => {
+    const { installed } = setupIndex()
+
+    // A match pointing at a phantom row (not among the profile's skills) must not
+    // mark the entry installed — this is the `matched.id` re-check.
+    const index: SkillCatalogInstallIndex = {
+      skillsById: new Map(),
+      skillsByName: new Map(),
+      matchInstalled: () => ({ ...installed, id: 'installed:ghost' }),
+      officialFor: () => undefined,
+      installedIdentifiers: new Set()
+    }
+    const feedRow = parseCatalog('skills', [
+      {
+        name: 'defuddle',
+        description: 'row against a phantom match',
+        category: 'dev',
+        source: 'skills.sh',
+        identifier: 'someone/defuddle'
+      }
+    ])[0]
+
+    expect(isSkillEntryInstalled(feedRow, index)).toBe(false)
+  })
+
+  it('recognizes a lock whose key differs from the frontmatter name (disjunct 3)', () => {
+    const { installed } = setupIndex()
+    const hubSkill: SkillInfo = {
+      category: 'dev',
+      description: 'defuddle workflow',
+      enabled: true,
+      name: 'defuddle',
+      provenance: 'hub'
+    }
+
+    // Reporter's second case: the lock key is the full identifier while the
+    // frontmatter name differs, so matchInstalled cannot pair them — only the
+    // raw installed-identifier set recognizes the genuine row.
+    const index: SkillCatalogInstallIndex = {
+      skillsById: new Map([[installed.id, hubSkill]]),
+      skillsByName: new Map([['defuddle', hubSkill]]),
+      matchInstalled: () => undefined,
+      officialFor: () => undefined,
+      installedIdentifiers: new Set([HUB_IDENTIFIER])
+    }
+    const feedRow = parseCatalog('skills', [
+      {
+        name: 'defuddle',
+        description: 'genuine row',
+        category: 'dev',
+        source: 'skills.sh',
+        identifier: HUB_IDENTIFIER
+      }
+    ])[0]
+
+    expect(isSkillEntryInstalled(feedRow, index)).toBe(true)
+  })
+})
+
+describe('isSkillInstallBlocked', () => {
+  it('blocks same-name rows whose identity differs — installing would overwrite a local skill', () => {
+    const { lookalikes, index } = setupIndex()
+
+    for (const entry of lookalikes) {
+      expect(isSkillEntryInstalled(entry, index)).toBe(false)
+      expect(isSkillInstallBlocked(entry, index)).toBe(true)
+    }
+  })
+
+  it('leaves the true installed row and unrelated rows actionable', () => {
+    const { installed, unrelated, index } = setupIndex()
+
+    expect(isSkillInstallBlocked(installed, index)).toBe(false)
+    expect(isSkillInstallBlocked(unrelated, index)).toBe(false)
   })
 })

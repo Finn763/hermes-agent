@@ -1645,17 +1645,18 @@ class TestInstallPathSafety:
         assert (category / "bravo" / "SKILL.md").exists()
         assert (category / "charlie" / "SKILL.md").exists()
 
-    def test_install_from_quarantine_allows_existing_skill_overwrite(self, tmp_path):
-        """Installing over an existing skill directory (containing SKILL.md) is
-        still allowed — that scenario is already guarded by the lock-file check
-        in do_install()."""
+    def test_install_from_quarantine_refuses_unmanaged_skill_overwrite(self, tmp_path):
+        """Review on #126991: an existing skill directory the lock does NOT record
+        must never be rmtree'd by an install. That shape is user-authored
+        (provenance ``agent``) or bundled content, and the desktop install path
+        reaches here with skip_confirm=True — no prompt, no backup."""
         import tools.skills_hub as hub
         from tools.skills_guard import ScanResult
 
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
 
-        # Existing skill directory with SKILL.md.
+        # Existing skill directory with SKILL.md — NOT in the lock file.
         existing = skills_dir / "my-skill"
         existing.mkdir()
         (existing / "SKILL.md").write_text("old content")
@@ -1687,11 +1688,63 @@ class TestInstallPathSafety:
 
         with patch.object(hub, "SKILLS_DIR", skills_dir), \
              patch.object(hub, "QUARANTINE_DIR", quarantine_root):
+            with pytest.raises(ValueError, match="Refusing to overwrite"):
+                install_from_quarantine(
+                    q_dir, "my-skill", "", bundle, scan_result,
+                )
+            # No lock claim for a refused install (checked under the patched root).
+            assert not hub.HubLockFile().get_installed("my-skill")
+
+        # The victim survived intact — no silent deletion, no lock claim.
+        assert (existing / "SKILL.md").read_text() == "old content"
+        assert (existing / "refs" / "guide.md").read_text() == "old guide"
+
+    def test_install_from_quarantine_allows_lock_recorded_overwrite(self, tmp_path):
+        """An update/reinstall of a skill the lock records stays allowed — the lock
+        owns that directory (path match, under any lock key)."""
+        import tools.skills_hub as hub
+        from tools.skills_guard import ScanResult
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        existing = skills_dir / "my-skill"
+        existing.mkdir()
+        (existing / "SKILL.md").write_text("old content")
+
+        quarantine_root = skills_dir / ".hub" / "quarantine"
+        quarantine_root.mkdir(parents=True)
+
+        q_dir = quarantine_root / "pending"
+        q_dir.mkdir()
+        (q_dir / "SKILL.md").write_text("---\nname: my-skill\n---\nnew")
+
+        bundle = SkillBundle(
+            name="my-skill",
+            files={"SKILL.md": "---\nname: my-skill\n---\nnew"},
+            source="community",
+            identifier="x",
+            trust_level="community",
+        )
+        scan_result = ScanResult(
+            skill_name="my-skill",
+            source="community",
+            trust_level="community",
+            verdict="safe",
+        )
+
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "QUARANTINE_DIR", quarantine_root):
+            hub.HubLockFile().record_install(
+                name="my-skill", source="community", identifier="x",
+                trust_level="community", scan_verdict="safe", skill_hash="h",
+                install_path="my-skill", files=["SKILL.md"],
+            )
             installed = install_from_quarantine(
                 q_dir, "my-skill", "", bundle, scan_result,
             )
 
-        # The old directory was replaced by the new one.
+        # The lock-owned directory was replaced by the new one.
         assert installed.exists()
         assert (installed / "SKILL.md").read_text().strip() == "---\nname: my-skill\n---\nnew"
 
