@@ -191,3 +191,22 @@ def test_recompute_ready_ignores_prose_ids_that_are_already_children(conn, caplo
     assert child not in warned
 
 
+def test_recompute_ready_does_not_report_a_card_naming_itself(conn, caplog):
+    """``tid != task_id`` keeps a card that names its own id out of its own
+    advisory (its id is a real card, but it is not a dependency)."""
+    done_parent = kb.create_task(conn, title="closed gate", assignee="setup")
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (done_parent,))
+    card = kb.create_task(conn, title="root", assignee="setup", parents=[done_parent])
+    conn.execute("UPDATE tasks SET body=? WHERE id=?", (f"self ref {card}", card))
+    conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (card,))
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        kb.recompute_ready(conn)
+
+    assert kb.get_task(conn, card).status == "ready"
+    warned = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    )
+    assert card not in warned
+
+
