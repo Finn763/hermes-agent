@@ -1348,42 +1348,35 @@ def _try_dispatch_background_run(
         real_api_calls = 0
         real_total_tokens = 0
         audit_record_found = False
+        # This fire's claim owner (unique per acquisition — the same token the
+        # terminal writes are fenced by). Match the audit on it so a concurrent
+        # run of the same job can't donate its counters: the flip direction is
+        # success -> failed, which makes a stale record dangerous.
+        _claim = claimed_job.get("fire_claim") if isinstance(claimed_job, dict) else None
+        fire_owner = str(_claim.get("by") or "") if isinstance(_claim, dict) else ""
         try:
-            from cron.scheduler import _usage_audit_path
-            audit_path = _usage_audit_path()
-            if audit_path.exists():
-                # read last matching record for this job
-                latest = None
+            from cron.scheduler import _latest_usage_audit_record
+
+            latest = _latest_usage_audit_record(job_id, fire_owner or None)
+            if latest is not None:
+                audit_record_found = True
                 try:
-                    text = audit_path.read_text(encoding="utf-8", errors="ignore")
+                    real_api_calls = int(latest.get("api_calls") or 0)
                 except Exception:
-                    text = ""
-                for line in text.splitlines():
+                    real_api_calls = 0
+                # Fallback for audits written before api_calls existed (or mocked records): tokens>0 implies >=1 call
+                if real_api_calls == 0:
                     try:
-                        rec = json.loads(line)
+                        if int(latest.get("total_tokens") or 0) > 0:
+                            real_api_calls = 1
+                        elif int(latest.get("prompt_tokens") or 0) > 0:
+                            real_api_calls = 1
                     except Exception:
-                        continue
-                    if rec.get("job_id") == job_id:
-                        latest = rec
-                if latest is not None:
-                    audit_record_found = True
-                    try:
-                        real_api_calls = int(latest.get("api_calls") or 0)
-                    except Exception:
-                        real_api_calls = 0
-                    # Fallback for audits written before api_calls existed (or mocked records): tokens>0 implies >=1 call
-                    if real_api_calls == 0:
-                        try:
-                            if int(latest.get("total_tokens") or 0) > 0:
-                                real_api_calls = 1
-                            elif int(latest.get("prompt_tokens") or 0) > 0:
-                                real_api_calls = 1
-                        except Exception:
-                            pass
-                    try:
-                        real_total_tokens = int(latest.get("total_tokens") or 0)
-                    except Exception:
-                        real_total_tokens = 0
+                        pass
+                try:
+                    real_total_tokens = int(latest.get("total_tokens") or 0)
+                except Exception:
+                    real_total_tokens = 0
         except Exception:
             pass
         # Zero-inference guard: if the scheduler still recorded ok but audit shows no tokens/calls, correct it here
@@ -1407,13 +1400,9 @@ def _try_dispatch_background_run(
                 # Best-effort correction of persisted status so last_status reflects failure
                 try:
                     from cron.jobs import mark_job_run
-                    _fire_owner = None
-                    _claim = claimed_job.get("fire_claim") if isinstance(claimed_job, dict) else None
-                    if isinstance(_claim, dict):
-                        _fire_owner = str(_claim.get("by") or "") or None
                     mark_kwargs = {}
-                    if _fire_owner:
-                        mark_kwargs["expected_fire_owner"] = _fire_owner
+                    if fire_owner:
+                        mark_kwargs["expected_fire_owner"] = fire_owner
                     # Only correct if the persisted status is still ok (avoid overwriting a newer run)
                     if refreshed.get("last_status") == "ok":
                         mark_job_run(job_id, False, err_msg, **mark_kwargs)

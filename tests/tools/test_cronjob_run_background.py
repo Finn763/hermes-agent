@@ -306,3 +306,58 @@ class TestCronjobRunToolIntegration:
         assert out["job"]["execution_success"] is True
         m_claim.assert_called_once_with("job-bg-13", return_job=True)
         m_run.assert_called_once()
+
+
+class TestRunnerAuditAttribution:
+    def test_audit_lookup_matches_this_fires_own_claim_owner(self, tmp_path, monkeypatch):
+        """The runner must read THIS fire's audit line (matched by the claim
+        owner), not a newer record another run of the same job left behind:
+        the flip direction is success -> failed, so a stale record is wrong
+        in both directions (#100212)."""
+        import time
+
+        from cron import scheduler as sched
+        from tools.process_registry import process_registry
+
+        audit = tmp_path / "usage_audit.jsonl"
+        audit.write_text(
+            "\n".join(json.dumps(r) for r in [
+                {"job_id": "job-bg-attrib", "fire_owner": "bg-owner",
+                 "api_calls": 0, "total_tokens": 0},
+                {"job_id": "job-bg-attrib", "fire_owner": "other-owner",
+                 "api_calls": 9, "total_tokens": 90},
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sched, "_usage_audit_path", lambda: audit)
+
+        with _bound_session_key("agent:main:telegram:dm:906"):
+            with patch("tools.cronjob_tools.claim_job_for_fire",
+                       side_effect=lambda jid, **kw: {**_job(jid), "fire_claim": {"by": "bg-owner"}}), \
+                 patch("cron.scheduler.run_one_job", return_value=True), \
+                 patch("tools.cronjob_tools.get_job",
+                       return_value={"last_status": "ok", "last_error": None}), \
+                 patch("cron.jobs.mark_job_run") as m_mark:
+                res = _try_dispatch_background_run(_job("job-bg-attrib"))
+                assert res["dispatched"] is True
+
+                found = None
+                for _ in range(100):
+                    try:
+                        evt = process_registry.completion_queue.get_nowait()
+                    except Exception:
+                        time.sleep(0.05)
+                        continue
+                    if evt.get("delegation_id") == res["delegation_id"]:
+                        found = evt
+                        break
+                    process_registry.completion_queue.put(evt)
+                    time.sleep(0.05)
+
+        assert found is not None
+        # This fire's own record proves zero inference -> the completion flips
+        # to error (the stale other-owner record must not hide it).
+        assert found["status"] == "error"
+        assert "Zero inference" in (found.get("error") or "")
+        m_mark.assert_called_once()
+        assert m_mark.call_args.kwargs.get("expected_fire_owner") == "bg-owner"

@@ -1461,6 +1461,24 @@ def _utcnow_iso_ms() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
+def _zero_inference_result(result: dict) -> bool:
+    """Whether the run's own counters prove no LLM call was made (#100180).
+
+    A missing ``api_calls`` key is treated the same as ``0``: the guard must
+    fail closed on "no evidence of inference" instead of silently disabling
+    itself if the field ever regresses away. Token counters can still
+    contradict it — tokens without an ``api_calls`` field say the run did
+    happen and the field just wasn't populated.
+    """
+    if result.get("api_calls"):
+        return False
+    total = result.get("total_tokens")
+    if total is None or total == 0:
+        return True
+    prompt = result.get("prompt_tokens")
+    return prompt is None or prompt == 0
+
+
 def _write_usage_audit(record: dict) -> None:
     """Append a single JSONL line to ~/.hermes/cron/usage_audit.jsonl.
 
@@ -1475,6 +1493,64 @@ def _write_usage_audit(record: dict) -> None:
             f.write(line + "\n")
     except Exception as e:
         logger.warning("usage_audit write failed: %s", e)
+
+
+_AUDIT_READ_CHUNK = 64 * 1024
+
+
+def _parse_audit_line(raw: bytes) -> Optional[dict]:
+    """One JSONL record, or None for a blank/corrupt/non-object line."""
+    if not raw.strip():
+        return None
+    try:
+        record = json.loads(raw)
+    except Exception:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _latest_usage_audit_record(job_id: str, fire_owner: Optional[str] = None) -> Optional[dict]:
+    """Newest usage-audit record for this fire, read back-to-front.
+
+    The audit grows one line per fire, so a forward full parse is O(history)
+    on every manual run; reading stops at the first matching line from the
+    end, which is constant work while this fire's record is near the tail
+    (it just ran). ``fire_owner`` is the per-acquisition claim owner: matching
+    on it alongside ``job_id`` keeps a concurrent run of the same job from
+    donating its counters (the flip direction is success -> failed). ``None``
+    keeps the job_id-only lookup for unclaimed callers.
+    """
+    def _matches(record: Optional[dict]) -> bool:
+        return record is not None and record.get("job_id") == job_id and (
+            fire_owner is None or record.get("fire_owner") == fire_owner
+        )
+
+    try:
+        path = _usage_audit_path()
+        if not path.exists():
+            return None
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            position = fh.tell()
+            carry = b""
+            while position > 0:
+                size = min(_AUDIT_READ_CHUNK, position)
+                position -= size
+                fh.seek(position)
+                # A chunk boundary can split a line; its first fragment is
+                # completed by (and parsed with) the earlier chunk.
+                lines = (fh.read(size) + carry).split(b"\n")
+                carry = lines[0]
+                for raw in reversed(lines[1:]):
+                    record = _parse_audit_line(raw)
+                    if _matches(record):
+                        return record
+        record = _parse_audit_line(carry)
+        if _matches(record):
+            return record
+    except Exception:
+        return None
+    return None
 
 
 def _interpreter_shutting_down(exc: Optional[BaseException] = None) -> bool:
@@ -6523,6 +6599,12 @@ def run_job(
         _cron_context = contextvars.copy_context()
         # Tag this fire and time the run_conversation call for the usage_audit.jsonl entry.
         _audit_fire_id = uuid.uuid4().hex
+        _claim_for_audit = job.get("fire_claim")
+        _audit_fire_owner = (
+            str(_claim_for_audit.get("by") or "")
+            if isinstance(_claim_for_audit, dict)
+            else ""
+        ) or None
         _audit_t_start = time.monotonic()
         _cron_future = _cron_pool.submit(
             _cron_context.run,
@@ -6739,13 +6821,7 @@ def run_job(
         _result_api_calls = result.get("api_calls")
         _result_total = result.get("total_tokens")
         _result_prompt = result.get("prompt_tokens")
-        _is_zero_inference = False
-        if _result_api_calls == 0:
-            # api_calls == 0 is definitive when the field is present (turn_finalizer always sets it)
-            if _result_total is None or _result_total == 0:
-                _is_zero_inference = True
-            elif _result_prompt is None or _result_prompt == 0:
-                _is_zero_inference = True
+        _is_zero_inference = _zero_inference_result(result)
         # Also detect truncated trace where transcript ends inside a tool_calls block
         _is_truncated_tool = False
         if final_response and "<tool_calls>" in final_response and "</tool_calls>" not in final_response:
@@ -6764,6 +6840,7 @@ def run_job(
                 "ts": _utcnow_iso_ms(),
                 "job_id": job_id,
                 "fire_id": _audit_fire_id,
+                "fire_owner": _audit_fire_owner,
                 "prompt_tokens": result.get("prompt_tokens"),
                 "completion_tokens": result.get("completion_tokens"),
                 "total_tokens": result.get("total_tokens"),
@@ -6805,6 +6882,7 @@ def run_job(
             "ts": _utcnow_iso_ms(),
             "job_id": job_id,
             "fire_id": _audit_fire_id,
+            "fire_owner": _audit_fire_owner,
             "prompt_tokens": result.get("prompt_tokens"),
             "completion_tokens": result.get("completion_tokens"),
             "total_tokens": result.get("total_tokens"),
@@ -6829,6 +6907,7 @@ def run_job(
                 "ts": _utcnow_iso_ms(),
                 "job_id": job_id,
                 "fire_id": _audit_fire_id,
+                "fire_owner": _audit_fire_owner,
                 "prompt_tokens": None,
                 "completion_tokens": None,
                 "total_tokens": None,
