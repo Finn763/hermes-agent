@@ -3085,6 +3085,18 @@ def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
             reset_home_override(override_token)
 
 
+_SYSTEMD_MEMORY_UNIT_BYTES = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def _systemd_memory_bytes(limit: str) -> int | None:
+    """Absolute byte count of a coerced limit ("3G", "512M", bare digits); None for "%"."""
+    if limit.endswith("%"):
+        return None
+    unit = limit[-1].upper() if limit[-1].isalpha() else ""
+    number = limit[:-1] if unit else limit
+    return int(float(number) * _SYSTEMD_MEMORY_UNIT_BYTES[unit])
+
+
 def _systemd_memory_directives(hermes_home: str | Path | None = None) -> str:
     """Optional memory-accounting/limit lines for a service home ("" when unset).
 
@@ -3111,6 +3123,13 @@ def _systemd_memory_directives(hermes_home: str | Path | None = None) -> str:
     finally:
         if override_token is not None and reset_home_override is not None:
             reset_home_override(override_token)
+    high_bytes = _systemd_memory_bytes(high) if high is not None else None
+    max_bytes = _systemd_memory_bytes(max_) if max_ is not None else None
+    if high_bytes is not None and max_bytes is not None and high_bytes > max_bytes:
+        logger.warning(
+            "gateway.systemd_memory_high (%s) is above gateway.systemd_memory_max (%s): reclaim "
+            "only starts past the max, so the high threshold never triggers — check for a swap "
+            "of the two values", high, max_)
     if high is None and max_ is None:
         return ""
     lines = ["MemoryAccounting=yes"]

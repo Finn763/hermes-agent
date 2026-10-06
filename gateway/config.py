@@ -152,7 +152,10 @@ def coerce_systemd_memory_limit(value: Any, key: str = "gateway.systemd_memory_h
         return None
     if _SYSTEMD_MEMORY_LIMIT_RE is None:
         import re
-        _SYSTEMD_MEMORY_LIMIT_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGTkmgt]|%)?$")
+        # re.ASCII: without it ``\d`` also matches Arabic-Indic/full-width digits and ``float()``
+        # accepts them, so a non-ASCII value would be emitted into the unit verbatim and then
+        # silently dropped by systemd's strtoull()-based parse (fails open: no ceiling).
+        _SYSTEMD_MEMORY_LIMIT_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGTkmgt]|%)?$", re.ASCII)
     match = _SYSTEMD_MEMORY_LIMIT_RE.match(text)
     if match is None:
         logger.warning("Ignoring invalid %s=%r (expected a systemd memory limit like 3G or 25%%)", key, value)

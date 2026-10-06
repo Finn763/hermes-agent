@@ -84,3 +84,45 @@ def test_system_unit_reads_memory_limits_from_target_home(tmp_path, monkeypatch)
     assert "MemoryAccounting=yes" in unit
     assert "MemoryHigh=3G" in unit
     assert "MemoryMax=6G" in unit
+
+
+def test_non_ascii_digits_are_rejected():
+    # \d is Unicode-aware without re.ASCII: Arabic-Indic / full-width digits used to clear
+    # every guard and be emitted verbatim (systemd's strtoull()-based parse then drops them).
+    for raw in ["３G", "٣3G", "۵%", "１２３M"]:
+        assert coerce_systemd_memory_limit(raw) is None
+
+
+def test_memory_high_above_max_warns(monkeypatch, caplog):
+    monkeypatch.setattr(
+        gateway_cli,
+        "load_gateway_config",
+        lambda: GatewayConfig.from_dict(
+            {"systemd_memory_high": "6G", "systemd_memory_max": "3G"}
+        ),
+        raising=False,
+    )
+
+    with caplog.at_level("WARNING"):
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+    assert "MemoryHigh=6G" in unit and "MemoryMax=3G" in unit  # warned, not silently dropped
+    assert any("systemd_memory_high" in str(r.message) for r in caplog.records)
+
+
+def test_percent_limits_are_not_ordered(monkeypatch, caplog):
+    # A percent limit has no absolute byte size; the pair must not be compared.
+    monkeypatch.setattr(
+        gateway_cli,
+        "load_gateway_config",
+        lambda: GatewayConfig.from_dict(
+            {"systemd_memory_high": "90%", "systemd_memory_max": "50%"}
+        ),
+        raising=False,
+    )
+
+    with caplog.at_level("WARNING"):
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+    assert "MemoryHigh=90%" in unit
+    assert not any("systemd_memory_high" in str(r.message) for r in caplog.records)
