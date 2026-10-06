@@ -16558,6 +16558,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
         if not home_env:
+            # Slack dispatches all Hermes commands through a single
+            # parent slash command `/hermes`; bare `/sethome` is not
+            # registered and would fail with "app did not respond".
+            sethome_cmd = (
+                "/hermes sethome"
+                if source.platform == Platform.SLACK
+                else "/sethome"
+            )
             # Home-channel setup is operator infrastructure, not user
             # onboarding: only an explicitly configured admin may see it.
             # Uses the existing scope-aware slash-access policy, so no new
@@ -16567,20 +16575,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from gateway.slash_access import policy_for_source as _policy_for_source
             _admin_policy = _policy_for_source(self.config, source)
             if not (_admin_policy.enabled and _admin_policy.is_admin(source.user_id)):
+                # This line is the only trace on installs without allow_admin_from, so it
+                # must say how to turn the notice back on (or set the home channel directly).
                 logger.info(
                     "No home channel is configured for %s; suppressing the setup notice for a "
-                    "first-time contact that is not an explicitly configured admin",
+                    "first-time contact that is not an explicitly configured admin. To make the "
+                    "notice reachable, add an admin to this platform's extra.allow_admin_from "
+                    "in gateway-config.yaml; %s also sets the home channel directly.",
                     platform_name,
+                    sethome_cmd,
                 )
                 return
-            # Slack dispatches all Hermes commands through a single
-            # parent slash command `/hermes`; bare `/sethome` is not
-            # registered and would fail with "app did not respond".
-            sethome_cmd = (
-                "/hermes sethome"
-                if source.platform == Platform.SLACK
-                else "/sethome"
-            )
             notice = (
                 f"📬 No home channel is set for {platform_name.title()}. "
                 f"A home channel is where Hermes delivers cron job results "

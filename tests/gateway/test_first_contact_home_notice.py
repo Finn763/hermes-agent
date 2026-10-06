@@ -51,3 +51,26 @@ async def test_existing_home_channel_skips_notice_for_any_sender(monkeypatch):
     await runner._maybe_deliver_home_notice(_source())
 
     runner._deliver_platform_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_suppressed_notice_logs_the_recovery_path(monkeypatch, caplog):
+    """Recoverability: on an install with no allow_admin_from this log line is the
+    only trace, so it must say how to turn the notice back on (or set the home
+    channel directly)."""
+    import logging
+
+    monkeypatch.delenv("WHATSAPP_HOME_CHANNEL", raising=False)
+    runner = _runner()
+
+    with caplog.at_level(logging.INFO):
+        await runner._maybe_deliver_home_notice(_source())
+
+    suppressed = [
+        record.getMessage()
+        for record in caplog.records
+        if "suppressing the setup notice" in record.getMessage()
+    ]
+    assert suppressed, "suppression should leave an operator-visible trace"
+    assert "allow_admin_from" in suppressed[0], suppressed[0]
+    assert "/sethome" in suppressed[0], suppressed[0]
