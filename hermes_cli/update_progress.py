@@ -4,10 +4,12 @@ The update pipeline printed one bare arrow line per phase, so users could not
 tell how much download/install work was left before the app restarted
 (#122691). ``hermes_cli.update_cmd`` opens a fixed phase plan for the run's
 path with ``begin()`` and advances it with ``step()`` at each phase boundary;
-each step renders ``[k/N]`` plus a bar. Transports that expose sizes (the ZIP
-fallback's URL-retrieve reporthook) add byte sub-progress through
-``byte_progress()``. Every render is forwarded to a listener so tests can
-assert the emitted sequence without scraping stdout.
+each step renders ``[k/N]`` plus a bar, the ZIP transports' byte counts extend
+the current phase's slot through ``byte_progress()``, and
+``replan()``/``finish()``/``fail()`` keep the sequence honest when the path
+changes (git->ZIP fallback), a planned tail is skipped (already up to date) or
+the run dies. Every render is forwarded to a listener so tests can assert the
+emitted sequence without scraping stdout.
 
 ASCII-only by house rule: labels and rendered lines are plain text.
 """
@@ -47,6 +49,43 @@ def begin(phases) -> None:
 def end() -> None:
     """Close the active plan (run finished, or test cleanup)."""
     global _ACTIVE
+    _ACTIVE = None
+
+
+def replan(phases) -> None:
+    """Replace the plan's not-yet-run tail. The git->ZIP fallback steps phases the
+    original plan never listed; folding them in keeps ``[k/N]`` in-plan and lets the
+    run end at ``[N/N]`` instead of ``[...]`` (#122691)."""
+    progress = _ACTIVE
+    if progress is None:
+        return
+    progress.phases = tuple(progress.phases[:progress.index]) + tuple(phases)
+
+
+def finish(label: str) -> None:
+    """Render *label* as the plan's final phase at 100%. Paths that skip planned
+    phases (already up to date skips ``Pull update``) must not stop at 75% (#122691)."""
+    progress = _ACTIVE
+    if progress is None:
+        return
+    progress.index = len(progress.phases)
+    _emit({"kind": "phase", "index": progress.index, "total": len(progress.phases),
+           "label": label})
+    print(f"  {_bracket(progress)} {_bar(1.0)} {label}")
+
+
+def fail() -> None:
+    """Mark the active plan failed and close it. A run that exits mid-sequence must
+    not leave its last ``[k/N]`` line reading as in-flight work (#122691)."""
+    global _ACTIVE
+    progress = _ACTIVE
+    if progress is None:
+        return
+    phase = (progress.phases[progress.index - 1]
+             if 0 < progress.index <= len(progress.phases) else "the update")
+    _emit({"kind": "failed", "stage": phase, "index": progress.index,
+           "total": len(progress.phases)})
+    print(f"  [--/{len(progress.phases)}] Update failed at: {phase}")
     _ACTIVE = None
 
 
@@ -99,4 +138,8 @@ def byte_progress(read: int, size: int) -> None:
     if percent == progress.last_percent:
         return
     progress.last_percent = percent
-    print(f"  {_bracket(progress)} {_bar(percent / 100)} {percent}% ({read}/{size} bytes)")
+    # Continue the current phase's slot on the ``step`` scale: phase ``k`` entered at
+    # ``[k/N]`` and finishes at ``[(k+1)/N]``, so the bar never resets to empty when
+    # the bytes start (#122691).
+    slot = (progress.index + read / size) / max(1, len(progress.phases))
+    print(f"  {_bracket(progress)} {_bar(slot)} {percent}% ({read}/{size} bytes)")

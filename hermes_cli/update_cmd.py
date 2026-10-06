@@ -1183,6 +1183,9 @@ def _handle_update_called_process_error(
         print(f"⚠ {stage}: {e}")
         print("→ Falling back to ZIP download...")
         print()
+        # The zip steps are not in the git plan: fold them in so the bracket stays
+        # in-plan and the run still ends at [N/N] (#122691 review).
+        update_progress.replan(("Download and swap update", "Install and restart"))
         update_progress.step("Download and swap update")
         _update_via_zip(
             args, had_desktop_app_before_update=had_desktop_app_before_update,
@@ -1206,6 +1209,7 @@ def _handle_update_called_process_error(
             print(f"  Details: {e}")
             _print_called_process_error_tail(e)
         _finalize_receipt("failed", 'Update receipt finalize failed: %s')
+        update_progress.fail()
         sys.exit(1)
 
 
@@ -1244,7 +1248,10 @@ def _finish_already_up_to_date(
         completion_request["completion_message"] = (
             "✓ Already up to date!" if _plan.upstream_checked
             else "✓ Up to date with your fork (official repo not checked).")
-    update_progress.step("Install and restart")
+    # No pull happens on this path: finish the plan at its last phase (never [3/4])
+    # and close it before the completion handoff (#122691 review).
+    update_progress.finish("Install and restart")
+    update_progress.end()
     _complete_source_update(completion_request)
 
 
@@ -1264,6 +1271,7 @@ def _apply_pulled_update(
             sys.exit(1)
         completion_request["expected_sha"] = pinned or observed
     update_progress.step("Install and restart")
+    update_progress.end()
     _complete_source_update(completion_request)
 
 
@@ -1333,6 +1341,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 selected_channel, None if use_zip_update else git_cmd, _m().PROJECT_ROOT)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print(f"✗ Could not resolve the {selected_channel} source channel: {exc}. No update was applied.")
+            update_progress.fail()
             _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
             sys.exit(1)
         if target.retired:
@@ -1397,6 +1406,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             fetch_result = _git_run(git_cmd, ["fetch", "origin", branch], network=True)
         if fetch_result.returncode != 0:
             _print_fetch_failure(fetch_result.stderr)
+            update_progress.fail()
             _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
             sys.exit(1)
 

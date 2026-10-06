@@ -357,6 +357,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
                 print(f"✗ ZIP fallback aborted before the swap: {recheck_reason}.")
                 print("  Files appeared in the checkout while the update was downloading; committing the swap would delete them.")
                 print(_STASH_HINT)
+                update_progress.fail()
                 _m().sys.exit(1)
             _commit_staged_replacements(staged)
         except Exception:
@@ -371,6 +372,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
         # Two-phase replace commits all or rolls all back, so no mixed tree here — don't push a needless reinstall.
         print("  Your existing install was left in place.")
         print("  Re-run `hermes update` to retry; if the agent won't start, reinstall from https://hermes-agent.nousresearch.com")
+        update_progress.fail()
         _m().sys.exit(1)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -413,5 +415,6 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False,
     _download_and_swap_zip(branch, f"https://github.com/{repository}/archive/{ref}.zip")
     completion_request["expected_sha"] = target_sha
     update_progress.step("Install and restart")
+    update_progress.end()
     _complete_source_update(completion_request)
     return True
