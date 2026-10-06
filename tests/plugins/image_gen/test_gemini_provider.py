@@ -149,3 +149,42 @@ def test_generate_inlines_local_reference_image(monkeypatch, tmp_path):
     inline_parts = [p for p in captured["payload"]["contents"][0]["parts"] if "inlineData" in p]
     assert len(inline_parts) == 1
     assert inline_parts[0]["inlineData"]["data"] == _b64_png()
+
+
+def test_generate_unreadable_reference_refuses_silent_text_to_image(monkeypatch, tmp_path):
+    """An edit whose only reference cannot be read must fail — not bill a text-to-image run."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    sent: list = []
+
+    def _fake_post_json(url, **kw):
+        sent.append(kw.get("payload"))
+        return _ok_body(_b64_png()), None
+
+    monkeypatch.setattr(gemini_plugin, "post_json", _fake_post_json)
+    result = gemini_plugin.GeminiImageGenProvider().generate(
+        prompt="edit this", reference_image_urls=[str(tmp_path / "missing.png")],
+    )
+    assert result["success"] is False
+    assert result["error_type"] == "io_error"
+    assert "Refusing to silently fall back" in result["error"]
+    assert sent == [], "no generateContent request may go out without the requested reference"
+
+
+def test_generate_mixed_references_report_drop_and_image_modality(monkeypatch, tmp_path):
+    """One readable + one unreadable ref: proceed, report the drop, report image modality."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    good = tmp_path / "ref.png"
+    good.write_bytes(bytes.fromhex(_PNG_HEX))
+    captured: dict = {}
+    monkeypatch.setattr(
+        gemini_plugin, "post_json",
+        lambda url, **kw: (captured.update(payload=kw["payload"]) or (_ok_body(_b64_png()), None)),
+    )
+    result = gemini_plugin.GeminiImageGenProvider().generate(
+        prompt="edit this", reference_image_urls=[str(good), str(tmp_path / "missing.png")],
+    )
+    assert result["success"] is True
+    assert result["modality"] == "image"
+    assert any("missing.png" in note for note in result.get("notes") or [])
+    inline_parts = [p for p in captured["payload"]["contents"][0]["parts"] if "inlineData" in p]
+    assert len(inline_parts) == 1

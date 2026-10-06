@@ -145,6 +145,7 @@ class GeminiImageGenProvider(StaticImageGenProvider):
                 "https://aistudio.google.com/apikey.",
                 "auth_required")
         parts: List[Dict[str, Any]] = []
+        dropped: List[str] = []
         for ref in collect_source_images(image_url, reference_image_urls, limit=_MAX_REFERENCE_IMAGES):
             inline, skip = _inline_ref(ref)
             if inline is not None:
@@ -153,6 +154,15 @@ class GeminiImageGenProvider(StaticImageGenProvider):
                 logger.debug("Gemini reference dropped: %s", skip)
                 if ref.startswith(("http://", "https://")):
                     return fail(str(skip), "modality_unsupported")
+                dropped.append(str(skip))
+        # An edit request with no readable source must not silently bill a text-to-image picture
+        # (mirrors the openrouter provider); mixed batches proceed with the drops surfaced below.
+        if dropped and not parts:
+            return fail(
+                "Could not read the reference image(s) requested for editing: "
+                + "; ".join(dropped) + ". Refusing to silently fall back to text-to-image.",
+                "io_error")
+        reference_count = len(parts)
         parts.append({"text": prompt})
         payload = {
             "contents": [{"parts": parts}],
@@ -177,8 +187,13 @@ class GeminiImageGenProvider(StaticImageGenProvider):
             image_ref = str(save_b64_image(b64, prefix=f"gemini_{model_id.replace(':', '_')}"))
         except Exception as exc:  # noqa: BLE001
             return fail(f"Could not save image to cache: {exc}", "io_error")
+        extra: Dict[str, Any] = {}
+        if dropped:
+            extra["notes"] = [f"dropped unreadable reference image(s): {'; '.join(dropped)}"]
         return success_response(
-            image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="gemini")
+            image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="gemini",
+            modality="image" if reference_count else "text",
+            extra=extra or None)
 
 
 def register(ctx) -> None:
