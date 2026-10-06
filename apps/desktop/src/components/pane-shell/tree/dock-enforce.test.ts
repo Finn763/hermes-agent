@@ -288,4 +288,38 @@ describe('enforced dock (stacked Bots pane → sessions-zone tab, every boot)', 
 
     expect(tree.$layoutTree.get()).toEqual(dockedRoutinesTree)
   })
+
+  it('respects a USER-PLACED edge-enforced pane — the routines drag record beats the invariant', async () => {
+    // Review on #107925: the same exemption that protects the center-hinted Bots
+    // pane applies to edge hints (routines) — this cell had no test. The user's
+    // drag record must win over the re-home to the workspace's right edge.
+    const staleRoutinesTree = {
+      type: 'split',
+      id: 'root',
+      orientation: 'row',
+      weights: [1, 3],
+      children: [
+        {
+          type: 'group',
+          id: 'g-sessions',
+          panes: ['sessions', 'hermes-bots:pane', 'hermes-bots:routines'],
+          active: 'hermes-bots:pane'
+        },
+        { type: 'group', id: 'g-main', panes: ['workspace'], active: 'workspace' }
+      ]
+    }
+
+    window.localStorage.setItem(USER_PLACED_KEY, JSON.stringify(['hermes-bots:routines']))
+
+    const { model, tree } = await setupTree(staleRoutinesTree, { routines: true })
+
+    tree.watchContributedPanes()
+
+    const routinesGroup = model.findGroupOfPane(tree.$layoutTree.get()!, 'hermes-bots:routines')!
+
+    // Still where the drag put it — inside the sessions strip, NOT re-homed to
+    // the workspace's right edge.
+    expect(routinesGroup.panes).toContain('sessions')
+    expect(routinesGroup.panes).toContain('hermes-bots:routines')
+  })
 })

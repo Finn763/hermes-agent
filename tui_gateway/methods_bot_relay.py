@@ -71,7 +71,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
         return _err(rid, 4090, "profile and message required")
     try:
         from tools.bot_mode_dm import MESSAGE_MAX_CHARS
-        from tools.bot_relay import acquire_turn_lock, deliver_via_gateway_api
+        from tools.bot_relay import (
+            GatewayApiDeliveryUncertain, acquire_turn_lock, deliver_via_gateway_api)
         if len(message) > MESSAGE_MAX_CHARS + 200:  # + attribution headroom
             return _err(rid, 4091, "message too long")
         root = _root()
@@ -112,12 +113,37 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(message)
             # Per-profile turn lock serializes with any other delivery turn into this profile and
-            # covers only the turn window. Worst-case hold is lock wait (bot_mode.turn_wait_seconds,
-            # default 120s) + the 600s turn timeout, doubled on one retry — callers tolerate ~1320s.
-            # See #93091.
+            # covers only the turn window. The gateway-API leg returns None only on a pre-turn
+            # failure (unreachable / rejected); an unknown outcome raises instead of falling back,
+            # so the CLI leg never stacks onto an API timeout. Worst-case hold stays ~1320s:
+            # lock wait (bot_mode.turn_wait_seconds, default 120s) + the 600s turn timeout,
+            # doubled on one retry. See #93091, #95741.
             with acquire_turn_lock(root, resolved):
-                # #95741: prefer gateway API (httpx, no subprocess); None → subprocess fallback.
-                reply = deliver_via_gateway_api(resolved, message, timeout=600)
+                # #95741 review: scope the gateway-API credential read to the TARGET profile.
+                # A sibling profile's API_SERVER_KEY lives in ITS .env, not in this process's
+                # os.environ; the scope must come from here — a failed build still installs an
+                # empty scope (fail closed) instead of letting the read fall back to os.environ.
+                scope_token = None
+                if live_home is not None:
+                    from agent.secret_scope import (
+                        build_profile_secret_scope, reset_secret_scope, set_secret_scope)
+                    try:
+                        target_secrets = build_profile_secret_scope(live_home)
+                    except Exception:
+                        target_secrets = {}
+                    scope_token = set_secret_scope(target_secrets)
+                try:
+                    # #95741: prefer gateway API (httpx, no subprocess); None → subprocess fallback.
+                    reply = deliver_via_gateway_api(resolved, message, timeout=600)
+                except GatewayApiDeliveryUncertain as exc:
+                    # The turn may have started before its response was lost; the CLI fallback
+                    # would run it a second time, so surface the uncertainty instead.
+                    return _err(rid, 5097,
+                                f"gateway API delivery outcome unknown — not re-running to "
+                                f"avoid a duplicate turn: {exc}")
+                finally:
+                    if scope_token is not None:
+                        reset_secret_scope(scope_token)
                 if reply is not None:
                     return _ok(rid, {"reply": reply})
                 proc = _run(resolved, tmp)

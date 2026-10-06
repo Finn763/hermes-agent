@@ -267,7 +267,8 @@ function recalledEdgeWeights(paneId: string): [number, number] | undefined {
 // menu's Show/Hide rows and the auto-registered ⌘K toggles both land here.
 // Persisted separately from `$hiddenTreePanes` (whose persistence each side
 // binding owns) so a hidden Bots tab stays hidden across launches even though
-// dock enforcement re-adopts the pane into the sessions zone every boot.
+// dock enforcement re-adopts the pane into the sessions zone every boot (unless
+// the user has dragged it — see enforceDockedPanes / #107925).
 const HIDDEN_STRIP_TAB_KEY = 'hermes.desktop.hiddenStripTabs.v1'
 
 export const $hiddenStripTabs = atom<ReadonlySet<string>>(new Set(readJson<string[]>(HIDDEN_STRIP_TAB_KEY) ?? []))
@@ -1249,9 +1250,9 @@ interface PaneDockHint {
   before?: null | string
   /** Enforced dock invariant: the pane is re-homed onto this hint's anchor
    *  on EVERY boot when it isn't already in the declared relationship —
-   *  no one-time token, and user placement does not exempt it. Once per
-   *  adoption lifetime (per boot), so an intra-session drag sticks until the
-   *  next boot. See `enforceDockedPanes`. */
+   *  no one-time token, but a recorded user drag ($userPlacedPanes) does
+   *  exempt it (see #107925). Once per adoption lifetime (per boot), so an
+   *  intra-session drag sticks until the next boot. See `enforceDockedPanes`. */
   enforce?: boolean
 }
 

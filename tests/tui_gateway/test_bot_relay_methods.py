@@ -152,6 +152,84 @@ def test_deliver_lands_in_live_bot_chat_instead_of_subprocess(home, monkeypatch)
     assert out["reply"] == "pong" and spawned and not submitted
 
 
+def test_deliver_scopes_the_api_key_read_to_the_target_profile(home, monkeypatch):
+    """Review on #95741: the API_SERVER_KEY read must come from the TARGET profile's
+    secret scope, never this process's os.environ (which holds the launch profile's
+    value — or a sibling's in a multiplexed process)."""
+    (home / "profiles" / "ops" / ".env").write_text(
+        "API_SERVER_KEY=ops-profile-key\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("API_SERVER_KEY", "launch-profile-key")
+    monkeypatch.setattr(srv, "_profile_home", lambda name: home / "profiles" / name)
+
+    import agent.secret_scope as secret_scope
+    from gateway.platforms._shared import get_scoped_secret
+
+    seen = {}
+
+    def _fake_deliver(profile, message, *, timeout=None):
+        seen["scope"] = secret_scope.current_secret_scope()
+        seen["key"] = get_scoped_secret("API_SERVER_KEY", "")
+        return "pong"
+
+    monkeypatch.setattr(bot_relay, "deliver_via_gateway_api", _fake_deliver)
+    out = _result(
+        srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
+    )
+
+    assert out["reply"] == "pong"
+    assert seen["scope"] is not None
+    assert seen["key"] == "ops-profile-key"
+    # The scope is scoped to the delivery, not left installed on the RPC thread.
+    assert secret_scope.current_secret_scope() is None
+
+
+def test_deliver_fails_closed_when_the_profile_scope_cannot_build(home, monkeypatch):
+    """A failed scope build still installs an EMPTY scope — the read must not fall
+    back to os.environ (that is the cross-profile leak the scope exists to stop)."""
+    monkeypatch.setattr(srv, "_profile_home", lambda name: home / "profiles" / name)
+
+    import agent.secret_scope as secret_scope
+
+    def _boom(_home):
+        raise OSError("unreadable profile secrets")
+
+    monkeypatch.setattr(secret_scope, "build_profile_secret_scope", _boom)
+    seen = {}
+
+    def _fake_deliver(profile, message, *, timeout=None):
+        seen["scope"] = secret_scope.current_secret_scope()
+        return "pong"
+
+    monkeypatch.setattr(bot_relay, "deliver_via_gateway_api", _fake_deliver)
+    _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+
+    assert seen["scope"] == {}
+
+
+def test_deliver_does_not_fall_back_when_the_api_outcome_is_unknown(home, monkeypatch):
+    """A dropped turn response must surface, not re-run the message through the CLI
+    transport (that would deliver it twice)."""
+    spawned = []
+
+    def _fake_run(argv, *a, **k):
+        spawned.append(argv)
+        class _Proc:
+            returncode, stdout, stderr = 0, "pong", ""
+        return _Proc()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    def _uncertain(profile, message, *, timeout=None):
+        raise bot_relay.GatewayApiDeliveryUncertain("simulated dropped response")
+
+    monkeypatch.setattr(bot_relay, "deliver_via_gateway_api", _uncertain)
+    err = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
+
+    assert "error" in err and "duplicate" in err["error"]["message"]
+    assert not spawned
+
+
 def test_reply_roundtrip_and_id_validation(home):
     envelope_id = "c" * 32
     _result(srv._methods["bot_relay.reply"](1, {"id": envelope_id, "reply": "hi"}))

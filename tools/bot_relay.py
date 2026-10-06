@@ -411,13 +411,30 @@ def _gateway_api_base_url() -> str | None:
     return None
 
 
+class GatewayApiDeliveryUncertain(RuntimeError):
+    """The turn POST may have been accepted although its outcome was never learned.
+
+    Raised instead of returning ``None`` so callers do NOT fall back to the CLI
+    spawn: re-running would deliver the same message a second time (this API leg
+    carries no idempotency key). Review on #95741."""
+
+
 def deliver_via_gateway_api(
     profile: str, message: str, *, timeout: float = 600
 ) -> str | None:
     """Deliver ``message`` to ``profile``'s Bot Chat via gateway HTTP API.
 
-    Returns the reply text on success, or ``None`` when the gateway API is
-    unavailable / not configured (caller falls back to CLI spawn).
+    Returns the reply text on success (possibly empty — the turn still ran), or
+    ``None`` when the gateway API is unavailable / rejected the turn before it
+    could start (caller falls back to CLI spawn). Raises
+    ``GatewayApiDeliveryUncertain`` when the POST may have started the turn but
+    its response was lost (transport error after send, or a 5xx the gateway can
+    emit mid-turn): a fallback retry could duplicate the delivery, so the caller
+    must surface the uncertainty instead.
+
+    Reads ``API_SERVER_KEY`` scope-aware (``get_scoped_secret``): a sibling
+    profile's key must come from that profile's scope — the caller installs it —
+    and never from this process's ``os.environ`` (review on #95741).
 
     Uses ``httpx`` (already in dependencies) — no new deps. One helper;
     all relay delivery paths benefit from the single replacement.
@@ -426,13 +443,13 @@ def deliver_via_gateway_api(
     if not base:
         return None
     try:
-        from agent.secret_scope import get_secret
+        from gateway.platforms._shared import get_scoped_secret
 
-        key = (get_secret("API_SERVER_KEY", "") or "").strip()
+        key = (get_scoped_secret("API_SERVER_KEY", "") or "").strip()
     except Exception:
-        import os as _os
-
-        key = (_os.getenv("API_SERVER_KEY") or "").strip()
+        # Fail closed: an unscoped read must never fall back to os.environ, which
+        # in a multiplexed process may hold another profile's key.
+        key = ""
     # Quick liveness probe — if the gateway isn't listening, fall back fast
     # instead of blocking the full turn timeout on a dead socket.
     try:
@@ -476,16 +493,36 @@ def deliver_via_gateway_api(
                 if not sid:
                     return None
             chat_url = f"{base}{prefix}/api/sessions/{_up.quote(sid, safe='')}/chat"
-            cr = _client.post(
-                chat_url, headers=headers, json={"message": message}, timeout=timeout
-            )
+            try:
+                cr = _client.post(
+                    chat_url, headers=headers, json={"message": message}, timeout=timeout
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                # The request never reached the gateway: nothing ran, fall back.
+                logger.debug("gateway API unreachable for profile=%s: %s", profile, exc)
+                return None
+            except Exception as exc:
+                # Sent, but the outcome is unknown (read timeout / dropped
+                # response). The turn may be running — do NOT let the caller retry.
+                raise GatewayApiDeliveryUncertain(
+                    f"turn POST for profile={profile!r} failed after send: {exc!r}"
+                ) from exc
+            if cr.status_code >= 500:
+                # A 5xx can surface after the turn started; treat it as unknown,
+                # not as a rejected request.
+                raise GatewayApiDeliveryUncertain(
+                    f"turn POST for profile={profile!r} answered HTTP {cr.status_code}"
+                )
             if cr.status_code >= 400:
                 return None
             cj = cr.json()
             msg = cj.get("message") if isinstance(cj.get("message"), dict) else None
             if isinstance(msg, dict):
-                return str(msg.get("content") or "").strip() or None
-            return str(cj.get("reply") or cj.get("content") or "").strip() or None
+                # A 2xx means the turn ran; an empty reply is still a delivery.
+                return str(msg.get("content") or "").strip()
+            return str(cj.get("reply") or cj.get("content") or "").strip()
+    except GatewayApiDeliveryUncertain:
+        raise
     except Exception:
         logger.debug("gateway API deliver failed for profile=%s", profile, exc_info=True)
         return None

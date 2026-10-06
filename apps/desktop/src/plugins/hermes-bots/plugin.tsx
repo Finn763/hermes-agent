@@ -374,14 +374,15 @@ export default {
       // trap this dock used to work around with a 'bottom' split.
       // enforce: standing invariant, not a one-shot migration — the pane
       // re-homes into the sessions strip at EVERY boot it isn't already
-      // there, whatever tokens or user placement an older install persisted.
+      // there, whatever tokens an older install persisted. A pane the user
+      // has explicitly dragged (recorded in userPlacedPanes) is exempt: the
+      // drag record wins, on this boot and later ones (issue #107925).
       // The one-time heal ('sessions-tab-v1') burned its token even when its
       // guards skipped the move, so exactly the users who had fought the old
       // stacked layout (dragged panes → $userPlacedPanes) stayed stacked
       // forever. Owner's order: SESSIONS | BOTS is always a tab strip.
-      // An intra-session drag still sticks until the next launch (the
-      // invariant runs at adoption time only — see enforceDockedPanes in the
-      // tree store).
+      // The invariant runs at adoption time only — see enforceDockedPanes in
+      // the tree store.
       // collapsible: the pane lives in the sessions zone, so it must LEAVE
       // the grid with that zone below the sidebar-collapse breakpoint. The
       // sessions pane collapses alone without this flag. The zone then keeps
