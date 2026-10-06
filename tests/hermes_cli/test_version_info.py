@@ -5,6 +5,7 @@ import subprocess
 from hermes_cli.version_info import (
     VersionInfo,
     _derived_version,
+    _newest_calver_tag,
     _reset_version_info_cache,
     _resolve_stamp_file,
     _stamp_version_info,
@@ -216,12 +217,15 @@ def test_get_version_info_takes_the_version_a_calver_only_release_shipped(tmp_pa
 
 
 def _release_line_repo(tmp_path):
-    """A tree holding TWO releases, where the older tag is the nearer one.
+    """A tree holding THREE releases, where the older tag is the nearer one.
 
     Release tags are cut on side lines and merged back, so the newest release a
     tree contains is not always the tag closest to HEAD. Here ``v2026.1.1``
     (0.1.0) sits 2 commits back and ``v2026.1.2`` (0.1.1) sits 6 back, yet both
-    are ancestors of HEAD: the tree ships 0.1.1 and the nearer tag names 0.1.0.
+    are ancestors of HEAD: the tree ships 0.1.1 over the nearer tag's 0.1.0.
+    A same-day patch release, ``v2026.1.2.2`` (0.1.2), is the newest release in
+    the tree -- its tag sorts after the base tag lexicographically, on the same
+    calendar day.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -248,6 +252,12 @@ def _release_line_repo(tmp_path):
     pyproject("0.1.1")
     git("commit", "-qam", "newer release")
     git("tag", "v2026.1.2")
+    # Same-day patch release: a later tag on the SAME calendar day. The tag
+    # list is lexicographic and the base tag comes first, so a strict ``>`` on
+    # (year, month, day) alone keeps the base tag and under-reports the tree.
+    pyproject("0.1.2")
+    git("commit", "-qam", "same-day patch")
+    git("tag", "v2026.1.2.2")
     git("checkout", "-q", "-")
     for index in range(4):
         (repo / f"m{index}.txt").write_text(f"m{index}\n", encoding="utf-8")
@@ -262,7 +272,7 @@ def _release_line_repo(tmp_path):
         ["git", "merge", "--no-ff", "release-line", "-m", "merge release line"],
         cwd=repo, text=True, capture_output=True,
     )
-    pyproject("0.1.1")
+    pyproject("0.1.2")
     git("commit", "-qm", "merge release line")
     return repo, git
 
@@ -281,8 +291,11 @@ def test_requires_hermes_gate_admits_the_newest_release_the_tree_contains(tmp_pa
     monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: repo)
     _reset_version_info_cache()
 
+    # Same-day patch tags order by their suffix, not by `git tag`'s
+    # lexicographic order (which puts the base tag first).
+    assert _newest_calver_tag(repo) == "v2026.1.2.2"
     # The gate admits what the tree can run, and still refuses what it cannot.
-    assert requires_hermes_error({"requires_hermes": ">=0.1.1"}) is None
+    assert requires_hermes_error({"requires_hermes": ">=0.1.2"}) is None
     assert requires_hermes_error({"requires_hermes": ">=9.9.9"}) is not None
 
 

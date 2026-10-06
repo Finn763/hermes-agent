@@ -93,7 +93,7 @@ def _parse_nonnegative(value: str | None) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-_CALVER_TAG_RE = re.compile(r"^v(\d{4})\.(\d{1,2})\.(\d{1,2})(?:\.\d+)*$")
+_CALVER_TAG_RE = re.compile(r"^v(\d{4})\.(\d{1,2})\.(\d{1,2})(?:\.(\d+))?$")
 
 
 def _newest_calver_tag(repo_dir: Path) -> str | None:
@@ -107,17 +107,26 @@ def _newest_calver_tag(repo_dir: Path) -> str | None:
     The tag name IS the release date, so the greatest (year, month, day) is the
     newest release; only that one tag's pyproject is read, keeping this at the
     two git probes describe already cost on the startup-banner path.
+
+    The trailing patch suffix counts too: same-day releases are tagged
+    ``vY.M.D.N`` (``v2026.8.16`` -> ``v2026.8.16.2``), and the tag list is
+    lexicographic, so a key of (year, month, day) alone would keep the older
+    base tag of the tie. Patch tags for one day are cut in order (the base tag
+    is an ancestor of each later suffix), so the suffix is a valid tie-break.
     """
     tags = _run_git(repo_dir, "tag", "--merged", "HEAD", "--list", "v2[0-9][0-9][0-9].*")
     if not tags:
         return None
-    newest: tuple[tuple[int, int, int], str] | None = None
+    newest: tuple[tuple[int, int, int, int], str] | None = None
     for line in tags.splitlines():
         tag = line.strip()
         match = _CALVER_TAG_RE.match(tag)
         if match is None:
             continue
-        key = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        key = (
+            int(match.group(1)), int(match.group(2)), int(match.group(3)),
+            int(match.group(4) or 0),
+        )
         if newest is None or key > newest[0]:
             newest = (key, tag)
     return newest[1] if newest else None
