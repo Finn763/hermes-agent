@@ -145,7 +145,11 @@ def _pattern_reaches_host_interpreter(pattern: str, *, full_cmdline: bool, exact
         rest = head[match.start():] + " " + rest
         head = head[: match.start()]
     if not _is_interpreter_image(head, substring=not exact):
-        return full_cmdline and bool(_GATEWAY_CMDLINE_TOKEN_RE.search(core))
+        # A gateway-naming operand is the same kill either way (#126501): a
+        # `pgrep -f hermes-gateway` pattern and a `pidof hermes-gateway` name feed
+        # the same PID, so both spelling orders are judged here. Bare-`kill` removal
+        # from Branch D left the name-mode (pidof/bare pgrep) feed unconnected.
+        return bool(_GATEWAY_CMDLINE_TOKEN_RE.search(core))
     return not rest.strip() or bool(_ERE_WILDCARD_ONLY.match(rest)) or "hermes" in rest.lower()
 
 

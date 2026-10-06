@@ -44,6 +44,10 @@ class TestGatewayLifecyclePattern:
         "sudo pkill -9 python3",
         "pgrep python | xargs kill -9",
         "kill $(pidof python3)",
+        # #126501: enumerator PID-feeds into kill must keep a net after bare `kill`
+        # left Branch D — pidof and pgrep spell the same gateway kill.
+        "kill $(pidof hermes-gateway)",
+        "kill $(pgrep -f hermes-gateway)",
         # Windows spellings of the hermes-gateway forms (salvaged from #94379).
         "hermes.exe gateway restart",
         "hermes.cmd gateway stop",
@@ -565,6 +569,18 @@ class TestTerminalToolGatewayLifecycleGuard:
 
         assert result["exit_code"] == 1
         assert "Blocked" in result["error"]
+
+    def test_block_message_points_agents_at_the_owned_process_route(self, monkeypatch):
+        """The reader of this block is an agent: `hermes gateway restart` self-targets
+        (Branch A) and `/restart` is user-typed, so the owned-process route must be in
+        the text — dropping it leaves no actionable line."""
+        import tools.terminal_tool as tt
+        self._patch_env(monkeypatch, self._make_fake_env(), inside_gateway=True)
+
+        result = json.loads(tt.terminal_tool(command="systemctl restart hermes-gateway"))
+
+        assert result["exit_code"] == 1
+        assert 'process(action="kill", session_id="proc_' in result["error"]
 
     def test_blocks_lifecycle_command_hidden_in_referenced_script(
         self, monkeypatch, tmp_path
