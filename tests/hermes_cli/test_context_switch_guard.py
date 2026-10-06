@@ -50,7 +50,7 @@ def _compressor(
 def test_merge_appends_to_existing_warning(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (90_000, "measured"),
+        lambda *a, **k: (90_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -76,7 +76,7 @@ def test_cap_lowers_the_switch_warning_threshold_below_the_ratio(monkeypatch):
     cap = 256_000
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (300_000, "measured"),
+        lambda *a, **k: (300_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -130,7 +130,7 @@ def test_custom_provider_context_avoids_false_shrink_warning(monkeypatch):
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (147_053, "measured"),
+        lambda *a, **k: (147_053, "measured", True),
     )
     cc = _compressor(monkeypatch, context_length=1_000_000)
     agent = SimpleNamespace(
@@ -213,7 +213,7 @@ def test_cold_read_note_on_a_large_session_that_will_not_compress(monkeypatch):
     an empty prefix cache. The summary names that cost instead of leaving the stall unexplained."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (90_000, "measured"),
+        lambda *a, **k: (90_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -239,7 +239,7 @@ def test_no_cold_read_note_on_a_small_session(monkeypatch):
     """A prefill on a small history is instant; the summary stays quiet."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (12_000, "measured"),
+        lambda *a, **k: (12_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -262,7 +262,7 @@ def test_compression_warning_is_not_doubled_by_the_cold_read_note(monkeypatch):
     """At or above the trigger the compression warning is the whole answer; the re-read is implied."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -353,7 +353,7 @@ def test_no_cold_read_note_when_reselecting_the_current_route(monkeypatch):
     every surface, so ``agent.model`` is the current route; a provider change is a different route."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (90_000, "measured"),
+        lambda *a, **k: (90_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -382,7 +382,7 @@ def test_endpoint_only_move_is_not_a_reselect(monkeypatch):
     move the session to another explicit URL, whose prefix cache is not the warm one."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (90_000, "measured"),
+        lambda *a, **k: (90_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -414,7 +414,7 @@ def test_unanchored_target_does_not_promise_compression(monkeypatch):
     real usage, so the summary states both dispositions instead of promising a pass."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -446,7 +446,7 @@ def test_anchored_target_keeps_the_compression_promise(monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -474,7 +474,7 @@ def test_codex_native_target_gets_the_cold_read_note(monkeypatch):
     summary must not promise one on a large session."""
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -540,7 +540,7 @@ def test_structural_no_op_backoff_suppresses_the_compression_promise(monkeypatch
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -576,7 +576,7 @@ def test_label_only_alias_swap_is_not_a_route_change(monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (90_000, "measured"),
+        lambda *a, **k: (90_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -629,7 +629,7 @@ def test_durable_prompt_tokens_size_a_session_with_no_transcript(monkeypatch):
     cc = _compressor(monkeypatch, context_length=200_000)  # trigger at 150k
     agent = SimpleNamespace(context_compressor=cc, compression_enabled=True, base_url="", api_key="")
 
-    assert _estimate_tokens(agent, [], 180_000) == (180_000, "record")
+    assert _estimate_tokens(agent, [], 180_000) == (180_000, "record", False)
     assert _estimate_tokens(agent, [], 0) is None
     assert _estimate_tokens(agent, [{"role": "user", "content": "x" * 40_000}], 20_000)[0] != 20_000
 
@@ -653,7 +653,7 @@ def test_window_shrink_blocker_verdict_is_read_at_the_target_trigger(monkeypatch
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (165_255, "measured"),
+        lambda *a, **k: (165_255, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -709,7 +709,7 @@ def test_sub_trigger_anchor_is_priced_by_the_runtime_not_the_rough_estimate(monk
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (165_255, "measured"),
+        lambda *a, **k: (165_255, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -747,7 +747,7 @@ def test_codex_app_server_entry_does_not_promise_a_hermes_pass(monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (160_000, "measured"),
+        lambda *a, **k: (160_000, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -976,7 +976,7 @@ def test_route_move_prices_the_display_but_not_the_promise(monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard._estimate_tokens",
-        lambda *a, **k: (165_255, "measured"),
+        lambda *a, **k: (165_255, "measured", True),
     )
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length",
@@ -1072,7 +1072,7 @@ def test_endpoint_move_is_one_transition_on_both_surfaces(monkeypatch):
     from hermes_cli.model_selection_guards import SelectionContext, _context_cache_guard
 
     monkeypatch.setattr(
-        "hermes_cli.context_switch_guard._estimate_tokens", lambda *a, **k: (200_000, "measured"))
+        "hermes_cli.context_switch_guard._estimate_tokens", lambda *a, **k: (200_000, "measured", True))
     monkeypatch.setattr(
         "hermes_cli.context_switch_guard.resolve_display_context_length", lambda *a, **k: 500_000)
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
@@ -1104,3 +1104,207 @@ def test_endpoint_move_is_one_transition_on_both_surfaces(monkeypatch):
         "https://a.example/v1", "https://a.example/v1", "custom:a", "custom:b")
     assert "no warm prefix cache" not in aliased
     assert confirmed_alias is None
+
+
+def test_destination_projection_strips_stale_reasoning_the_target_wire_drops(monkeypatch):
+    """R1: the summary sizes the request the *destination* reads, not the stored bytes.
+
+    A reasoning-heavy transcript moved to a route whose wire never replays stale thinking
+    (openai/chat_completions) costs a fraction of what the stored transcript holds, and the
+    runtime preflight reads the same figure — the summary must not claim the destination
+    request is past the trigger. Paired controls: the same transcript on a route that replays
+    the thinking (deepseek echo family) stays over the trigger and warns, and a content-heavy
+    transcript stays over it on the stripping route.
+    """
+    from agent.turn_context import RequestRoute, _preflight_request_tokens
+
+    from hermes_cli.context_switch_guard import _estimate_tokens
+
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000)
+    cc = _compressor(monkeypatch, context_length=200_000)  # trigger at 100k
+    agent = SimpleNamespace(
+        context_compressor=cc, compression_enabled=True, model="origin-model",
+        provider="openrouter", api_mode="chat_completions",
+        base_url="https://a.example/v1", api_key="", tools=[], _cached_system_prompt="")
+    reasoning = []
+    for i in range(15):
+        reasoning.extend([
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer",
+             "reasoning_content": "r" * 64_000 if i < 14 else "brief"}])
+
+    def assess(target_model, target_provider, target_url):
+        result = _result(model=target_model)
+        result.target_provider = target_provider
+        result.base_url = target_url
+        merge_preflight_compression_warning(result, agent=agent, messages=reasoning)
+        return result.warning_message or ""
+
+    openai_route = RequestRoute(
+        model="gpt-4.1", provider="openai", base_url="https://api.openai.com/v1",
+        api_mode="chat_completions")
+    projected = _estimate_tokens(agent, reasoning, route=openai_route)
+    assert projected.source == "estimate" and projected.applies
+    assert projected.figure < cc.threshold_tokens
+
+    # The runtime reads the same projection on the destination route: no drift between the
+    # figure the warning quotes and the figure preflight compares.
+    post_switch = SimpleNamespace(
+        model="gpt-4.1", provider="openai", api_mode="chat_completions",
+        base_url="https://api.openai.com/v1", tools=[], _cached_system_prompt="",
+        _usage_anchor=None)
+    assert projected.figure == _preflight_request_tokens(post_switch, reasoning, "")
+
+    # Below the trigger on the destination wire: no size and no threshold claim.
+    openai = assess("gpt-4.1", "openai", "https://api.openai.com/v1")
+    assert "past that trigger" not in openai
+    assert "no warm prefix cache" not in openai  # below half the trigger too
+
+    # Paired control: a route that replays the stale thinking keeps the same transcript over
+    # the trigger and warns.
+    echoed = assess("deepseek-reasoner", "deepseek", "https://api.deepseek.com/v1")
+    assert "Your next message is past that trigger" in echoed
+
+    # Paired control: content-heavy bytes stay on every wire and stay over the trigger.
+    content = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "r" * 64_000}
+        for i in range(30)
+    ]
+    result = _result(model="gpt-4.1")
+    result.target_provider = "openai"
+    result.base_url = "https://api.openai.com/v1"
+    merge_preflight_compression_warning(result, agent=agent, messages=content)
+    assert "Your next message is past that trigger" in result.warning_message
+
+
+def test_prior_route_reading_keeps_its_weaker_class(monkeypatch):
+    """R1: the anchor override may not promote a reading taken on the session's own route.
+
+    The usage anchor is the provider's priced figure for this transcript, captured on the route
+    the session runs on and carrying no route of its own; a switch to another deployment keeps
+    it as a *prior-route* reading — the figure stays visible, but as the weaker evidence class:
+    it never quotes a size for the target's request and never locates that request against the
+    trigger. Paired control: the same anchor on its own route stays measured and keeps the
+    definite promise.
+    """
+    from agent.usage_anchor import anchored_context_tokens, capture_usage_anchor
+
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length",
+        lambda *a, **k: 200_000)
+    cc = _compressor(monkeypatch, context_length=200_000)
+    messages = [{"role": "user", "content": "hi"} for _ in range(30)]
+    anchor = capture_usage_anchor(160_000, 10, messages)
+    priced = anchored_context_tokens(messages, anchor)
+    agent = SimpleNamespace(
+        context_compressor=cc, compression_enabled=True, model="large-model",
+        provider="openrouter", api_mode="chat_completions",
+        base_url="https://a.example/v1", api_key="", _usage_anchor=anchor)
+
+    moved = _result(model="large-model")
+    moved.base_url = "https://b.example/v1"
+    merge_preflight_compression_warning(moved, agent=agent, messages=messages)
+    message = moved.warning_message
+    assert f"Last provider reading on this session's route was ~{priced:,} tokens" in message
+    assert "it does not price the target's request" in message
+    assert "Session is ~" not in message
+    assert "Your next message is past that trigger" not in message
+    assert "Whether the next message is past that trigger is unknown" in message
+
+    same = _result(model="large-model")
+    same.base_url = "https://a.example/v1"
+    merge_preflight_compression_warning(same, agent=agent, messages=messages)
+    assert "will run preflight compression before the model replies" in same.warning_message
+
+
+def test_native_responses_projection_is_one_owner_for_both_consumers(monkeypatch):
+    """The checkpoint-pruned native projection is shared, not re-derived per consumer.
+
+    On an eligible native Responses route both the runtime preflight and the switch assessment
+    quote the pruned figure the native owner produces; off that route both fall back to the
+    generic transcript estimate for the same transcript. Paired so neither consumer can drift
+    alone.
+    """
+    from agent.turn_context import (
+        RequestRoute, _preflight_request_tokens, project_request_pressure)
+
+    from hermes_cli.context_switch_guard import _estimate_tokens
+
+    messages = [{"role": "user", "content": "x" * 80_000} for _ in range(4)]
+    monkeypatch.setattr(
+        "agent.codex_responses_adapter.estimate_native_responses_preflight_tokens",
+        lambda agent, messages, **k: 5_000)
+    native_route = RequestRoute(
+        model="gpt-5-codex", provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex", api_mode="codex_responses")
+
+    assert project_request_pressure(
+        native_route, messages,
+        native_agent=SimpleNamespace(api_mode="codex_responses")) == (5_000, "native")
+
+    codex_agent = SimpleNamespace(
+        api_mode="codex_responses", model="gpt-5-codex", provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex", tools=None,
+        _cached_system_prompt="", _usage_anchor=None)
+    assert _preflight_request_tokens(codex_agent, messages, "") == 5_000
+
+    agent = SimpleNamespace(
+        context_compressor=None, model="origin-model", provider="openrouter",
+        api_mode="chat_completions", base_url="https://a.example/v1", tools=None,
+        _cached_system_prompt="")
+    assert _estimate_tokens(agent, messages, route=native_route) == (5_000, "estimate", True)
+
+    generic = _estimate_tokens(agent, messages, route=RequestRoute(
+        model="gpt-4.1", provider="openai", base_url="https://api.openai.com/v1",
+        api_mode="chat_completions"))
+    assert generic.figure > 5_000 and generic.source == "estimate"
+    plain_agent = SimpleNamespace(
+        api_mode="chat_completions", model="gpt-4.1", provider="openai",
+        base_url="https://api.openai.com/v1", tools=None, _cached_system_prompt="",
+        _usage_anchor=None)
+    assert _preflight_request_tokens(plain_agent, messages, "") == generic.figure
+
+
+def test_both_surfaces_read_one_evidence_owner(monkeypatch):
+    """The switch summary and the selection confirmation size a session through one owner.
+
+    One compressor state yields one evidence class and one rendering on both surfaces: the
+    display seed is an estimate, a provider reading is a measurement, the session counter is
+    a total — summary class, confirmation class and the quoted words agree in each state.
+    """
+    from hermes_cli.context_switch_guard import _estimate_tokens, size_label
+    from hermes_cli.model_selection_guards import selection_context_for_agent
+
+    cc = _compressor(monkeypatch, context_length=200_000)
+    agent = SimpleNamespace(
+        context_compressor=cc, compression_enabled=True, model="big-model",
+        provider="openrouter", base_url="", api_key="")
+
+    cc.maybe_seed_preflight_display_tokens(170_000)
+    sized = _estimate_tokens(agent, None)
+    ctx = selection_context_for_agent(agent)
+    assert (sized.source, sized.applies) == ("estimate", False)
+    assert (ctx.context_tokens, ctx.context_tokens_source) == (170_000, "estimate")
+    assert size_label(sized.figure, sized.source) == size_label(
+        ctx.context_tokens, ctx.context_tokens_source)
+
+    cc.update_from_response({"prompt_tokens": 170_000, "completion_tokens": 0})
+    sized = _estimate_tokens(agent, None)
+    ctx = selection_context_for_agent(agent)
+    assert (sized.source, sized.applies) == ("measured", True)
+    assert (ctx.context_tokens, ctx.context_tokens_source) == (170_000, "measured")
+    assert size_label(sized.figure, sized.source) == size_label(
+        ctx.context_tokens, ctx.context_tokens_source)
+
+    fresh = _compressor(monkeypatch, context_length=200_000)
+    counter_agent = SimpleNamespace(
+        context_compressor=fresh, compression_enabled=True, model="big-model",
+        provider="openrouter", base_url="", api_key="", session_prompt_tokens=170_000)
+    sized = _estimate_tokens(counter_agent, None)
+    ctx = selection_context_for_agent(counter_agent)
+    assert (sized.source, sized.applies) == ("counter", False)
+    assert (ctx.context_tokens, ctx.context_tokens_source) == (170_000, "counter")
+    assert size_label(sized.figure, sized.source) == size_label(
+        ctx.context_tokens, ctx.context_tokens_source)

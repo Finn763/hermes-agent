@@ -48,32 +48,24 @@ class SelectionContext:
 
 def selection_context_for_agent(agent: object) -> Optional[SelectionContext]:
     """:class:`SelectionContext` from a live ``AIAgent``: how much conversation the switch abandons,
-    the route it was taken on, and the evidence the figure came from — the compressor's provider
-    reading (``last_real_prompt_tokens``, what the latest turn was billed) is a measurement, the
-    display seed written from a local estimate is an estimate, and the session prompt counter is a
-    cumulative total. ``None`` when no size is known — the guard then stays silent rather than
-    guess."""
+    the route it was taken on, and the evidence the figure came from — read through the same owner
+    the switch summary sizes with (``context_switch_guard.compressor_context_evidence``): the
+    compressor's provider reading (``last_real_prompt_tokens``, what the latest turn was billed) is
+    a measurement, the display seed written from a local estimate is an estimate, and the session
+    prompt counter is a cumulative total. ``None`` when no size is known — the guard then stays
+    silent rather than guess."""
     if agent is None:
         return None
-    source = "measured"
     try:
-        cc = getattr(agent, "context_compressor", None)
-        tokens = int(getattr(cc, "last_real_prompt_tokens", 0) or 0) if cc else 0
-        if tokens <= 0:
-            # ``update_model`` clears the real reading, so a seed written afterwards
-            # (``maybe_seed_preflight_display_tokens``) is the compressor's only figure and it states
-            # a local estimate. Only then does the session counter stand in, and as a total, not a
-            # size.
-            tokens = int(getattr(cc, "last_prompt_tokens", 0) or 0) if cc else 0
-            source = "estimate" if tokens > 0 else "counter"
-        if tokens <= 0:
-            tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
+        from hermes_cli.context_switch_guard import compressor_context_evidence
+
+        evidence = compressor_context_evidence(agent)
     except Exception:
-        tokens, source = 0, "measured"
-    if tokens <= 0:
+        evidence = None
+    if evidence is None:
         return None
     return SelectionContext(
-        context_tokens=tokens, context_tokens_source=source,
+        context_tokens=evidence.figure, context_tokens_source=evidence.source,
         current_model=getattr(agent, "model", "") or None,
         current_provider=getattr(agent, "provider", "") or None,
         current_base_url=getattr(agent, "base_url", "") or None)

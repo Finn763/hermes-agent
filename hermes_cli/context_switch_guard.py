@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, NamedTuple, Optional
 
 from agent.backend_identity import same_route
 from hermes_cli.model_switch import ModelSwitchResult, resolve_display_context_length
@@ -41,6 +41,22 @@ SIZE_FROM_RECORD = "record"
 # never locates the next request relative to the destination's trigger.
 SIZE_FROM_PRIOR_ROUTE = "prior_route"
 
+
+class SizeAssessment(NamedTuple):
+    """One size figure for one session, carried with the two facts its wording rests on.
+
+    ``source`` is the evidence class (``SIZE_FROM_*``), and ``applies`` says whether the figure
+    describes the request the destination is about to send. Both the switch summary and the
+    selection confirmation render this assessment, so one piece of evidence is never worded two
+    ways — and a class whose evidence does not apply to the destination request cannot locate
+    that request relative to a trigger.
+    """
+
+    figure: int
+    source: str
+    applies: bool
+
+
 # The phrase each non-measured source is quoted with. Keeping them distinct is the point: the two
 # historical fallbacks are separate kinds of history, and neither is the local estimate.
 _SIZE_LABELS = {
@@ -52,6 +68,10 @@ _SIZE_LABELS = {
                        "the current request size is unavailable",
     SIZE_FROM_RECORD: "Last recorded prompt size was ~{figure:,} tokens; "
                       "the current request size is unavailable",
+    # A real provider reading, but taken on the route the session was on: it cannot price the
+    # destination's request, so it never quotes a size for it.
+    SIZE_FROM_PRIOR_ROUTE: "Last provider reading on this session's route was ~{figure:,} tokens "
+                           "(it does not price the target's request)",
 }
 
 
@@ -63,66 +83,129 @@ def size_label(figure: int, source: str) -> str:
     return label.format(figure=figure) if label else f"Session is ~{figure:,} tokens"
 
 
-def _prices_the_next_request(source: str) -> bool:
-    """Whether this class of evidence may locate the *next* request relative to a trigger.
-
-    Only a provider-validated figure may. An estimate or a historical count says what some request
-    cost, not what the request about to be built will — so the summary keeps its trigger language
-    conditional on that evidence rather than lending it the authority of a measurement.
-    """
+def _quotes_a_size(source: str) -> bool:
+    """Whether this evidence may be quoted as the session's own size ("Session is ~N tokens"): only
+    a provider-measured figure is *the* size, and every weaker class is named for what it is."""
     return source == SIZE_FROM_MEASURED
 
 
+def _agent_route(agent: Any):
+    """The route an agent is on, through the runtime's own accessor (``None``-safe)."""
+    from agent.turn_context import route_facts
+
+    return route_facts(agent)
+
+
+def _destination_route(result: ModelSwitchResult, agent: Any):
+    """The route facts the switch installs — the axes the selection moves, with the current
+    values kept for the axes it does not."""
+    from agent.turn_context import RequestRoute
+
+    return RequestRoute(
+        model=str(result.new_model or getattr(agent, "model", "") or ""),
+        provider=str(result.target_provider or getattr(agent, "provider", "") or ""),
+        base_url=str(result.base_url or getattr(agent, "base_url", "") or ""),
+        api_mode=str(result.api_mode or getattr(agent, "api_mode", "") or ""),
+    )
+
+
+def _destination_native_view(agent: Any, route: Any) -> Any:
+    """A read-only copy of the live agent carrying the *destination* route facts.
+
+    The native Responses projection reads more than the route (fast-mode overrides, the
+    reasoning-replay flag, the compaction config) and those belong to the session, so the copy
+    keeps them and overrides the route — the live agent is never mutated just to render a
+    warning. ``None`` when no copy can be taken (agentless callers, exotic agents).
+    """
+    if agent is None:
+        return None
+    try:
+        view = SimpleNamespace(**vars(agent))
+    except TypeError:
+        return None
+    view.model, view.provider, view.base_url, view.api_mode = (
+        route.model, route.provider, route.base_url, route.api_mode)
+    for cached in ("_base_url_hostname", "_base_url_lower"):
+        try:
+            delattr(view, cached)
+        except AttributeError:
+            pass
+    return view
+
+
+def compressor_context_evidence(agent: Any) -> Optional[SizeAssessment]:
+    """The size assessment the compressor's own counters support — one owner for both surfaces.
+
+    ``update_from_response`` writes BOTH ``last_prompt_tokens`` and ``last_real_prompt_tokens``,
+    and ``update_model`` clears both, so a positive ``last_real_prompt_tokens`` is the provider's
+    own count for the last request. ``last_prompt_tokens`` alone may instead be a display-only
+    preflight seed (``maybe_seed_preflight_display_tokens``) written from a local estimate: it
+    sizes the display and is not a reading. The session counter is a cumulative total. The switch
+    summary and the selection confirmation both consume this, so one session state is described
+    one way.
+    """
+    cc = getattr(agent, "context_compressor", None)
+    real = int(getattr(cc, "last_real_prompt_tokens", 0) or 0) if cc is not None else 0
+    if real > 0:
+        return SizeAssessment(real, SIZE_FROM_MEASURED, True)
+    display = int(getattr(cc, "last_prompt_tokens", 0) or 0) if cc is not None else 0
+    if display > 0:
+        return SizeAssessment(display, SIZE_FROM_ESTIMATE, False)
+    session = int(getattr(agent, "session_prompt_tokens", 0) or 0)
+    if session > 0:
+        return SizeAssessment(session, SIZE_FROM_COUNTER, False)
+    return None
+
+
 def _estimate_tokens(
-    agent: Any, messages: Optional[List[dict]], durable_prompt_tokens: Optional[int] = None
-) -> Optional[tuple]:
-    """Size the payload the target route has to read, from the best evidence at hand.
+    agent: Any, messages: Optional[List[dict]], durable_prompt_tokens: Optional[int] = None,
+    *, route: Optional[Any] = None
+) -> Optional[SizeAssessment]:
+    """Size the payload the destination route has to read, from the best evidence at hand.
 
-    The durable transcript is the first choice — it exists whether or not a live agent does (the
-    gateway evicts the cached agent on every committed switch), and it is what the new route
-    re-reads. Live runtime facts only sharpen it (system prompt, tool schemas). Fallback chain for
-    callers without a transcript: the compressor's last *provider* reading, then its display seed,
-    then the session counter, then a durable prompt-token record (the session row's last
-    API-reported figure).
+    The durable transcript is the first choice, and it is sized by the destination's own request
+    projection (``agent.turn_context.project_request_pressure`` — the owner the runtime preflight
+    reads): native Responses pruning and the destination's stale-thinking policy decide what the
+    stored transcript is worth on the target wire. That figure applies to the request the switch
+    sends, but it is a local projection and not a provider reading, so it is tagged an *estimate*
+    and never promoted to ``SIZE_FROM_MEASURED``. Fallback chain for callers without a transcript:
+    the compressor's last *provider* reading, then its display seed, then the session counter,
+    then a durable prompt-token record (the session row's last API-reported figure) — all through
+    ``compressor_context_evidence``, the same owner the selection confirmation reads.
 
-    Returns ``(figure, source)``: the answer is only as current as its evidence, and the summary's
-    wording is read off the source, so a historical figure can never be quoted as this request.
+    Returns a :class:`SizeAssessment` — the answer is only as current as its evidence, and the
+    summary's wording is read off both facts, so a historical figure can never be quoted as this
+    request and a class that does not apply to the destination request cannot locate it relative
+    to a trigger.
     """
     if messages is not None:
         try:
-            from agent.model_metadata import estimate_request_tokens_rough
+            from agent.turn_context import project_request_pressure
 
-            system_prompt = getattr(agent, "_cached_system_prompt", None) or ""
-            tools = getattr(agent, "tools", None)
-            estimated = int(
-                estimate_request_tokens_rough(
-                    messages, system_prompt=system_prompt, tools=tools or None))
-            # Only a positive figure is evidence. Every wired caller hands over a list — an empty one
-            # for a session row with no transcript yet — and an empty list estimates 0, so returning
-            # that would skip the fallback below on the exact state it exists for.
-            if estimated > 0:
-                return estimated, SIZE_FROM_MEASURED
+            if route is None:
+                projection = project_request_pressure(
+                    _agent_route(agent), messages,
+                    system_prompt=getattr(agent, "_cached_system_prompt", None) or "",
+                    tools=getattr(agent, "tools", None) or None, native_agent=agent)
+            else:
+                projection = project_request_pressure(
+                    route, messages,
+                    system_prompt=getattr(agent, "_cached_system_prompt", None) or "",
+                    tools=getattr(agent, "tools", None) or None,
+                    native_agent=_destination_native_view(agent, route))
+            # Only a positive figure is evidence. Every wired caller hands over a list — an empty
+            # one for a session row with no transcript yet — so returning a zero would skip the
+            # fallback below on the exact state it exists for.
+            if projection is not None and projection.tokens > 0:
+                return SizeAssessment(projection.tokens, SIZE_FROM_ESTIMATE, True)
         except Exception:
             pass
 
-    cc = getattr(agent, "context_compressor", None)
-    # ``update_from_response`` writes BOTH ``last_prompt_tokens`` and ``last_real_prompt_tokens``,
-    # and ``update_model`` clears both, so a positive ``last_real_prompt_tokens`` is the provider's
-    # own count for the last request and is the only compressor figure that measures traffic.
-    # ``last_prompt_tokens`` alone may instead be a display-only preflight seed
-    # (``maybe_seed_preflight_display_tokens``) written from a local estimate, which is a size for
-    # the display and not a reading.
-    real = int(getattr(cc, "last_real_prompt_tokens", 0) or 0)
-    if real > 0:
-        return real, SIZE_FROM_MEASURED
-    display = int(getattr(cc, "last_prompt_tokens", 0) or 0)
-    if display > 0:
-        return display, SIZE_FROM_ESTIMATE
-    session_prompt = int(getattr(agent, "session_prompt_tokens", 0) or 0)
-    if session_prompt > 0:
-        return session_prompt, SIZE_FROM_COUNTER
+    evidence = compressor_context_evidence(agent)
+    if evidence is not None:
+        return evidence
     recorded = int(durable_prompt_tokens or 0)
-    return (recorded, SIZE_FROM_RECORD) if recorded > 0 else None
+    return SizeAssessment(recorded, SIZE_FROM_RECORD, False) if recorded > 0 else None
 
 
 def _append_warning(result: ModelSwitchResult, text: str) -> None:
@@ -502,7 +585,7 @@ def _append_cold_read_note(
     only a route that already served this session could have warmed, so the cost is the history
     itself being re-read. Small sessions answer from a cold cache fast enough that the line would be
     noise, hence the floor. Only a measured figure may be quoted as this request's payload
-    (``_prices_the_next_request``); a local estimate or a historical count carries the read instead,
+    (``_quotes_a_size``); a local estimate or a historical count carries the read instead,
     and the note says which evidence it read rather than presenting it as the next request's size.
     Nothing here records whether *this* destination served the session earlier, so the cold cache is
     stated as the condition it is — a route that has not served the session has no warm cache —
@@ -510,7 +593,7 @@ def _append_cold_read_note(
     """
     if _same_route(result, current_route) or estimate < int(threshold * COLD_READ_THRESHOLD_FRACTION):
         return
-    if _prices_the_next_request(source):
+    if _quotes_a_size(source):
         read = (f"Session is ~{estimate:,} tokens; the first reply on {result.new_model} re-reads "
                 f"them before it answers")
     else:
@@ -535,8 +618,11 @@ def merge_preflight_compression_warning(
     durable_prompt_tokens: int | None = None) -> None:
     """If the next user message will likely preflight-compress, append a warning.
 
-    ``agent`` is optional: with the durable transcript (``messages``) a caller that has no live
-    agent — an evicted gateway session, a restart — still gets the switch-cost note, and an
+    The figure the wording and the trigger comparison are read off is one assessment — the
+    destination's own request projection when the transcript can be sized, else the compressor's
+    counters — carried with its evidence class and whether it applies to the request the switch
+    sends. ``agent`` is optional: with the durable transcript (``messages``) a caller that has no
+    live agent — an evicted gateway session, a restart — still gets the switch-cost note, and an
     unavailable runtime forecast reads as "compression disposition unknown", never as a small
     session. ``durable_prompt_tokens`` is the session row's last API-reported prompt size, used only
     when no transcript and no live compressor can size the payload; it is a record of an earlier
@@ -574,22 +660,28 @@ def merge_preflight_compression_warning(
     if not new_ctx:
         return
 
-    sized = _estimate_tokens(agent, messages, durable_prompt_tokens)
+    sized = _estimate_tokens(
+        agent, messages, durable_prompt_tokens, route=_destination_route(result, agent))
     if sized is None:
         return
-    estimate, source = sized
+    estimate, source, applies = sized
     current_route = _route_of(agent)
     # The next turn prices a provider usage anchor, not this rough figure. When one covers the
     # transcript it is the number to quote *and* the one the trigger comparison is made on, so the
     # sentence and the disposition cannot be read off two different figures — but it was priced on
-    # the route the session runs on now, so it only *promises* for a destination it can speak for.
-    # Until the provenance owner (#129177) can say that, an unverified anchor is handed on as "no
-    # anchor": the figure still informs the display and the rest stays conditional.
+    # the route the session runs on now, and it carries no route of its own, so it can only make
+    # destination claims for a destination it can speak for. Until the provenance owner (#129177)
+    # can establish that, an unverified anchor sizes the display as the prior-route reading it is:
+    # it never quotes a size for the target's request and never locates that request against the
+    # target trigger.
     anchored = _anchored_tokens(agent, messages)
     if anchored is not None:
         estimate = anchored
-        source = SIZE_FROM_MEASURED
-    authoritative = anchored if _anchor_prices_destination(agent, result, current_route) else None
+        if _anchor_prices_destination(agent, result, current_route):
+            source, applies = SIZE_FROM_MEASURED, True
+        else:
+            source, applies = SIZE_FROM_PRIOR_ROUTE, False
+    authoritative = anchored if applies and source == SIZE_FROM_MEASURED else None
 
     # A destination with no live engine still has a resolved policy, and the same producer that
     # builds the engine answers for it: ask before quoting a trigger, and use its enabled flag too.
@@ -627,20 +719,21 @@ def merge_preflight_compression_warning(
         f"(auto-compress at ~{new_threshold:,}). ")
     if disposition == COMPRESSION_WILL:
         parts.append("Your next message will run preflight compression before the model replies.")
-    elif not _prices_the_next_request(source):
-        # The figure is a local estimate or a historical count, so nothing provider-side has priced
-        # the request about to be sent: it cannot locate that request relative to the trigger, and
-        # saying it did would give the figure authority its evidence does not carry. The run's own
-        # decision is a deferral until real usage arrives either way — say both, promise neither.
+    elif not applies:
+        # The figure does not describe the request this switch sends — it is a local estimate or a
+        # reading taken on another route — so it cannot locate that request relative to the trigger,
+        # and saying it did would give the figure authority its evidence does not carry. The run's
+        # own decision is a deferral until real usage arrives either way — say both, promise neither.
         parts.append(
-            "Whether the next message is past that trigger is unknown: the figure above is not a "
-            "provider reading for this request, so the run either runs preflight compression before "
-            "the model replies or sends it as-is; fresh provider usage will inform subsequent "
-            "compression decisions.")
+            "Whether the next message is past that trigger is unknown: the figure above does not "
+            "describe the request this switch sends, so the run either runs preflight compression "
+            "before the model replies or sends it as-is; fresh provider usage will inform "
+            "subsequent compression decisions.")
     else:
-        # A measured figure past the trigger: the pass is not certain either, because the switched
-        # compressor has had its usage reset — but the size itself is current, so the sentence may
-        # state the comparison it makes.
+        # A figure that applies to the destination request — the transcript projected on the target
+        # wire, or a provider reading that speaks for the target route — may state the comparison it
+        # makes. The pass itself is still not certain: the switched compressor has had its usage
+        # reset, so the run either takes the pass or defers to fresh provider usage.
         parts.append(
             "Your next message is past that trigger: the run either runs preflight compression "
             "before the model replies, or sends it as-is; fresh provider usage will inform "
