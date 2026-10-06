@@ -123,3 +123,50 @@ def test_invalid_proxy_value_falls_back_to_direct(monkeypatch):
     assert update_proxy.ensure_update_proxy_env() is None
     assert os.environ.get("http_proxy") is None
     assert os.environ.get("https_proxy") is None
+
+
+def test_credentials_are_stripped_from_the_status_line(monkeypatch, capsys):
+    """The "Using update proxy" line lands in logs/update.log; userinfo must not."""
+    _updates_config(monkeypatch, {"proxy": "http://corpuser:s3cr3t@127.0.0.1:10808"})
+    from hermes_cli import update_proxy
+    assert update_proxy.ensure_update_proxy_env() == "http://corpuser:s3cr3t@127.0.0.1:10808"
+    out = capsys.readouterr().out
+    assert "s3cr3t" not in out and "corpuser" not in out
+    assert "127.0.0.1:10808" in out
+    # The env value keeps the credentials — only the display is redacted.
+    assert os.environ["https_proxy"] == "http://corpuser:s3cr3t@127.0.0.1:10808"
+
+
+def test_credentials_are_stripped_from_the_rejection_warning(monkeypatch, caplog):
+    """The rejected value itself may carry credentials; the warning must not leak them."""
+    _updates_config(monkeypatch, {"proxy": "ftp://corpuser:s3cr3t@127.0.0.1:10808"})
+    from hermes_cli import update_proxy
+    with caplog.at_level("WARNING"):
+        assert update_proxy.resolve_update_proxy() is None
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "s3cr3t" not in messages and "corpuser" not in messages
+    assert "127.0.0.1:10808" in messages
+
+
+def test_socks_schemes_are_rejected_up_front(monkeypatch):
+    """socks5/socks5h have no urllib consumer here (no PySocks dependency):
+    accepting them made every channel read hard-fail with "unknown url type"."""
+    from hermes_cli import update_proxy
+    assert update_proxy.valid_proxy_url("socks5://127.0.0.1:1080") is None
+    assert update_proxy.valid_proxy_url("socks5h://127.0.0.1:1080") is None
+
+    _updates_config(monkeypatch, {"proxy": "socks5://127.0.0.1:1080"})
+    assert update_proxy.resolve_update_proxy() is None
+    assert update_proxy.ensure_update_proxy_env() is None
+    assert os.environ.get("http_proxy") is None
+
+
+def test_socks_config_no_longer_breaks_the_channel_read(monkeypatch):
+    """A socks5 updates.proxy used to be handed to ProxyHandler and killed every
+    read; it is now ignored, so the read falls back to the working direct path."""
+    _updates_config(monkeypatch, {"proxy": "socks5://127.0.0.1:1080"})
+    from hermes_cli.release_channels import ChannelReader
+    with object_server() as (url, objects, headers, requests, faults):
+        objects["releases/socks-fallback.json"] = b'{"direct": true}'
+        reader = ChannelReader(url + "/bucket", repository="example/hermes-agent")
+        assert reader.read_bytes("releases/socks-fallback.json") == b'{"direct": true}'

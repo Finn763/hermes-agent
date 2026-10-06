@@ -31,8 +31,11 @@ logger = logging.getLogger(__name__)
 
 PROXY_ENV_KEYS = ("https_proxy", "http_proxy", "HTTPS_PROXY", "HTTP_PROXY")
 ALL_PROXY_ENV_KEYS = ("all_proxy", "ALL_PROXY")
-# Schemes the updater can hand to both urllib and git/libcurl unchanged.
-PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+# Schemes every consumer of the shared value can honor: the channel reader and
+# the ZIP fallback hand it to urllib's ProxyHandler/urlretrieve, which have no
+# SOCKS support without PySocks. socks5/socks5h are rejected up front instead
+# of accepted here and then hard-failing with "unknown url type" at read time.
+PROXY_SCHEMES = ("http", "https")
 
 
 def _updates_config() -> dict:
@@ -62,6 +65,26 @@ def valid_proxy_url(value: object) -> str | None:
     return candidate
 
 
+def redact_proxy_url(value: str) -> str:
+    """*value* with any ``user:pass@`` userinfo stripped, for logs and stdout.
+
+    Proxy URLs routinely carry credentials and update stdout is mirrored to
+    ``logs/update.log``, so the password must never be printed.
+    """
+    try:
+        parsed = urlsplit(value)
+        if parsed.username is None and parsed.password is None:
+            return value
+        host = parsed.hostname or ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        return f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
+    except ValueError:
+        return "<invalid proxy URL>"
+
+
 def configured_proxy() -> str | None:
     """The validated ``updates.proxy`` URL, else None (warns once on a malformed value)."""
     raw = _updates_config().get("proxy")
@@ -69,7 +92,11 @@ def configured_proxy() -> str | None:
         return None
     proxy = valid_proxy_url(raw)
     if proxy is None:
-        logger.warning("Ignoring malformed updates.proxy value %r; updating directly", raw)
+        shown = redact_proxy_url(raw) if isinstance(raw, str) else repr(raw)
+        logger.warning(
+            "Ignoring unsupported or malformed updates.proxy value %r; updating directly",
+            shown,
+        )
     return proxy
 
 
@@ -116,5 +143,5 @@ def ensure_update_proxy_env() -> str | None:
             os.environ[key] = proxy
             applied = True
     if applied:
-        print(f"-> Using update proxy from updates.proxy: {proxy}")
+        print(f"-> Using update proxy from updates.proxy: {redact_proxy_url(proxy)}")
     return proxy
