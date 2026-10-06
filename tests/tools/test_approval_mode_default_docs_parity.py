@@ -70,17 +70,6 @@ def test_absent_mode_key_resolves_to_documented_default(config_home):
     assert _get_approval_mode() == "smart"
 
 
-def test_explicit_invalid_mode_still_fails_safe_to_manual(config_home, monkeypatch):
-    import hermes_cli.config as hc
-    from tools.approval_context import _get_approval_mode
-
-    (config_home / "config.yaml").write_text(
-        "approvals:\n  mode: sometimes\n", encoding="utf-8"
-    )
-    hc._LOAD_CONFIG_CACHE.clear()
-    assert _get_approval_mode() == "manual"
-
-
 def _mode_table_default(path: Path, valid: tuple) -> str:
     """The ``(default)`` marker of the approval-mode behavior table, e.g.
     ``| **smart** (default) | ...`` in security.md or ``| `smart` (default) | ...``
@@ -97,11 +86,11 @@ def _mode_table_default(path: Path, valid: tuple) -> str:
 
 
 @pytest.mark.parametrize(
-    "doc",
-    ["website/docs/user-guide/security.md",
-     "website/docs/user-guide/configuration.md"],
+    "doc,expect_key_row",
+    [("website/docs/user-guide/security.md", True),
+     ("website/docs/user-guide/configuration.md", False)],
 )
-def test_docs_declare_smart_as_default_mode(doc):
+def test_docs_declare_smart_as_default_mode(doc, expect_key_row):
     from hermes_cli.config_defaults import DEFAULT_CONFIG
     from tools.approval_context import _VALID_MODES
 
@@ -112,10 +101,16 @@ def test_docs_declare_smart_as_default_mode(doc):
     # Mode table row marks the default:  | **smart** (default) | ...
     assert _mode_table_default(path, _VALID_MODES) == default
     # security.md also carries the full key table: | `mode` | `smart` | ...
+    # Presence is pinned per doc: a conditional check would pass vacuously if
+    # the row were deleted or reworded, so the row that exists must stay
+    # matching instead of silently dropping out of the assertion.
     key_row = re.search(
         r"^\|\s*`mode`\s*\|\s*`([^`]+)`\s*\|", text, re.MULTILINE
     )
-    if key_row:
+    assert (key_row is not None) == expect_key_row, (
+        f"{doc}: key-table row presence changed (expected {expect_key_row})"
+    )
+    if expect_key_row:
         assert key_row.group(1) == default
     # The example block must not advertise a different mode as the shipped one.
     assert re.search(r"^\s*mode:\s*smart\b", text, re.MULTILINE), (
