@@ -834,7 +834,7 @@ if [ "$(uname)" != "Darwin" ] && [ -n "$RELAUNCH_TARGET" ]; then
       *)
         log "packaged shell ($RELAUNCH_TARGET): refusing backend update, keeping the compatible backend"
         FINAL_CODE=0
-        DONE_NOTE="The desktop app package (AppImage/deb/rpm) was not changed and cannot be updated by this flow. Nothing was changed: the compatible backend is still live. Update the hermes-desktop system package first, then re-run the update."
+        DONE_NOTE="The desktop app package (AppImage/deb/rpm) was not changed and cannot be updated by this flow. Nothing was changed: the compatible backend is still live. Update the desktop app package to get the next app version; to catch up the backend on its own, run hermes update in a terminal. This flow only updates checkout builds, so re-running it here refuses again."
         ;;
     esac
   fi

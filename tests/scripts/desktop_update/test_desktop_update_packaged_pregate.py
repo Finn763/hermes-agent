@@ -65,6 +65,10 @@ def test_packaged_shell_refuses_before_touching_backend(tmp_path):
     assert result["ok"] is True and result["manual"] is True
     assert "was not changed" in result["message"]
     assert "Nothing was changed" in result["message"]
+    # The gate refuses on the same path predicate every run, so the note must
+    # not promise a re-run; it names the real catch-up paths instead.
+    assert "re-run the update" not in result["message"], "note must not promise a re-run the gate refuses"
+    assert "hermes update" in result["message"], "note must name the terminal backend catch-up"
 
 
 def test_checkout_run_still_updates(tmp_path):
