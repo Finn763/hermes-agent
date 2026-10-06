@@ -119,6 +119,26 @@ pub(crate) fn cache_plan(immutable: bool, cached_exists: bool) -> CachePlan {
     }
 }
 
+/// Trim + validate the branch pin exactly once, so every `ResolvedScript`
+/// carries a cleaned ref.
+///
+/// The raw `pin.branch` is interpolated into a download URL in two places:
+/// the raw.githubusercontent script fetch here, and install.ps1's
+/// `refs/heads/$Branch.zip` / `git clone --branch $Branch` via the `-Branch`
+/// arg built from `ResolvedScript.branch`. A pin that reaches only the Rust
+/// fetch validated (the original #126951 fix) still left the PowerShell side
+/// unconstrained, so the value is cleaned here and carried everywhere.
+fn resolve_branch_pin(branch: Option<&str>) -> Result<Option<String>> {
+    match branch.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) if is_valid_branch(b) => Ok(Some(b.to_string())),
+        Some(b) => Err(anyhow!(
+            "install script pin branch `{b}` is not a valid ref name; \
+             release builds must pin a commit SHA"
+        )),
+        None => Ok(None),
+    }
+}
+
 /// Resolves the install script to use for this run.
 ///
 /// `pin` is the commit-or-branch from either Hermes-Setup's build-time
@@ -128,6 +148,8 @@ pub async fn resolve(
     pin: &Pin,
     emit_log: &impl Fn(&str),
 ) -> Result<ResolvedScript> {
+    let branch = resolve_branch_pin(pin.branch.as_deref())?;
+
     // 1. Dev shortcut.
     if let Ok(repo_root) = std::env::var("HERMES_SETUP_DEV_REPO_ROOT") {
         let candidate = PathBuf::from(repo_root).join("scripts").join(kind.filename());
@@ -141,7 +163,7 @@ pub async fn resolve(
                 path: candidate,
                 source: ScriptSource::DevCheckout,
                 commit: pin.commit.clone(),
-                branch: pin.branch.clone(),
+                branch: branch.clone(),
             });
         }
     }
@@ -153,15 +175,9 @@ pub async fn resolve(
     // Commit SHAs are immutable — permanent cache reuse is safe.
     // Branch/tag pins are moving refs: always try to refresh so "Retry install"
     // cannot keep reusing a poisoned install-main.ps1 forever (#67193).
-    let (commit_or_ref, immutable) = match (&pin.commit, &pin.branch) {
+    let (commit_or_ref, immutable) = match (&pin.commit, branch.as_deref()) {
         (Some(c), _) if is_valid_commit(c) => (c.clone(), true),
-        (_, Some(b)) if is_valid_branch(b) => (b.trim().to_string(), false),
-        (_, Some(b)) if !b.trim().is_empty() => {
-            return Err(anyhow!(
-                "install script pin branch `{b}` is not a valid ref name; \
-                 release builds must pin a commit SHA"
-            ));
-        }
+        (_, Some(b)) => (b.to_string(), false),
         (Some(other), _) => {
             return Err(anyhow!(
                 "install script pin commit `{other}` is not a valid git SHA"
@@ -190,7 +206,7 @@ pub async fn resolve(
                 path: cached,
                 source: ScriptSource::Cached,
                 commit: pin.commit.clone(),
-                branch: pin.branch.clone(),
+                branch: branch.clone(),
             });
         }
         CachePlan::Fetch { stale_ok } => {
@@ -212,7 +228,7 @@ pub async fn resolve(
                         path: cached,
                         source: ScriptSource::Downloaded,
                         commit: pin.commit.clone(),
-                        branch: pin.branch.clone(),
+                        branch: branch.clone(),
                     })
                 }
                 Err(err) if stale_ok => {
@@ -228,7 +244,7 @@ pub async fn resolve(
                         path: cached,
                         source: ScriptSource::Cached,
                         commit: pin.commit.clone(),
-                        branch: pin.branch.clone(),
+                        branch: branch.clone(),
                     })
                 }
                 Err(err) => Err(err),
@@ -482,6 +498,38 @@ mod tests {
         let err = resolve(ScriptKind::Sh, &pin, &|_| {})
             .await
             .expect_err("invalid branch pin must be rejected");
+        assert!(
+            err.to_string().contains("not a valid ref name"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn branch_pin_is_trimmed_and_carried_onto_the_script() {
+        // `build_pin_args` turns `ResolvedScript.branch` into install.ps1's
+        // `-Branch`, which goes into `refs/heads/$Branch.zip` and
+        // `git clone --branch $Branch`; it must be the cleaned ref, not the
+        // raw pin.
+        assert_eq!(
+            resolve_branch_pin(Some("  release/1.2.3  ")).unwrap(),
+            Some("release/1.2.3".to_string())
+        );
+        assert_eq!(resolve_branch_pin(None).unwrap(), None);
+        assert_eq!(resolve_branch_pin(Some("   ")).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_invalid_branch_even_when_a_valid_commit_is_pinned() {
+        // Before, the `is_valid_commit` arm short-circuited the match and an
+        // invalid `branch` rode along to install.ps1's `$Branch` unvalidated;
+        // the pin is cleaned before either field is consulted.
+        let pin = Pin {
+            commit: Some("02d2698".to_string()),
+            branch: Some("main?x=1".to_string()),
+        };
+        let err = resolve(ScriptKind::Sh, &pin, &|_| {})
+            .await
+            .expect_err("invalid branch pin must be rejected even with a valid commit");
         assert!(
             err.to_string().contains("not a valid ref name"),
             "unexpected error: {err:#}"
