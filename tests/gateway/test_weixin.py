@@ -383,6 +383,34 @@ class TestWeixinRateLimitRecovery:
         assert adapter._token_store.get(adapter._account_id, "wxid_test123") is None
         assert any("invalidated" in r.message for r in caplog.records)
 
+    def test_context_token_store_invalidate_is_public_and_persists(self, tmp_path, caplog):
+        """Review follow-up: invalidation goes through a public store API, removal is
+        persisted for the next start, and a swallowed persistence failure is debug-logged
+        instead of vanishing."""
+        store = ContextTokenStore(str(tmp_path))
+        store.set("acct", "peer", "ctx-token")
+        assert store.get("acct", "peer") == "ctx-token"
+
+        # Pop + persist: a fresh instance restoring from disk must not see it.
+        assert store.invalidate("acct", "peer") is True
+        assert store.get("acct", "peer") is None
+        reloaded = ContextTokenStore(str(tmp_path))
+        reloaded.restore("acct")
+        assert reloaded.get("acct", "peer") is None
+        # Idempotent: nothing left to invalidate.
+        assert store.invalidate("acct", "peer") is False
+
+        # A failing persist must not be silent.
+        store.set("acct", "peer", "ctx-token-2")
+
+        def _boom(account_id):
+            raise OSError("disk full")
+
+        with patch.object(store, "_persist", side_effect=_boom):
+            with caplog.at_level(logging.DEBUG, logger="gateway.platforms.weixin"):
+                assert store.invalidate("acct", "peer") is True
+        assert any("persist" in r.message.lower() for r in caplog.records)
+
     @patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock)
     @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
     def test_successful_send_logs_sanitized_response(self, send_message_mock, sleep_mock, caplog):

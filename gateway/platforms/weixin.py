@@ -392,6 +392,22 @@ class ContextTokenStore:
         self._cache[self._key(account_id, user_id)] = token
         self._persist(account_id)
 
+    def invalidate(self, account_id: str, user_id: str) -> bool:
+        """Drop a peer's cached ``context_token`` and persist the removal.
+
+        Returns ``True`` when an entry was removed. The token must stay dead
+        across restarts, so removal is persisted; ``_persist`` logs its own
+        per-account failures, and anything escaping it is debug-logged here so
+        the removal never fails silently.
+        """
+        if self._cache.pop(self._key(account_id, user_id), None) is None:
+            return False
+        try:
+            self._persist(account_id)
+        except Exception as exc:  # pragma: no cover - _persist catches its own failures
+            logger.debug("weixin: persist after context-token invalidate failed: %s", exc)
+        return True
+
     def _persist(self, account_id: str) -> None:
         prefix = f"{account_id}:"
         payload = {
@@ -1865,13 +1881,8 @@ class WeixinAdapter(BasePlatformAdapter):
         tokenless degraded path iLink accepts. Mirrors the session-expired
         recovery in ``_send_text_chunk_locked``.
         """
-        key = self._token_store._key(self._account_id, chat_id)
-        if self._token_store._cache.pop(key, None) is None:
+        if not self._token_store.invalidate(self._account_id, chat_id):
             return
-        try:
-            self._token_store._persist(self._account_id)
-        except Exception:
-            pass
         logger.warning(
             "[%s] invalidated cached context_token for %s (%s); next send will retry tokenless",
             self.name, _safe_id(chat_id), reason,
