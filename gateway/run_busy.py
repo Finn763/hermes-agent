@@ -476,12 +476,18 @@ class GatewayBusySessionMixin:
         )
 
     async def _send_busy_reply(self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False) -> None:
-        """Send a busy-path reply anchored to the event (thread metadata included)."""
+        """Send a busy-path reply anchored to the event (thread metadata included).
+
+        Every busy-path reply is mid-turn by definition (busy-ack, plaintext-approval
+        fallback, drain notice), so it carries the interim marker: without it a
+        stream-is-the-message adapter seals the live stream with this text (#98432).
+        """
+        from gateway.run import _interim_metadata
         reply_anchor = self._reply_anchor_for_event(event)
         await adapter._send_with_retry(
             chat_id=event.source.chat_id, content=content,
             reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
-            metadata=self._thread_metadata_for_source(event.source, reply_anchor),
+            metadata=_interim_metadata(self._thread_metadata_for_source(event.source, reply_anchor)),
         )
 
     async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
@@ -494,16 +500,10 @@ class GatewayBusySessionMixin:
             message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
         else:
             message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
-        # Mid-turn shutdown/restart notice (#98432 contract class): mark interim so a
-        # stream-is-the-message adapter never seals the in-flight answer with this notice.
-        from gateway.run import _interim_metadata
-        reply_anchor = self._reply_anchor_for_event(event)
-        await adapter._send_with_retry(
-            chat_id=event.source.chat_id,
-            content=message,
-            reply_to=self._busy_reply_to(event, reply_anchor),
-            metadata=_interim_metadata(self._thread_metadata_for_source(event.source, reply_anchor)),
-        )
+        # Mid-turn shutdown/restart notice (#98432 contract class): route through the shared
+        # busy helper, which stamps _interim_send so a stream-is-the-message adapter never
+        # seals the in-flight answer with this notice.
+        await self._send_busy_reply(event, adapter, message)
 
     # Bare-word approval replies → (verb, args) for the synthesized slash command.
     _PLAINTEXT_APPROVAL_WORDS: Dict[str, tuple] = {
