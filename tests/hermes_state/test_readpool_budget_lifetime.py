@@ -95,3 +95,32 @@ def test_a_handle_collected_with_an_idle_connection_returns_its_permit(tmp_path)
         )
     finally:
         reopened.close()
+
+
+@pytest.mark.requires_wal
+def test_a_partial_return_keeps_the_budget_pinned(tmp_path):
+    """The third cell of the contract: one permit back, one still out.
+
+    ``release()`` only drops the budget's strong ref once NO permits remain
+    outstanding (``no_permits_outstanding``). A partial return -- the common
+    path, the idle-eviction flow below -- must keep the pin, otherwise the
+    budget is collected while the still-checked-out permit's descriptor is
+    open and counted nowhere, re-introducing the ceiling reset this module
+    fixes. This is the branch that separate guards would leave uncovered.
+    """
+    path = tmp_path / "state.db"
+    handle = SessionDB(db_path=path)
+    budget_ref = weakref.ref(handle._read_budget)
+    idle = handle._checkout_read_conn()
+    assert idle is not None, "no pooled read path here: this test would prove nothing"
+    borrowed = handle._checkout_read_conn()
+    assert borrowed is not None, "the second permit must come out"
+    handle._read_pool.put_nowait(idle)  # permit 1 back to the pool, still live
+    assert handle._evict_one_idle_read_conn(), "no idle conn to release"
+
+    # Permit 1 just came back; permit 2 is still checked out in `borrowed`.
+    del handle, idle
+    _collect()
+    assert budget_ref() is not None, "pin dropped with a permit still out"
+
+    borrowed.close()  # the descriptor dies with its borrower; the permit stays checked out
