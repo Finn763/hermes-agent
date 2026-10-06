@@ -574,7 +574,7 @@ def _processes_holding_profile(src: str):
     norm = os.path.normcase(os.path.normpath(src))
     browser_bins = (
         "chrome", "chrome.exe", "chromium", "chromium.exe", "chrome_crashpad",
-        "brave", "brave.exe", "msedge", "msedge.exe", "google chrome")
+        "brave", "brave.exe", "msedge", "msedge.exe", "microsoft-edge", "google chrome")
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
             name = (proc.info.get("name") or "").lower()

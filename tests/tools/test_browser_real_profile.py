@@ -926,6 +926,41 @@ class TestReviewRound3:
         assert closed is True
         assert main.terminated is True  # the browser itself was terminated, not just helpers
 
+    def test_processes_holding_profile_matches_linux_edge_launchers(
+            self, tmp_path, monkeypatch):
+        """#124213: Linux Edge's canonical launchers must clear the browser-bin
+        pre-filter. ``/usr/bin/microsoft-edge`` contains no ``msedge`` token, so
+        without ``microsoft-edge`` in ``browser_bins`` the default-owner arm is
+        never reached for exactly the launchers the predicate accepts."""
+        import platform as _plat
+        import sys as _sys
+        import hermes_cli.browser_connect as bc
+
+        monkeypatch.setattr(_plat, "system", lambda: "Linux")
+        monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+        src = bc.real_profile_data_dir("edge", "Linux")
+        assert src is not None
+
+        class FakeProc:
+            def __init__(self, name, cmdline):
+                self.info = {"name": name, "cmdline": cmdline}
+
+        stable = FakeProc("microsoft-edge", ["/usr/bin/microsoft-edge"])
+        beta = FakeProc("microsoft-edge-stable", ["/usr/bin/microsoft-edge-stable"])
+        procs = [stable, beta]
+
+        class FakePsutil:
+            NoSuchProcess = type("E", (Exception,), {})
+            AccessDenied = type("E2", (Exception,), {})
+
+            def process_iter(self, attrs=None):
+                return iter(procs)
+
+        monkeypatch.setitem(_sys.modules, "psutil", FakePsutil())
+        matched = list(bc._processes_holding_profile(src))
+        assert matched == [stable, beta]
+
     def test_consent_off_triggers_cleanup(self, tmp_path, monkeypatch):
         called = {"n": 0}
         with patch.object(bt_cloud, "_use_real_profile", return_value=False), \
