@@ -2255,6 +2255,16 @@ describe('createGatewayEventHandler', () => {
       }
     })
 
+    it('fullReset() clears an armed reasoning peek (no cross-session leak)', () => {
+      patchUiState({ reasoningPeek: true, showReasoning: false })
+
+      // Session boundary: a peek armed in session A must not govern session
+      // B's first turn (#121979 review).
+      turnController.fullReset()
+
+      expect(getUiState().reasoningPeek).toBe(false)
+    })
+
     it('ignores a notification.show with no text', () => {
       const onEvent = createGatewayEventHandler(buildCtx([]))
 

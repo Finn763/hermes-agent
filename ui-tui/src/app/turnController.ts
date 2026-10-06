@@ -1002,7 +1002,11 @@ class TurnController {
     this.interrupted = false
     this.lastStatusNote = ''
     this.activeReasoningText = ''
-    this.peekedThisTurn = false
+    // Session boundary: peek is per-TURN, not per-session — an armed toggle
+    // from session A must not govern session B's first turn (the notice-state
+    // precedent below). endTurnPeek() pairs the private marker with the
+    // public toggle (#121979 review).
+    this.endTurnPeek()
     this.pendingSegmentTools = []
     this.protocolWarned = false
     this.reasoningSegmentIndex = null
