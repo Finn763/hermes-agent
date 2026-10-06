@@ -13,9 +13,9 @@ const RECENCY_WINDOWS: Record<SidebarRecencyFilter, number> = {
 /**
  * Narrow to sessions worked on within any of the selected windows — "1 day"
  * is the last 24 hours, "2 day" the last 48. Age comes from `sessionRecency`
- * (last_active, else started_at), the same clock the rows sort and label by,
- * so a recency filter and the date dividers agree about what "yesterday"
- * means.
+ * (last_active, else started_at), the key the rows sort by. The date dividers
+ * bucket by calendar day instead, so at a day boundary a row can sit under
+ * "Yesterday" while the 24-hour window already excludes it.
  *
  * Selection is a union, like every other sidebar filter: picking both windows
  * is just the 48-hour one. Fails closed only for a session with no timestamps

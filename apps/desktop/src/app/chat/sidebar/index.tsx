@@ -460,6 +460,24 @@ export function ChatSidebar({
   const profileFilter = useStore($sidebarProfileFilter)
   const prFilter = useStore($sidebarPrFilter)
   const recencyFilter = useStore($sidebarRecencyFilter)
+  // A recency window is evaluated against the wall clock, and the predicate sits
+  // inside a memo whose other deps never change — without a ticking `now`, a
+  // 23h-old session stays listed forever because nothing re-renders to age it
+  // out. Tick only while a window is selected; with no filter there is no timer.
+  const [recencyNowSeconds, setRecencyNowSeconds] = useState(() => Date.now() / 1000)
+
+  useEffect(() => {
+    if (!recencyFilter.length) {
+      return
+    }
+
+    setRecencyNowSeconds(Date.now() / 1000)
+
+    const id = window.setInterval(() => setRecencyNowSeconds(Date.now() / 1000), 60_000)
+
+    return () => window.clearInterval(id)
+  }, [recencyFilter.length])
+
   const prDataWanted = useStore($sidebarPrDataWanted)
   const prBranchOverrides = useStore($prBranchBySession)
   const pullRequests = useStore($pullRequestsByBranch)
@@ -636,7 +654,7 @@ export function ChatSidebar({
 
       // Narrowed to when the session was last worked on — the same recency the
       // rows sort by, so "1 day" means the last 24 hours everywhere it shows.
-      if (recencyFilter.length && !sessionMatchesRecencyFilter(session, recencyFilter, Date.now() / 1000)) {
+      if (recencyFilter.length && !sessionMatchesRecencyFilter(session, recencyFilter, recencyNowSeconds)) {
         return false
       }
 
@@ -655,7 +673,8 @@ export function ChatSidebar({
       projects,
       projectOwners,
       dotStates,
-      recencyFilter
+      recencyFilter,
+      recencyNowSeconds
     ]
   )
 
