@@ -5,6 +5,7 @@ fired one message per line. ``--editor`` opens $VISUAL/$EDITOR on a temp file
 and the saved buffer becomes ``args.query`` verbatim -- a single turn.
 """
 
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -117,3 +118,91 @@ def test_editor_needs_interactive_terminal(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _resolve()(args)
     assert exc.value.code == 2
+
+
+def _fake_bytes_editor(tmp_path, payload: bytes):
+    """EDITOR value whose 'edit session' writes raw ``payload`` bytes to the buffer."""
+    script = tmp_path / "fake_editor_bytes.py"
+    script.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        f"Path(sys.argv[1]).write_bytes({payload!r})\n",
+        encoding="utf-8",
+    )
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+
+
+def test_editor_launches_with_unquoted_platform_paths(tmp_path, monkeypatch):
+    """A raw unquoted ``$EDITOR`` path pair (the common Windows form) must launch.
+
+    ``shlex.split`` (posix=True) treats every backslash as an escape, silently
+    mangling ``C:\\...`` into ``C:...``; the launch then fails and the shell
+    fallback hands cmd.exe a POSIX single-quoted path. ``split_command_line``
+    keeps the platform's semantics (it *is* ``shlex.split`` on POSIX).
+    """
+    script = tmp_path / "fake_editor_raw.py"
+    script.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "Path(sys.argv[1]).write_text('from raw paths\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {script}")  # intentionally unquoted
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    args = _parse(["chat", "--editor"])
+    _resolve()(args)
+    assert args.query == "from raw paths"
+
+
+BOM_TEMPLATE_HEADER = (
+    "\ufeff#! Compose your prompt below. Lines starting with '#!' are ignored.\n"
+    "#! Save and quit to send; leave empty to cancel.\n\n"
+)
+
+
+def test_editor_utf8_sig_buffer_keeps_only_the_prompt(tmp_path, monkeypatch):
+    """A BOM (Notepad's default utf-8-sig save) must not make the template header part of the message."""
+    args = _args_with_editor(monkeypatch, tmp_path, BOM_TEMPLATE_HEADER + "real prompt\n")
+    _resolve()(args)
+    assert args.query == "real prompt"
+    assert "\ufeff" not in args.query
+
+
+def test_editor_non_utf8_buffer_does_not_abort(tmp_path, monkeypatch):
+    """A latin-1 save degrades to replacement characters instead of an uncaught UnicodeDecodeError."""
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", _fake_bytes_editor(tmp_path, b"caf\xe9 au lait\n"))
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    args = _parse(["chat", "--editor"])
+    _resolve()(args)
+    assert "caf" in args.query
+
+
+def test_editor_strips_indented_comment_lines(tmp_path, monkeypatch):
+    """The '#!' template filter also covers lines an editor may have indented."""
+    args = _args_with_editor(monkeypatch, tmp_path, "  #! indented header\nreal prompt\n")
+    _resolve()(args)
+    assert args.query == "real prompt"
+
+
+def test_editor_shell_fallback_quotes_path_for_platform(tmp_path, monkeypatch):
+    """When the argv launch fails, the shell fallback must quote the temp path cmd.exe-style on Windows."""
+    calls = []
+
+    def fake_call(*call_args, **kwargs):
+        calls.append((call_args, kwargs))
+        if len(calls) == 1:
+            raise OSError("argv launch failed")
+        return 0
+
+    monkeypatch.setattr(cli_main.subprocess, "call", fake_call)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {tmp_path / 'never_runs.py'}")
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    args = _parse(["chat", "--editor"])
+    with pytest.raises(SystemExit) as exc:
+        _resolve()(args)
+    assert exc.value.code != 0  # the stub never writes the buffer -> empty -> abort
+    assert calls[1][1].get("shell") is True
+    cmdline = calls[1][0][0]
+    if os.name == "nt":
+        assert "'" not in cmdline  # shlex.quote emits single quotes, which cmd.exe takes literally

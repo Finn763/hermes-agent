@@ -31,6 +31,7 @@ from rich.panel import Panel
 from hermes_constants import display_hermes_home, is_termux as _is_termux_environment
 from hermes_state_ids import new_session_id as mint_session_id
 from agent.turn_context import extract_api_content_sidecar
+from hermes_cli._subprocess_compat import split_command_line
 from hermes_cli.cli_agent_setup_mixin import _retire_agent
 from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL, discover_local_cdp_url, find_free_debug_port, is_browser_debug_ready,
@@ -2418,16 +2419,21 @@ class CLICommandsMixin:
                 if initial_text:
                     fh.write(initial_text)
             try:
-                subprocess.call([*shlex.split(editor), path])
+                # split_command_line, not shlex.split: posix=True eats Windows path backslashes
+                # (#83934); same pattern as hermes_cli/main.py._read_editor_query.
+                subprocess.call([*split_command_line(editor), path])
             except Exception:
                 # Fall back to a bare invocation (editor value may not be argv-splittable everywhere).
-                subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)
-            with open(path, "r", encoding="utf-8") as fh:
+                fallback_path = subprocess.list2cmdline([path]) if os.name == "nt" else shlex.quote(path)
+                subprocess.call(f"{editor} {fallback_path}", shell=True)
+            # utf-8-sig: drop a BOM (Notepad's default save) so the "#!" template header is still
+            # recognized; errors="replace": a non-UTF-8 save must not crash the compose flow.
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
                 raw = fh.read()
         finally:
             with suppress(OSError):
                 os.unlink(path)
-        return "\n".join(ln for ln in raw.splitlines() if not ln.startswith("#!")).strip()
+        return "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#!")).strip()
 
     def _handle_prompt_compose_command(self, cmd_original: str) -> None:
         """Handle /prompt — compose the next prompt in $EDITOR (optionally seeded with the argument)

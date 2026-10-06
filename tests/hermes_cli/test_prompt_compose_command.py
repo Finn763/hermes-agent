@@ -9,6 +9,7 @@ stripping, seeding, and the empty-buffer cancel path.
 
 import os
 import stat
+import sys
 import tempfile
 
 import pytest
@@ -54,3 +55,20 @@ def test_empty_buffer_does_not_seed(monkeypatch):
     s = _Stub()
     s._handle_prompt_compose_command("/prompt")
     assert s._pending_agent_seed is None
+
+
+def test_compose_launches_with_raw_platform_paths(monkeypatch, tmp_path):
+    """A raw unquoted ``$EDITOR`` path pair (the Windows form) must launch and be read back.
+
+    ``shlex.split`` (posix=True) mangles Windows backslash paths; ``/prompt``
+    shares that pattern with ``chat --editor``.
+    """
+    script = tmp_path / "fake_editor_raw.py"
+    script.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "Path(sys.argv[1]).write_text('seeded from raw paths\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {script}")  # intentionally unquoted
+    out = _Stub()._compose_in_editor("")
+    assert out == "seeded from raw paths"

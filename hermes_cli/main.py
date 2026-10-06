@@ -30,7 +30,7 @@ if _early_recovery_mod.restore_interrupted_pull():
 # Windows: neutralize CPython's ``platform._syscmd_ver`` before anything else
 # imports — it shells out ``cmd /c ver`` and flashes a console when this
 # process is windowless (pythonw gateway, kanban workers). No-op on POSIX.
-from hermes_cli._subprocess_compat import suppress_platform_ver_console
+from hermes_cli._subprocess_compat import split_command_line, suppress_platform_ver_console
 
 suppress_platform_ver_console()
 
@@ -1806,16 +1806,22 @@ def _read_editor_query(args) -> None:
             fh.write("#! Compose your prompt below. Lines starting with '#!' are ignored.\n"
                      "#! Save and quit to send; leave empty to cancel.\n\n")
         try:
-            subprocess.call([*shlex.split(editor), path])
+            # split_command_line, not shlex.split: posix=True eats Windows path backslashes,
+            # so an unquoted ``C:\...\ed.cmd`` editor value launched a mangled argv and the
+            # shell fallback below then handed cmd.exe a POSIX single-quoted temp path.
+            subprocess.call([*split_command_line(editor), path])
         except Exception:
             # Fall back to a bare invocation (editor value may not be argv-splittable).
-            subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)
-        with open(path, "r", encoding="utf-8") as fh:
+            fallback_path = subprocess.list2cmdline([path]) if os.name == "nt" else shlex.quote(path)
+            subprocess.call(f"{editor} {fallback_path}", shell=True)
+        # utf-8-sig: drop a BOM (Notepad's default save) so the "#!" template header is still
+        # recognized; errors="replace": a non-UTF-8 save must not abort the whole run.
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             raw = fh.read()
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
-    composed = "\n".join(ln for ln in raw.splitlines() if not ln.startswith("#!")).strip()
+    composed = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#!")).strip()
     if not composed:
         print("Empty prompt — nothing sent.", file=sys.stderr)
         sys.exit(1)
