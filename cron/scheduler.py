@@ -3360,7 +3360,7 @@ def _run_one_job_body(
 
 def _record_killed_worker_run(
     record: dict,
-    returncode: int,
+    returncode: Optional[int],
     *,
     job_id: Optional[str] = None,
     fire_owner: Optional[str] = None,
@@ -3369,15 +3369,21 @@ def _record_killed_worker_run(
 ) -> None:
     """Gateway-side job bookkeeping for an adopted worker that died without a terminal row.
 
-    The waiter just recovered the execution to ``unknown`` (#120328). Without this, the job
-    record keeps the previous run's values, no incident opens, nothing is delivered and nothing
-    is logged — every job-level surface says the scheduled run never happened. A worker that
-    terminalized itself (``completed``/``failed``) owns its own bookkeeping and is left alone.
+    The execution was recovered to ``unknown`` (#120328) — by the waiter's own recovery
+    or by a competing reaper (tick dead-owner reap / manual pre-dispatch). Without this,
+    the job record keeps the previous run's values, no incident opens, nothing is
+    delivered and nothing is logged — every job-level surface says the scheduled run
+    never happened. A worker that terminalized itself (``completed``/``failed``) owns
+    its own bookkeeping and is left alone.
 
     Best-effort and fenced, so it never breaks the waiter's contract and never touches a
     replacement claim: when the fire owner seen at launch no longer holds the claim (or the
     claim is already consumed), this is a no-op. Idempotent for the same reason — the first
     ``mark_job_run`` consumes the claim, so a repeat finds nothing to fence.
+
+    ``returncode`` is None when the worker has not exited yet (a reaper released the
+    claim while the process was still alive or in final teardown); the recovery reason
+    on the record already says why the run was abandoned.
     """
     if not isinstance(record, dict) or record.get("status") != "unknown":
         return
@@ -3387,7 +3393,9 @@ def _record_killed_worker_run(
         or "Cron worker exited before a durable terminal state; "
         "whether side effects ran is unknown."
     )
-    error = f"{base_error} (cron worker exited with code {returncode})"
+    error = base_error if returncode is None else (
+        f"{base_error} (cron worker exited with code {returncode})"
+    )
     try:
         if not resolved_job_id:
             logger.error(
@@ -3452,9 +3460,15 @@ def _wait_for_external_cron_worker_body(
     A gateway replacement may kill this waiter; it does not kill the scoped
     worker or change its ledger ownership.
     """
-    def _is_terminal() -> bool:
+    def _terminal_record() -> Optional[dict]:
+        """The terminal execution row, or None. ``unknown`` counts as terminal: a
+        competing reaper (tick dead-owner reap / manual pre-dispatch) can move a dead
+        worker's row there before this waiter's own recovery runs (#120328), so every
+        exit that can see one must still record the killed run."""
         current = get_execution(execution_id)
-        return bool(current and current.get("status") in _TERMINAL_STATES)
+        if current and current.get("status") in _TERMINAL_STATES:
+            return current
+        return None
 
     # The worker commits its terminal row before its process exits, so exit is
     # the correct wakeup.  Each ledger read opens a connection and re-runs
@@ -3464,7 +3478,15 @@ def _wait_for_external_cron_worker_body(
         try:
             returncode = process.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
-            if _is_terminal():
+            terminal = _terminal_record()
+            if terminal is not None:
+                # A competing reaper can have already recovered the row to ``unknown``
+                # (#120328): record the killed run from this exit too. No exit code
+                # exists yet — the process is still alive or in its final teardown.
+                _record_killed_worker_run(
+                    terminal, None, job_id=job_id,
+                    fire_owner=fire_owner, adapters=adapters, loop=loop,
+                )
                 from cron.scheduler_detached_worker import reap_terminal_worker_in_background
 
                 reap_terminal_worker_in_background(process)
@@ -3473,7 +3495,14 @@ def _wait_for_external_cron_worker_body(
         # The worker can commit its terminal row and exit between the first
         # read and wait(). Re-read the exact attempt before declaring that
         # it died without terminalizing.
-        if _is_terminal():
+        terminal = _terminal_record()
+        if terminal is not None:
+            # Same race on this exit: the row may already be ``unknown`` because a
+            # competing reaper won the recovery first (#120328).
+            _record_killed_worker_run(
+                terminal, returncode, job_id=job_id,
+                fire_owner=fire_owner, adapters=adapters, loop=loop,
+            )
             return True
         # If the adopted worker died without terminalizing, its owner is
         # now provably gone. Recover to ``unknown`` rather than routing the

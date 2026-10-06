@@ -124,8 +124,14 @@ def _redact_error(error: str) -> str:
 
 
 def _error_signature(job_id: str, error: str) -> str:
-    """Dedup key: stable for same job + same normalized error prefix."""
-    normalized = _normalize_error(error)[:_MAX_SIGNATURE_ERROR_CHARS]
+    """Dedup key: stable for same job + same normalized error prefix.
+
+    A recovered worker's exit code is excluded: a kill that flaps between signals
+    (137 vs 143) must refresh ONE incident for the recovery reason rather than mint a
+    fresh row per code and bypass the repeat-alert cooldown (#120328)."""
+    normalized = re.sub(
+        r"\s*\(cron worker exited with code \d+\)$", "", _normalize_error(error)
+    )[:_MAX_SIGNATURE_ERROR_CHARS]
     return hashlib.sha256(job_id.encode() + normalized.encode()).hexdigest()[:12]
 
 
