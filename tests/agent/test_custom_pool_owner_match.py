@@ -57,6 +57,43 @@ class TestOwnerAwareBareCustomMatch:
         assert cp.credential_pool_matches_provider("custom:own", "custom", base_url=URL, owner_api_key="stranger-key") is False
 
 
+class TestCredentiallessSiblingCannotCapture:
+    """Review on #124593: tier 3 accepts any key, so a credential-less entry listed
+    first used to capture a same-URL sibling's runtime key in the candidates walk."""
+
+    def test_credentialless_first_loses_to_the_positive_match(self):
+        entries = [
+            ("beta", {"name": "Beta", "base_url": URL}),
+            ("alpha", {"name": "Alpha", "base_url": URL, "api_key": MAIN_KEY}),
+        ]
+        with patch.object(cp, "_iter_custom_providers", return_value=list(entries)):
+            assert cp.custom_provider_pool_key_candidates(URL, owner_api_key=MAIN_KEY) == ["custom:alpha"]
+            assert cp.resolve_runtime_pool_key("custom", URL, owner_api_key=MAIN_KEY) == "custom:alpha"
+
+    def test_credentialless_fallback_when_nothing_vouches(self):
+        entries = [
+            ("beta", {"name": "Beta", "base_url": URL}),
+            ("alpha", {"name": "Alpha", "base_url": URL, "api_key": MAIN_KEY}),
+        ]
+        with patch.object(cp, "_iter_custom_providers", return_value=list(entries)):
+            # No entry positively vouches for a stranger key: the credential-less
+            # sibling stays as the benign legacy fallback, in config order.
+            assert cp.custom_provider_pool_key_candidates(URL, owner_api_key="stranger-key") == ["custom:beta"]
+
+    def test_credentialless_only_entry_keeps_its_match(self):
+        entries = [("beta", {"name": "Beta", "base_url": URL})]
+        with patch.object(cp, "_iter_custom_providers", return_value=list(entries)):
+            assert cp.custom_provider_pool_key_candidates(URL, owner_api_key=MAIN_KEY) == ["custom:beta"]
+
+    def test_no_owner_stays_first_entry_url_only(self):
+        entries = [
+            ("beta", {"name": "Beta", "base_url": URL}),
+            ("alpha", {"name": "Alpha", "base_url": URL, "api_key": MAIN_KEY}),
+        ]
+        with patch.object(cp, "_iter_custom_providers", return_value=list(entries)):
+            assert cp.custom_provider_pool_key_candidates(URL) == ["custom:beta"]
+
+
 class TestOwnerEntryShapes:
     def test_credentialless_entry_serves_any_owner(self):
         # #100413: entries without credentials still belong to the model.

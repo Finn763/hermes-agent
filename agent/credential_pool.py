@@ -551,37 +551,57 @@ def _clean_owner_key(value: Any) -> str:
     return key
 
 
-def _custom_entry_serves_owner_key(entry: Dict[str, Any], owner_key: str) -> bool:
-    """Whether a ``custom_providers`` entry may serve a runtime holding ``owner_key``.
+# Tri-state verdicts for ``_custom_entry_owner_key_verdict``: a declared credential
+# positively equal to the runtime key ("vouches"), an entry that belongs to another
+# provider ("rejects"), or a credential-less entry that cannot discriminate between
+# same-URL siblings at all ("unknown").
+_OWNER_VOUCHES = "vouches"
+_OWNER_UNKNOWN = "unknown"
+_OWNER_REJECTS = "rejects"
+
+
+def _custom_entry_owner_key_verdict(entry: Dict[str, Any], owner_key: str) -> str:
+    """Tri-state version of ``_custom_entry_serves_owner_key`` (review on #124593).
 
     Tiered and entry-local: 1. the declared literal ``api_key`` is the key;
     2. ``key_env`` resolves to it (covers the ``hermes model`` shape of
     ``model.api_key: ${VAR}`` beside an entry with ``key_env: VAR``);
-    3. a credential-less entry (#100413). Entries with ``key_cmd`` or a
-    declared credential that differs belong to another provider.
+    3. a credential-less entry (#100413) vouches for *any* key, so it can only ever
+    count as "unknown". Entries with ``key_cmd`` or a declared credential that
+    differs belong to another provider.
     # ponytail: entry-local only; a pool holding the key solely as a row
     # while its entry declares another credential is not matched — add a pool
-    # row scan here if that shape ever matters."""
+    # row scan here if that shape ever matters.
+    """
     if not isinstance(entry, dict):
-        return False
+        return _OWNER_REJECTS
     if str(entry.get("key_cmd") or "").strip():
-        return False
+        return _OWNER_REJECTS
     declared = str(entry.get("api_key") or "").strip()
     if declared and not (declared.startswith("${") and declared.endswith("}")):
-        return declared == owner_key
-    if declared:
-        # Unresolved placeholder: only a resolving key_env can still vouch.
-        pass
+        return _OWNER_VOUCHES if declared == owner_key else _OWNER_REJECTS
     key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
     if key_env:
         try:
             resolved = get_secret_str(key_env, "").strip()
         except Exception:
             resolved = ""
-        return bool(resolved) and resolved == owner_key
+        return _OWNER_VOUCHES if resolved and resolved == owner_key else _OWNER_REJECTS
     if declared:
-        return False
-    return True
+        # Unresolved placeholder without a key_env: nothing can vouch for it.
+        return _OWNER_REJECTS
+    return _OWNER_UNKNOWN
+
+
+def _custom_entry_serves_owner_key(entry: Dict[str, Any], owner_key: str) -> bool:
+    """Whether a ``custom_providers`` entry may serve a runtime holding ``owner_key``.
+
+    True for a positive match (declared literal / resolving ``key_env``) and for a
+    credential-less #100413 entry, which merely doesn't object. Callers that must not
+    let a non-objecting entry win a race against a positive match use
+    ``_custom_entry_owner_key_verdict`` instead.
+    """
+    return _custom_entry_owner_key_verdict(entry, owner_key) != _OWNER_REJECTS
 
 
 def _custom_config_entry_for_pool_key(pool_key: str) -> Optional[Dict[str, Any]]:
@@ -608,10 +628,13 @@ def custom_provider_pool_key_candidates(
     namespace, so a populated pool is not skipped in favour of the
     ``no-key-required`` placeholder.
 
-    When ``owner_api_key`` names the runtime's key, only the first entry on
-    the URL whose declared credential can be that key is returned, so a bare
-    ``custom`` runtime never borrows a same-URL sibling's pool (#124593).
-    Without it the lookup stays URL-only, exactly as before.
+    When ``owner_api_key`` names the runtime's key, entries on the URL are ranked:
+    a positively-matching entry (declared literal / resolving ``key_env``) wins over
+    a credential-less sibling that merely doesn't object, whatever the config order
+    — otherwise a same-URL sibling listed first captures the key's pool (#124593).
+    The first credential-less entry stays as the fallback when nothing vouches
+    (a lone bare entry keeps its legacy URL-only match).
+    Without ``owner_api_key`` the lookup stays URL-only, exactly as before.
     """
     if not base_url:
         return []
@@ -624,13 +647,20 @@ def custom_provider_pool_key_candidates(
                 return _pool_keys_for_custom_entry(norm_name, entry)
 
     owner = _clean_owner_key(owner_api_key)
+    fallback: Optional[List[str]] = None
     for norm_name, entry in _iter_custom_providers():
         entry_url = _norm_url(entry.get("base_url"))
-        if entry_url and entry_url == normalized_url:
-            if owner and not _custom_entry_serves_owner_key(entry, owner):
-                continue
-            return _pool_keys_for_custom_entry(norm_name, entry)
-    return []
+        if not entry_url or entry_url != normalized_url:
+            continue
+        keys = _pool_keys_for_custom_entry(norm_name, entry)
+        if not owner:
+            return keys
+        verdict = _custom_entry_owner_key_verdict(entry, owner)
+        if verdict == _OWNER_VOUCHES:
+            return keys
+        if verdict == _OWNER_UNKNOWN and fallback is None:
+            fallback = keys
+    return fallback if fallback is not None else []
 
 
 def get_custom_provider_pool_key(base_url: Optional[str], provider_name: Optional[str] = None, owner_api_key: Optional[str] = None) -> Optional[str]:
