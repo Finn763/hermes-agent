@@ -2711,7 +2711,7 @@ def unlinked_prose_task_ids(conn: sqlite3.Connection, task_id: str) -> list[str]
     text = "\n".join((_row_get(row, "title") or "", _row_get(row, "body") or ""))
     if not _TASK_ID_PROSE_RE.search(text):
         return []
-    linked = set(parent_ids(conn, task_id))
+    linked = set(parent_ids(conn, task_id)) | set(child_ids(conn, task_id))
     candidates = [
         tid for tid in dict.fromkeys(_TASK_ID_PROSE_RE.findall(text))
         if tid != task_id and tid not in linked

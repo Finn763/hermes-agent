@@ -166,3 +166,28 @@ def test_recompute_ready_names_prose_only_parent_ids_without_gating(conn, caplog
     assert "t_deadbeefcafe" not in warned
 
 
+def test_recompute_ready_ignores_prose_ids_that_are_already_children(conn, caplog):
+    """Naming an id the card is the *parent* of is not an undeclared
+    dependency: that direction already has its ``task_links`` row, so the
+    advisory must stay quiet -- following its advice would raise a cycle
+    error instead of fixing anything (#126699 follow-up)."""
+    done_parent = kb.create_task(conn, title="closed gate", assignee="setup")
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (done_parent,))
+    card = kb.create_task(conn, title="root", assignee="setup", parents=[done_parent])
+    child = kb.create_task(conn, title="child of root", parents=[card])
+    conn.execute(
+        "UPDATE tasks SET body=? WHERE id=?", (f"decomposes into {child}", card)
+    )
+    conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (card,))
+    assert kb.get_task(conn, card).status == "todo"
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        kb.recompute_ready(conn)
+
+    assert kb.get_task(conn, card).status == "ready"
+    warned = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    )
+    assert child not in warned
+
+
