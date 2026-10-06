@@ -265,3 +265,114 @@ async def test_inconclusive_probes_never_accumulate_toward_respawn(
             adapter._probe_failures += 1
 
     assert adapter._probe_failures == 0
+
+
+# -- Echo-gate wiring (#124010 review) ---------------------------------------
+
+
+def _run_gate_harness(script: str) -> Dict[str, Any]:
+    harness = (
+        "import { armOutboundAttempt, clearEchoOnYield, withEchoGate } "
+        f"from {json.dumps(_MODULE.as_uri())};\n"
+        + script
+    )
+    run = subprocess.run(
+        ["node", "--input-type=module", "-e", harness],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout)
+
+
+def test_echo_gate_arms_before_the_await_and_stays_cleared() -> None:
+    """#124010 review scenario B: our own echo is consumed on the iterator while the
+    send is still in flight — the gate must stay CLEARED after the send resolves. The
+    old wiring (arm after the await) re-armed it and restarted a healthy sidecar.
+    Scenario A guard: an echo that never arrives is still overdue past the grace."""
+    out = _run_gate_harness(
+        """
+        const a = { lastInboundAt: 0, zombieSuspected: false, lastOutboundAt: 0, echoPending: false };
+        let resolveA;
+        const pendingA = withEchoGate(a, () => new Promise((r) => { resolveA = r; }), 2000);
+        const armedDuringSend = a.echoPending === true && a.lastOutboundAt === 2000;
+        resolveA({ id: "a" });
+        await pendingA;
+        const overdueWhenEchoNeverArrives =
+          a.echoPending && (2500 - a.lastOutboundAt) >= 500;
+
+        const b = { lastInboundAt: 0, zombieSuspected: false, lastOutboundAt: 0, echoPending: false };
+        let resolveB;
+        const pendingB = withEchoGate(b, () => new Promise((r) => { resolveB = r; }), 4000);
+        clearEchoOnYield(b, 4100);  // the echo arrived while the send was in flight
+        resolveB({ id: "b" });
+        await pendingB;
+        const clearedAfterMidSendEcho = b.echoPending === false;
+        const overdueAfterMidSendEcho =
+          b.echoPending && (5000 - b.lastOutboundAt) >= 500;
+
+        process.stdout.write(JSON.stringify({
+          armedDuringSend,
+          overdueWhenEchoNeverArrives,
+          clearedAfterMidSendEcho,
+          overdueAfterMidSendEcho,
+        }));
+        """
+    )
+    assert out["armedDuringSend"] is True
+    assert out["overdueWhenEchoNeverArrives"] is True
+    assert out["clearedAfterMidSendEcho"] is True
+    assert out["overdueAfterMidSendEcho"] is False
+
+
+def test_echo_gate_failed_send_restores_the_previous_gate() -> None:
+    """A send that throws posted no bubble: the attempt must not leave the gate armed,
+    and a still-pending earlier echo is not swallowed."""
+    out = _run_gate_harness(
+        """
+        const prior = { lastInboundAt: 0, zombieSuspected: false, lastOutboundAt: 123, echoPending: true };
+        let threwA = false;
+        try {
+          await withEchoGate(prior, async () => { throw new Error("boom"); }, 6000);
+        } catch (e) { threwA = true; }
+        const priorRestored = prior.echoPending === true && prior.lastOutboundAt === 123;
+
+        const fresh = { lastInboundAt: 0, zombieSuspected: false, lastOutboundAt: 0, echoPending: false };
+        let threwB = false;
+        try {
+          await withEchoGate(fresh, async () => { throw new Error("boom"); }, 7000);
+        } catch (e) { threwB = true; }
+        const failureLeavesGateClosed = fresh.echoPending === false && fresh.lastOutboundAt === 0;
+
+        process.stdout.write(JSON.stringify({
+          threwA, priorRestored, threwB, failureLeavesGateClosed,
+        }));
+        """
+    )
+    assert out["threwA"] is True
+    assert out["priorRestored"] is True
+    assert out["threwB"] is True
+    assert out["failureLeavesGateClosed"] is True
+
+
+def test_sidecar_echoing_sends_all_go_through_the_gate() -> None:
+    """Every echoing send in index.mjs must run through withEchoGate (armed before the
+    await); the attachment caption bubble used to be skipped entirely (P2). The typing
+    indicator does not echo and stays bare; index.mjs never arms the gate directly."""
+    src = _MODULE.parent.joinpath("index.mjs").read_text(encoding="utf-8")
+    assert "echoPending =" not in src, "the gate helpers are the only armer/clearer"
+    lines = src.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if (
+            stripped.startswith("//")
+            or "space.send(" not in line
+            or "spectrumTyping" in line
+        ):
+            continue
+        window = "\n".join(lines[max(0, index - 2): index + 2])
+        assert "withEchoGate(" in window, (
+            f"ungated echoing send near line {index + 1}:\n{window}"
+        )

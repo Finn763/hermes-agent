@@ -69,9 +69,11 @@ import { patchSpectrumTs } from "./patch-spectrum-mixed-attachments.mjs";
 import { chooseSendFormat } from "./send-format.mjs";
 import {
   classifyProbeRejection,
+  clearEchoOnYield,
   createProbeMessageId,
   shouldProbe,
   isZombieSuspect,
+  withEchoGate,
 } from "./stream-staleness.mjs";
 
 const projectId = process.env.PHOTON_PROJECT_ID;
@@ -137,8 +139,10 @@ let streamRestartTimer = null;
 // Zombie-watchdog runtime state (see stream-staleness.mjs for the rules).
 // echoPending tracks the only positive proof of a deaf stream: an outbound
 // message send whose echo never came back on the inbound iterator (which
-// yields our own outbound echoes too). Set after every successful message
-// send, cleared by ANY iterator yield.
+// yields our own outbound echoes too). Armed BEFORE each echoing send awaits
+// (withEchoGate — arm-after-await re-armed an echo that was already consumed
+// while the send was in flight, #124010 review) and cleared by ANY iterator
+// yield.
 const staleness = {
   lastInboundAt: Date.now(),
   lastProbeAt: 0,
@@ -148,17 +152,8 @@ const staleness = {
   echoPending: false,
 };
 
-function noteOutboundSent() {
-  staleness.lastOutboundAt = Date.now();
-  staleness.echoPending = true;
-}
-
 function noteInboundYield() {
-  staleness.lastInboundAt = Date.now();
-  staleness.zombieSuspected = false;
-  // Any yield — inbound, or our own outbound echo — proves the stream is
-  // live, so no send is awaiting its echo any more.
-  staleness.echoPending = false;
+  clearEchoOnYield(staleness);
 }
 
 function stalenessSnapshot(now) {
@@ -1106,10 +1101,9 @@ const server = http.createServer(async (req, res) => {
         chooseSendFormat(format, text) === "markdown"
           ? spectrumMarkdown(text)
           : spectrumText(text);
-      const result = await space.send(builder);
-      // Arm the zombie-watchdog echo check: this bubble must come back on
-      // the inbound iterator as our own echo (cleared by noteInboundYield).
-      noteOutboundSent();
+      const result = await withEchoGate(staleness, () => space.send(builder));
+      // The gate was armed before the await (withEchoGate): this bubble must come
+      // back on the inbound iterator as our own echo (cleared by noteInboundYield).
       return ok(res, { messageId: result?.id || null });
     }
     if (req.url === "/send-richlink") {
@@ -1118,8 +1112,9 @@ const server = http.createServer(async (req, res) => {
         return badRequest(res, "spaceId and http(s) url are required");
       }
       const space = await resolveSpace(spaceId);
-      const result = await space.send(spectrumRichlink(url.trim()));
-      noteOutboundSent();
+      const result = await withEchoGate(
+        staleness, () => space.send(spectrumRichlink(url.trim()))
+      );
       return ok(res, { messageId: result?.id || null });
     }
     if (req.url === "/send-attachment") {
@@ -1141,14 +1136,15 @@ const server = http.createServer(async (req, res) => {
           ? voice(path, Object.keys(opts).length ? opts : undefined)
           : attachment(path, Object.keys(opts).length ? opts : undefined);
 
-      const result = await space.send(builder);
-      noteOutboundSent();
+      const result = await withEchoGate(staleness, () => space.send(builder));
 
       // iMessage delivers the caption as a separate bubble; send it
       // after the media so the attachment renders first.
       if (caption && typeof caption === "string") {
         try {
-          await space.send(spectrumText(caption));
+          // The caption echoes too: arm before the await like every other
+          // bubble (#124010 review — this send used to never arm the gate).
+          await withEchoGate(staleness, () => space.send(spectrumText(caption)));
         } catch (e) {
           console.error(
             "photon-sidecar: attachment sent but caption failed: " +
@@ -1228,8 +1224,9 @@ const server = http.createServer(async (req, res) => {
         return badRequest(res, "options must contain at least two choices");
       }
       const space = await resolveSpace(spaceId);
-      const result = await space.send(spectrumPoll(title.trim(), choices));
-      noteOutboundSent();
+      const result = await withEchoGate(
+        staleness, () => space.send(spectrumPoll(title.trim(), choices))
+      );
       return ok(res, { messageId: result?.id || null });
     }
     if (req.url === "/send-effect") {
@@ -1243,10 +1240,9 @@ const server = http.createServer(async (req, res) => {
         return badRequest(res, "unsupported effect");
       }
       const space = await resolveSpace(spaceId);
-      const result = await space.send(
-        imessageEffect(spectrumText(text.trim()), effectId)
+      const result = await withEchoGate(staleness, () =>
+        space.send(imessageEffect(spectrumText(text.trim()), effectId))
       );
-      noteOutboundSent();
       return ok(res, { messageId: result?.id || null });
     }
     if (req.url === "/typing") {

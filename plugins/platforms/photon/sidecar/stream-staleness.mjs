@@ -97,3 +97,48 @@ export function isZombieSuspect(silentForMs, thresholdMs, probeOutcome, echoOver
   if (probeOutcome == null || probeOutcome.alive !== true) return false;
   return echoOverdue === true;
 }
+
+// ---------------------------------------------------------------------------
+// Echo-gate transitions (#124010 review)
+//
+// The gate is one pending boolean on the sidecar's staleness state: is a
+// stream echo still owed? The transitions live here — next to the decision
+// rules — so a node test can execute the exact wiring index.mjs runs.
+// ---------------------------------------------------------------------------
+
+/** Arm the echo gate for a send ATTEMPT (attempt time = the deadline the echo
+ * grace is measured from). Arm BEFORE awaiting the send: an echo that has
+ * already been consumed on the iterator while the send was in flight then
+ * stays consumed — a post-await arm turned that clear back into a false
+ * "echo never arrived" and restarted a healthy sidecar (#124010 review). */
+export function armOutboundAttempt(state, now = Date.now()) {
+  state.lastOutboundAt = now;
+  state.echoPending = true;
+}
+
+/** Any iterator yield — inbound, or our own outbound echo — proves the stream
+ * is live, so no send is awaiting its echo any more. */
+export function clearEchoOnYield(state, now = Date.now()) {
+  state.lastInboundAt = now;
+  state.zombieSuspected = false;
+  state.echoPending = false;
+}
+
+/** Run an echoing send through the gate.
+ *
+ * Arms before the await (see armOutboundAttempt). A send that throws posted no
+ * bubble, so its attempt restores the gate as it was — the failure path keeps
+ * the old semantics (no arm) and never swallows a still-pending earlier echo.
+ */
+export async function withEchoGate(state, send, now = Date.now()) {
+  const prevAt = state.lastOutboundAt;
+  const prevPending = state.echoPending;
+  armOutboundAttempt(state, now);
+  try {
+    return await send();
+  } catch (e) {
+    state.lastOutboundAt = prevAt;
+    state.echoPending = prevPending;
+    throw e;
+  }
+}
