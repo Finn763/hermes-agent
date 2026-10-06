@@ -99,6 +99,9 @@ def test_main_raises_for_mixed_known_and_unknown_preloaded_skill(monkeypatch):
         lambda skills, task_id=None, excluded_loaded_names=None: ("skill prompt", ["known-skill"], ["typo-skill"]),
     )
 
+    # main() exits on the list-tools path before the preload thread is joined;
+    # the fail-closed check lives in finalize_preloaded_skills() (joined at
+    # agent init), so drive that one directly below.
     with pytest.raises(SystemExit):
         cli_mod.main(skills="known-skill,typo-skill", list_tools=True)
 

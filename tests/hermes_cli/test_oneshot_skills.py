@@ -3,7 +3,7 @@
 The oneshot path builds its AIAgent directly (bypassing HermesCLI), so the
 --skills preload has to be forwarded explicitly and injected via
 ``ephemeral_system_prompt``. These tests pin the forwarding contract and the
-partial-success semantics shared with normal CLI chat.
+fail-closed semantics shared with normal CLI chat.
 """
 
 import pytest
@@ -36,11 +36,22 @@ class TestBuildPreloadedSkillsPrompt:
         with pytest.raises(ValueError, match="Unknown skill"):
             _build_preloaded_skills_prompt("not-a-skill")
 
-    def test_partial_success_returns_prompt(self, monkeypatch):
+    def test_partial_success_raises(self, monkeypatch):
+        """A mixed known+unknown pin fails closed — same as CLI chat (#122423)."""
         import agent.skill_commands as sc
 
         monkeypatch.setattr(
             sc, "build_preloaded_skills_prompt",
             lambda parsed, **kw: ("PROMPT", ["good"], ["bad"]),
         )
-        assert _build_preloaded_skills_prompt(["good", "bad"]) == "PROMPT"
+        with pytest.raises(ValueError, match=r"Unknown skill\(s\): bad"):
+            _build_preloaded_skills_prompt(["good", "bad"])
+
+    def test_all_known_returns_prompt(self, monkeypatch):
+        import agent.skill_commands as sc
+
+        monkeypatch.setattr(
+            sc, "build_preloaded_skills_prompt",
+            lambda parsed, **kw: ("PROMPT", ["good"], []),
+        )
+        assert _build_preloaded_skills_prompt(["good"]) == "PROMPT"

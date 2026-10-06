@@ -122,7 +122,7 @@ def _normalize_skills(skills: object = None) -> list[str]:
 
 
 def _build_preloaded_skills_prompt(skills: object = None) -> str | None:
-    """Load requested skills using the same partial-success contract as CLI chat."""
+    """Load requested skills, failing closed on any unknown pin like CLI chat (#122423)."""
     parsed_skills = _normalize_skills(skills)
     if not parsed_skills:
         return None
@@ -131,15 +131,10 @@ def _build_preloaded_skills_prompt(skills: object = None) -> str | None:
 
     skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(parsed_skills)
     if missing_skills:
-        missing_display = ", ".join(missing_skills)
-        if not loaded_skills:
-            raise ValueError(f"Unknown skill(s): {missing_display}")
-        logging.warning(
-            "Unknown skill(s) requested, skipping: %s. Continuing with: %s. "
-            "List available skills with `hermes skills list`.",
-            missing_display,
-            ", ".join(loaded_skills),
-        )
+        # A partially-pinned run would silently drop enforcement; refuse the
+        # mixed case here exactly like the all-unknown case and like CLI chat
+        # (cli.py finalize_preloaded_skills, #122423).
+        raise ValueError(f"Unknown skill(s): {', '.join(missing_skills)}")
     return skills_prompt or None
 
 
