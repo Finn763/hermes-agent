@@ -2377,6 +2377,11 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
         profile_exists = _profile_exists_fn()
         if profile_exists is not None and not profile_exists(name):
             return None
+        # Canonicalize before it is written/spawned: exclusion groups and every
+        # profile lookup compare lowercase, so a title-cased config value like
+        # "GPU0Dense" would otherwise be persisted raw and miss its own group.
+        from hermes_cli.profiles import normalize_profile_name
+        name = normalize_profile_name(name)
     return name
 
 

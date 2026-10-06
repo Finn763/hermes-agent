@@ -129,3 +129,30 @@ def test_normalize_exclusion_groups():
     assert kbd.normalize_exclusion_groups("a, b") == [frozenset({"a", "b"})]
     assert kbd.normalize_exclusion_groups([["GPU0Fast", "gpu0dense"]]) == [
         frozenset({"gpu0fast", "gpu0dense"})]
+
+
+def test_mixed_case_default_assignee_still_respects_exclusion_group(
+        isolated_kanban_home_with_profiles):
+    """A title-cased ``kanban.default_assignee`` must be canonicalized before it is
+    written/spawned: the exclusion groups are lowercased, so a raw ``GPU0Dense``
+    would never match its group and would spawn next to its busy sibling."""
+    kb = isolated_kanban_home_with_profiles
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        kb.create_task(conn, title="busy", assignee="gpu0fast")
+        kb.create_task(conn, title="unassigned")
+    with kbc.connect_closing() as conn:
+        res1 = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn, dry_run=False,
+            parallel_exclusion_groups=GROUPS,
+        )
+    assert [s[1] for s in res1.spawned] == ["gpu0fast"]
+    with kbc.connect_closing() as conn:
+        res2 = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn, dry_run=False,
+            parallel_exclusion_groups=GROUPS, default_assignee="GPU0Dense",
+        )
+    assert res2.spawned == []
+    assert res2.skipped_excluded and res2.skipped_excluded[0][1] == "gpu0dense"
