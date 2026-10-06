@@ -109,13 +109,19 @@ def _destination_route(result: ModelSwitchResult, agent: Any):
     )
 
 
-def _destination_native_view(agent: Any, route: Any) -> Any:
+def _destination_native_view(
+    agent: Any, route: Any, runtime_capabilities: Optional[dict] = None
+) -> Any:
     """A read-only copy of the live agent carrying the *destination* route facts.
 
     The native Responses projection reads more than the route (fast-mode overrides, the
     reasoning-replay flag, the compaction config) and those belong to the session, so the copy
     keeps them and overrides the route — the live agent is never mutated just to render a
-    warning. ``None`` when no copy can be taken (agentless callers, exotic agents).
+    warning. ``runtime_capabilities`` is the exception: no session owns it — ``switch_model``
+    publishes the *destination* map (``agent.runtime_capabilities = destination_capabilities``)
+    and the native gate reads it — so a copy that kept the source's map would gate the warning on
+    the runtime the session is leaving. ``None`` when no copy can be taken (agentless callers,
+    exotic agents).
     """
     if agent is None:
         return None
@@ -125,6 +131,8 @@ def _destination_native_view(agent: Any, route: Any) -> Any:
         return None
     view.model, view.provider, view.base_url, view.api_mode = (
         route.model, route.provider, route.base_url, route.api_mode)
+    if runtime_capabilities is not None:
+        view.runtime_capabilities = dict(runtime_capabilities)
     for cached in ("_base_url_hostname", "_base_url_lower"):
         try:
             delattr(view, cached)
@@ -159,14 +167,17 @@ def compressor_context_evidence(agent: Any) -> Optional[SizeAssessment]:
 
 def _estimate_tokens(
     agent: Any, messages: Optional[List[dict]], durable_prompt_tokens: Optional[int] = None,
-    *, route: Optional[Any] = None
+    *, route: Optional[Any] = None, runtime_capabilities: Optional[dict] = None
 ) -> Optional[SizeAssessment]:
     """Size the payload the destination route has to read, from the best evidence at hand.
 
     The durable transcript is the first choice, and it is sized by the destination's own request
     projection (``agent.turn_context.project_request_pressure`` — the owner the runtime preflight
     reads): native Responses pruning and the destination's stale-thinking policy decide what the
-    stored transcript is worth on the target wire. That figure applies to the request the switch
+    stored transcript is worth on the target wire. ``runtime_capabilities`` is the resolved
+    capability map the switch publishes for the destination (``ModelSwitchResult.runtime_capabilities``),
+    because the native gate reads it: the source runtime's map prices the request the session is
+    leaving, not the one the destination reads. That figure applies to the request the switch
     sends, but it is a local projection and not a provider reading, so it is tagged an *estimate*
     and never promoted to ``SIZE_FROM_MEASURED``. Fallback chain for callers without a transcript:
     the compressor's last *provider* reading, then its display seed, then the session counter,
@@ -192,7 +203,7 @@ def _estimate_tokens(
                     route, messages,
                     system_prompt=getattr(agent, "_cached_system_prompt", None) or "",
                     tools=getattr(agent, "tools", None) or None,
-                    native_agent=_destination_native_view(agent, route))
+                    native_agent=_destination_native_view(agent, route, runtime_capabilities))
             # Only a positive figure is evidence. Every wired caller hands over a list — an empty
             # one for a session row with no transcript yet — so returning a zero would skip the
             # fallback below on the exact state it exists for.
@@ -344,20 +355,54 @@ def _configured_trigger(
     return int(threshold)
 
 
-def _threshold_tokens(
-    compressor: Any, model: str, context_length: int, provider: str = "", **policy_kwargs
-) -> int:
-    """The trigger the switch WILL install (cap, model_thresholds and small-window floor included),
-    so the warning quotes the real number.
+def _is_builtin_compressor(compressor: Any) -> bool:
+    """Whether ``compressor`` is the built-in ``ContextCompressor`` (an external engine is not)."""
+    try:
+        from agent.context_compressor import ContextCompressor
+    except Exception:
+        return False
+    return isinstance(compressor, ContextCompressor)
 
-    A live engine answers for itself via ``preview_threshold_tokens``. Without one the same policy
-    is resolved through the configuration producer the engine is built from, so an agentless caller
-    states the installed trigger rather than a default ratio of its own.
+
+def _config_selects_external_engine() -> bool:
+    """Whether the current config's ``context.engine`` selects an external context engine."""
+    try:
+        from agent.agent_init import _select_context_engine
+        from hermes_cli.config import load_config
+
+        return _select_context_engine(load_config() or {}) is not None
+    except Exception:
+        return False
+
+
+def _threshold_tokens(
+    compressor: Any, model: str, context_length: int, provider: str = "",
+    *, policy: Optional[tuple] = None, **policy_kwargs
+) -> Optional[int]:
+    """The trigger the switch WILL install (cap, model_thresholds and small-window floor included),
+    so the warning quotes the real number — ``None`` when no built-in figure describes it.
+
+    A live engine answers for itself via ``preview_threshold_tokens``. An engine that is not the
+    built-in compressor owns its own trigger and answers with the one it installed; the installed-
+    policy producer is not asked, because it returns ``None`` for an external owner — the same value
+    it returns when it cannot answer at all — and the built-in arithmetic must not stand in for
+    either. An agentless caller whose config selects an external engine therefore gets ``None``: the
+    plugin's trigger is not a built-in figure and no preview contract is exposed to quote one. In
+    every other case the policy is resolved through the configuration producer the engine is built
+    from, so an agentless caller states the installed trigger rather than a default ratio of its own.
     """
     preview = getattr(compressor, "preview_threshold_tokens", None)
     if callable(preview):
         return int(preview(model, context_length, provider))
-    return _configured_trigger(model, context_length, provider, **policy_kwargs)
+    if compressor is not None and not _is_builtin_compressor(compressor):
+        # The live engine's own contract: the trigger it installed, or nothing it can quote.
+        live = int(getattr(compressor, "threshold_tokens", 0) or 0)
+        return live if live > 0 else None
+    if policy is None:
+        policy = _resolved_installed_policy(model, provider, context_length, **policy_kwargs)
+    if policy is None and _config_selects_external_engine():
+        return None
+    return _configured_trigger(model, context_length, provider, policy=policy, **policy_kwargs)
 
 
 def _runtime_changes(result: ModelSwitchResult, current_route: tuple[str, str, str], agent: Any) -> bool:
@@ -661,7 +706,8 @@ def merge_preflight_compression_warning(
         return
 
     sized = _estimate_tokens(
-        agent, messages, durable_prompt_tokens, route=_destination_route(result, agent))
+        agent, messages, durable_prompt_tokens, route=_destination_route(result, agent),
+        runtime_capabilities=result.runtime_capabilities)
     if sized is None:
         return
     estimate, source, applies = sized
@@ -695,6 +741,10 @@ def merge_preflight_compression_warning(
             return
     new_threshold = _threshold_tokens(
         cc, result.new_model, new_ctx, result.target_provider, policy=policy)
+    if new_threshold is None:
+        # An external context engine owns this destination and exposes no preview contract for it:
+        # nothing built-in describes its first turn, so no forecast is made rather than a wrong one.
+        return
     if estimate < new_threshold:
         _append_cold_read_note(result, current_route, estimate, new_threshold, source)
         return

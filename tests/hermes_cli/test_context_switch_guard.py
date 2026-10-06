@@ -1308,3 +1308,198 @@ def test_both_surfaces_read_one_evidence_owner(monkeypatch):
     assert (ctx.context_tokens, ctx.context_tokens_source) == (170_000, "counter")
     assert size_label(sized.figure, sized.source) == size_label(
         ctx.context_tokens, ctx.context_tokens_source)
+
+
+# ── The projection's *inputs* are destination-owned too (N1/N2 residuals) ─────────────────────
+# The rebuild centralized the projection at the function name but left two inputs source-owned: the
+# native gate read the runtime the session was leaving, and the installed-policy producer's
+# "external engine owns this" sentinel was consumed as "could not answer".
+
+
+def _native_checkpoint_history():
+    """A durable transcript whose pre-checkpoint rows drop off an eligible native wire (#96155)."""
+    pre = []
+    for i in range(30):
+        pre.append({"role": "user", "content": f"ask {i}"})
+        pre.append({"role": "assistant", "content": "working " + ("tool output " * 400)})
+        pre.append({"role": "tool", "content": "result " + ("payload " * 400),
+                    "tool_call_id": f"call-{i}"})
+    checkpoint = {
+        "role": "assistant",
+        "content": "checkpointed turn",
+        "codex_reasoning_items": [
+            {"type": "compaction", "encrypted_content": "blob", "_issuer_kind": "codex_backend"}
+        ],
+    }
+    return pre + [checkpoint, {"role": "user", "content": "follow-up after checkpoint"}]
+
+
+def test_switch_projection_gates_on_the_destination_capability_map(monkeypatch):
+    """N1: the switch projection reads the *destination* capability map, not the source runtime's.
+
+    ``switch_model`` publishes the resolved target map (``agent.runtime_capabilities =
+    destination_capabilities``) and the native gate reads it. A view that kept the source runtime's
+    ``native_compaction: False`` priced the durable transcript generically in the warning while the
+    next real preflight checkpoint-pruned the same session — one projector, two runtime inputs.
+    """
+    from agent.codex_responses_adapter import estimate_native_responses_preflight_tokens
+    from agent.native_compaction import native_compaction_context_management
+    from agent.turn_context import RequestRoute, _preflight_request_tokens
+
+    from hermes_cli import context_switch_guard as guard
+
+    messages = _native_checkpoint_history()
+    codex_route = RequestRoute(
+        model="gpt-5.6", provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex", api_mode="codex_responses")
+    source = SimpleNamespace(
+        api_mode="chat_completions", model="origin-model", provider="openrouter",
+        base_url="https://a.example/v1", tools=None, _cached_system_prompt="",
+        runtime_capabilities={"native_compaction": False},
+        codex_responses_native_compaction=True, compression_enabled=True,
+        compression_checkpoint_required=False, _codex_reasoning_replay_enabled=True,
+        codex_responses_compact_threshold=None, capabilities={},
+        context_compressor=SimpleNamespace(threshold_tokens=150_000))
+
+    # The source runtime's own map closes the gate, exactly as the live agent would.
+    assert native_compaction_context_management(
+        guard._destination_native_view(source, codex_route), is_codex_backend=True) is None
+
+    # The resolved destination map opens it, and the whole projection moves with it.
+    view = guard._destination_native_view(
+        source, codex_route, runtime_capabilities={"native_compaction": True})
+    assert native_compaction_context_management(view, is_codex_backend=True) is not None
+
+    switched = SimpleNamespace(**vars(source))
+    switched.model, switched.provider, switched.base_url, switched.api_mode = (
+        codex_route.model, codex_route.provider, codex_route.base_url, codex_route.api_mode)
+    switched.runtime_capabilities = {"native_compaction": True}
+    pruned = estimate_native_responses_preflight_tokens(switched, messages)
+    assert pruned is not None and pruned < 8_000
+
+    # Both consumers select the checkpoint-pruned figure: the runtime preflight and the warning.
+    assert _preflight_request_tokens(switched, messages, "") == pruned
+    sized = guard._estimate_tokens(
+        source, messages, route=codex_route, runtime_capabilities={"native_compaction": True})
+    assert sized is not None and sized.figure == pruned
+
+    # Reverse control: without the capability on the destination neither consumer prunes.
+    assert native_compaction_context_management(
+        guard._destination_native_view(
+            source, codex_route, runtime_capabilities={"native_compaction": False}),
+        is_codex_backend=True) is None
+    aged = SimpleNamespace(**vars(switched))
+    aged.runtime_capabilities = {"native_compaction": False}
+    unpruned = _preflight_request_tokens(aged, messages, "")
+    assert unpruned > pruned * 2
+    fallback = guard._estimate_tokens(
+        source, messages, route=codex_route, runtime_capabilities={"native_compaction": False})
+    assert fallback is not None and fallback.figure == unpruned
+
+
+class _ExternalEngine:
+    """A live external context engine: its own trigger, no preview contract, its own admission."""
+
+    def __init__(self, threshold_tokens: int = 180_000, context_length: int = 200_000):
+        self.threshold_tokens = threshold_tokens
+        self.context_length = context_length
+
+    def should_compress(self, tokens=None) -> bool:
+        return int(tokens or 0) >= self.threshold_tokens
+
+    def should_compress_info(self, tokens=None):
+        return self.should_compress(tokens), None
+
+
+def test_external_engine_answers_for_its_own_trigger(monkeypatch):
+    """N2: a ``None`` from the installed-policy producer means "an external engine owns this".
+
+    ``resolve_installed_compression_policy`` returns ``None`` when ``context.engine`` selects a
+    plugin — the same value it returns when its producers cannot answer — and the guard read it as
+    "unresolved" and quoted the built-in ratio instead: a 150K trigger and a definite pass forecast
+    for an engine whose own admission is false at the priced figure.
+    """
+    from agent.usage_anchor import anchored_context_tokens, capture_usage_anchor
+
+    from hermes_cli import context_switch_guard as guard
+
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._estimate_tokens",
+        lambda *a, **k: (160_000, "measured", True))
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length", lambda *a, **k: 200_000)
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._compression_config", lambda: {"threshold": 0.5})
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config", lambda: {"compression": {"threshold": 0.5}})
+
+    engine = _ExternalEngine()
+    agent = SimpleNamespace(
+        context_compressor=engine, compression_enabled=True, model="big-model",
+        provider="openrouter", api_mode="chat_completions", base_url="https://a.example/v1",
+        api_key="")
+
+    assert guard._threshold_tokens(engine, "big-model", 200_000, "openrouter") == 180_000
+    assert engine.should_compress(160_000) is False  # the engine's own admission at the figure
+
+    # A moved deployment: the engine's own 180K trigger is above the priced figure, so the switch
+    # costs a re-read — never the invented 150K trigger or a compression promise.
+    moved = _result(model="big-model")
+    moved.base_url = "https://b.example/v1"
+    merge_preflight_compression_warning(
+        moved, agent=agent, messages=[{"role": "user", "content": "x"}])
+    assert "auto-compress at ~" not in moved.warning_message
+    assert "will run preflight compression" not in moved.warning_message
+    assert "re-reads them before it answers" in moved.warning_message
+
+    # Same deployment with a provider reading above the built-in ratio but below the engine's own
+    # trigger: still no pass promised. Paired control for the built-in compressor follows.
+    messages = [{"role": "user", "content": "hi"} for _ in range(30)]
+    anchor = capture_usage_anchor(160_000, 10, messages)
+    priced = anchored_context_tokens(messages, anchor)
+    anchored_agent = SimpleNamespace(**vars(agent))
+    anchored_agent._usage_anchor = anchor
+    same = _result(model="big-model")
+    same.base_url = "https://a.example/v1"
+    merge_preflight_compression_warning(same, agent=anchored_agent, messages=messages)
+    assert priced < 180_000 and same.warning_message == ""
+
+    builtin = _compressor(monkeypatch, context_length=200_000)
+    builtin_agent = SimpleNamespace(**vars(agent))
+    builtin_agent.context_compressor = builtin
+    control = _result(model="big-model")
+    control.base_url = "https://b.example/v1"
+    merge_preflight_compression_warning(control, agent=builtin_agent, messages=messages)
+    builtin_trigger = guard._threshold_tokens(builtin, "big-model", 200_000, "openrouter")
+    assert builtin_trigger == builtin.preview_threshold_tokens("big-model", 200_000, "openrouter")
+    assert f"auto-compress at ~{builtin_trigger:,}" in control.warning_message
+
+
+def test_agentless_external_engine_destination_quotes_no_builtin_trigger(monkeypatch):
+    """N2 agentless: an external engine owns the config and there is no live engine to ask, so no
+    built-in figure describes the destination's first turn and none is invented."""
+    from hermes_cli import context_switch_guard as guard
+
+    monkeypatch.setattr(
+        "agent.agent_init._select_context_engine", lambda cfg: SimpleNamespace(name="engine"))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config", lambda: {"compression": {"threshold": 0.5}})
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._estimate_tokens",
+        lambda *a, **k: (160_000, "measured", True))
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard.resolve_display_context_length", lambda *a, **k: 200_000)
+    monkeypatch.setattr(
+        "hermes_cli.context_switch_guard._compression_config", lambda: {"threshold": 0.5})
+
+    assert guard._resolved_installed_policy("big-model", "openrouter", 200_000) is None
+    assert guard._threshold_tokens(None, "big-model", 200_000, "openrouter") is None
+
+    result = _result(model="big-model")
+    agent = SimpleNamespace(
+        context_compressor=None, compression_enabled=True, model="big-model",
+        provider="openrouter", api_mode="chat_completions", base_url="https://a.example/v1",
+        api_key="")
+    merge_preflight_compression_warning(
+        result, agent=agent, messages=[{"role": "user", "content": "x"}])
+    assert result.warning_message == ""
