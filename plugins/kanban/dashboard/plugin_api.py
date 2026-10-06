@@ -345,6 +345,10 @@ def _all_boards_payload(tenant: Optional[str] = None, include_archived: bool = F
     banner across boards. Per-board cards come from :func:`get_board` so the
     single-board and cross-board views cannot drift.
 
+    Ordering follows the single-board view: queue lanes keep the dispatch key
+    (``priority`` DESC, ``created_at`` ASC) re-applied over the merged list, and
+    ``done`` stays newest-completed-first.
+
     Read-only first step; one sequential full-board read per board
     (# ponytail: O(boards) sequential reads - parallelize if installs grow)."""
     columns: dict[str, list[dict]] = {}
@@ -375,6 +379,13 @@ def _all_boards_payload(tenant: Optional[str] = None, include_archived: bool = F
     done = columns.get("done", [])
     done.sort(key=lambda d: d["id"], reverse=True)
     done.sort(key=lambda d: (d["completed_at"] is None, -(d["completed_at"] or 0)))
+
+    # Queue lanes are re-merged too: re-apply list_tasks' dispatch key over the
+    # merged buckets, or they would stay concatenated in board-name order and
+    # the cross-board view would drift from /board on the lanes users scan.
+    for name, bucket in columns.items():
+        if name != "done":
+            bucket.sort(key=lambda d: (-(d.get("priority") or 0), d.get("created_at") or 0))
 
     names = list(BOARD_COLUMNS) + (["archived"] if include_archived else [])
     return {

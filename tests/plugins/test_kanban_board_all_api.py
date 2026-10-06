@@ -106,3 +106,31 @@ def test_board_all_excludes_archived_boards(client):
     boards = {t.get("board") for t in _cards(data)}
     assert "live" in boards
     assert not boards & {"retired", "gone"}
+
+
+def test_board_all_queue_columns_keep_dispatch_order_across_boards(client):
+    """Queue lanes answer "what should I pick up next": merged across boards they
+    keep list_tasks' dispatch order (priority DESC, created_at ASC), not the
+    alphabetical board order that concatenating per-board buckets would yield."""
+    kb.create_board("alpha")
+    client.post(
+        "/api/plugins/kanban/tasks?board=alpha",
+        json={"title": "alpha low", "priority": 0},
+    )
+    kb.create_board("zeta")
+    client.post(
+        "/api/plugins/kanban/tasks?board=zeta",
+        json={"title": "zeta high", "priority": 9},
+    )
+
+    r = client.get("/api/plugins/kanban/board/all")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    ready = [
+        t["title"]
+        for c in data["columns"]
+        if c["name"] == "ready"
+        for t in c["tasks"]
+    ]
+    assert ready == ["zeta high", "alpha low"]
