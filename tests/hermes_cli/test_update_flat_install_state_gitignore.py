@@ -140,16 +140,19 @@ def test_flat_install_runtime_state_is_ignored(flat_install_repo):
 
 
 def test_untracked_autostash_cannot_sweep_runtime_state(flat_install_repo):
-    """The exact ``git stash push --include-untracked`` the updater runs must leave
-    every runtime state file in the working tree (issue repro, step 6)."""
+    """The updater's stash step must leave every runtime state file in the working
+    tree (issue repro, step 6). The general autostash is tracked-only now
+    (#120179); the path-scoped untracked collision stash runs with ``-u``, so the
+    ignored runtime state must survive an untracked-inclusive sweep too."""
     # A tracked local change proves the stash really ran: it must be swept away
     # while the runtime state survives.
     (flat_install_repo / "app.py").write_text("print('changed')\n")
+    _run_git(flat_install_repo, "stash", "push", "-m", "hermes-update-autostash")
+    assert (flat_install_repo / "app.py").read_text() == "print('hermes')\n"
     _run_git(
         flat_install_repo,
-        "stash", "push", "--include-untracked", "-m", "hermes-update-autostash",
+        "stash", "push", "--include-untracked", "-m", "hermes-update-autostash-untracked",
     )
-    assert (flat_install_repo / "app.py").read_text() == "print('hermes')\n"
     missing = [
         rel
         for rel in FLAT_INSTALL_RUNTIME_STATE

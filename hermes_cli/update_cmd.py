@@ -68,7 +68,8 @@ from hermes_cli.update_cmd_stash import (  # noqa: F401
     _git_untracked_paths, _park_stashed_changes, _print_stash_cleanup_guidance,
     _reject_unsafe_stash_restore, _resolve_stash_selector, _restore_stashed_changes,
     _restored_python_paths, _stash_apply_failed_only_on_existing_untracked,
-    _stash_local_changes_if_needed, _warn_orphaned_update_autostashes)
+    _stash_colliding_untracked, _stash_local_changes_if_needed,
+    _untracked_overwrite_refusal, _warn_orphaned_update_autostashes)
 from hermes_cli.update_cmd_config import (  # noqa: F401
     _LAST_SIBLING_SNAPSHOTS, _check_and_apply_config_migration, _migrate_sibling_profile_configs,
     _print_items, _run_config_check_fresh, _run_migrate_config_fresh)
@@ -776,6 +777,10 @@ def _repair_current_checkout(
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
     """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
     same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
+    # Last resort for untracked paths this update would overwrite: the pre-pull stash
+    # normally parked them already, but a race must not let the merge/reset below
+    # silently overwrite them with no copy anywhere (#120179 follow-up).
+    _stash_colliding_untracked(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
     # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
     # would discard that work: merge instead, stop on conflict.
     _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
@@ -869,8 +874,18 @@ def _pull_updates(
     try:
         # merge --ff-only the already-fetched ref instead of `git pull`, which would do a
         # SECOND network fetch; identical in effect given the fresh tracking ref.
-        if _git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"]).returncode != 0:
-            _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha)
+        ff_result = _git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])
+        if ff_result.returncode != 0:
+            if (
+                _untracked_overwrite_refusal(ff_result.stderr)
+                and _stash_colliding_untracked(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
+            ):
+                # Collision-only refusal (untracked files the incoming diff owns): the
+                # parked copies retire the cause, and the retry is still a plain
+                # fast-forward — not the divergence path (#120179 follow-up).
+                ff_result = _git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])
+            if ff_result.returncode != 0:
+                _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha)
         _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha)
         update_succeeded = True
     finally:
@@ -962,16 +977,37 @@ def _prepare_checkout_for_update(
     if not in_place_update and current_branch == "HEAD" != branch:
         print(f"  ⚠ Currently on detached HEAD — switching to {branch} for update...")
     auto_stash_ref = _m()._stash_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT)
+    # Untracked paths the incoming diff also adds would make the checkout/merge refuse
+    # (and reset --hard would overwrite them): park exactly those now, before either
+    # operation (#120179 follow-up).
+    _stash_colliding_untracked(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
     if (
         not in_place_update and current_branch != branch
         and _git_run(git_cmd, ["checkout", branch]).returncode != 0):
         track_result = _git_run(git_cmd, ["checkout", "-B", branch, f"origin/{branch}"])
+        if (
+            track_result.returncode != 0
+            and _untracked_overwrite_refusal(track_result.stderr)
+            and _stash_colliding_untracked(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
+        ):
+            # The switch was refused by a path collision (untracked files the target
+            # owns), not by a missing branch: retry now that they are parked.
+            track_result = _git_run(git_cmd, ["checkout", "-B", branch, f"origin/{branch}"])
         if track_result.returncode != 0:
             # Restore the stash before bailing so the user isn't stranded.
             if auto_stash_ref is not None:
                 _m()._restore_stashed_changes(
                     git_cmd, _m().PROJECT_ROOT, auto_stash_ref, prompt_user=False, input_fn=gw_input_fn)
-            print(f"✗ Branch '{branch}' does not exist locally or on origin.")
+            # Only claim the branch is missing when it actually is: a refused checkout
+            # (e.g. an untracked collision) used to be reported as a missing branch.
+            if (
+                _git_run(git_cmd, ["rev-parse", "--verify", "--quiet", f"origin/{branch}"]).returncode != 0
+                and _git_run(git_cmd, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]).returncode != 0
+            ):
+                print(f"✗ Branch '{branch}' does not exist locally or on origin.")
+            else:
+                print(f"✗ Could not switch to branch '{branch}' — the checkout was refused.")
+                print("  Move or commit the files named above, then re-run `hermes update`.")
             if track_result.stderr.strip():
                 print(f"  {track_result.stderr.strip().splitlines()[0]}")
             sys.exit(1)

@@ -75,10 +75,12 @@ def _print_first_line(text: str) -> None:
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     from hermes_cli.update_cmd import _git_run
-    # Tracked changes only: untracked paths cannot conflict with a
-    # fast-forward, so they never need to leave the tree. Stashing them
-    # with --include-untracked silently removed in-tree extensions and
-    # left nothing to restore them (#120179).
+    # Tracked changes only here: stashing ALL untracked files with
+    # --include-untracked silently removed in-tree extensions and left
+    # nothing to restore them (#120179). Untracked paths that the incoming
+    # diff also adds DO conflict (checkout/merge refuse; reset --hard would
+    # overwrite them) and are parked separately by
+    # _stash_colliding_untracked.
     status = _git_run(git_cmd, ["status", "--porcelain", "-z", "--untracked-files=no"], cwd, check=True)
     if not status.stdout.strip():
         return None
@@ -124,6 +126,69 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         # A partially-failed push also skips cleanup of TRACKED modifications; they'd break the following
         # pull. Safe to reset: all is in the stash.
         _reset_hard(git_cmd, cwd)
+    return stash_ref
+
+
+def _untracked_overwrite_refusal(stderr: str) -> bool:
+    """True when git refused a checkout/merge because untracked files would be overwritten.
+
+    That refusal is a path collision, not divergence or a missing branch: parking the
+    named paths lets the same operation succeed (#120179 follow-up).
+    """
+    return "untracked working tree files would be overwritten" in (stderr or "")
+
+
+def _stash_colliding_untracked(git_cmd: list[str], cwd: Path, target_ref: str) -> Optional[str]:
+    """Park untracked paths that *target_ref*'s incoming changes also add.
+
+    The tracked-only autostash deliberately leaves untracked files in the tree, but a
+    path the incoming diff also adds is NOT safe to leave: the checkout or ff-merge
+    refuses, and the divergence fallback's ``reset --hard`` would overwrite it with no
+    copy left anywhere (#120179 follow-up). Intersect the untracked set with the
+    incoming diff and stash exactly those paths, so the content survives in
+    ``git stash``; they stay parked because the updated code now owns those paths.
+    Returns the stash ref, or None when nothing collided or the stash failed.
+    """
+    from hermes_cli.update_cmd import _git_run
+    incoming = _git_paths_z(
+        git_cmd, ["diff", "--name-only", "-z", f"HEAD..{target_ref}"], cwd)
+    if not incoming:
+        return None
+    untracked = _git_paths_z(
+        git_cmd, ["ls-files", "--others", "--exclude-standard", "-z"], cwd)
+    if not untracked:
+        return None
+    # Both directions matter: untracked file vs incoming file (equal), untracked files
+    # under a directory the incoming diff turns into a file, and an untracked file
+    # where the incoming diff adds a directory.
+    colliding = sorted(
+        path for path in untracked
+        if any(
+            path == inc or path.startswith(inc + "/") or inc.startswith(path + "/")
+            for inc in incoming
+        )
+    )
+    if not colliding:
+        return None
+    stash_name = datetime.now(timezone.utc).strftime(
+        f"{_AUTOSTASH_NAME_PREFIX}%Y%m%d-%H%M%S-untracked-collision")
+    prev_stash = _git_run(git_cmd, ["rev-parse", "--verify", "refs/stash"], cwd).stdout.strip()
+    push = _git_run(git_cmd, ["stash", "push", "-u", "-m", stash_name, "--", *colliding], cwd)
+    if push.returncode != 0:
+        print("  ⚠ Could not park untracked files this update would overwrite.")
+        _print_first_line(push.stderr)
+        return None
+    stash_ref = _git_run(git_cmd, ["rev-parse", "--verify", "refs/stash"], cwd).stdout.strip()
+    if not stash_ref or stash_ref == prev_stash:
+        return None
+    print(f"→ Saving {len(colliding)} untracked path(s) this update would overwrite to a stash...")
+    for path in colliding[:5]:
+        print(f"    {path}")
+    if len(colliding) > 5:
+        print(f"    ... and {len(colliding) - 5} more")
+    print(f"  The updated code now owns these paths; the copy is parked in stash {stash_ref}.")
+    print(f"  Inspect it with: git stash show -p {stash_ref}")
+    print(f"  Keep your version under a new name with: git stash apply {stash_ref}")
     return stash_ref
 
 

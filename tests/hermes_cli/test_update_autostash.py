@@ -604,12 +604,14 @@ def test_update_parser_accepts_keep_stash():
 
 def test_bootstrap_marker_not_autostashed_by_update(tmp_path):
     """#38529: the Desktop bootstrap marker must be git-ignored so that
-    ``hermes update``'s ``git stash push --include-untracked`` does not sweep it
-    into an autostash on every run.
+    ``hermes update``'s stash step does not sweep it into an autostash on every
+    run. The general autostash is tracked-only now (#120179); the path-scoped
+    untracked collision stash runs with ``-u``, so the marker must survive an
+    untracked-inclusive sweep too.
 
     Behavioral + hermetic: build a throwaway repo that adopts the project's real
-    ``.gitignore`` (the contract under test), drop the marker, and confirm the
-    same stash invocation the updater uses leaves it untouched.
+    ``.gitignore`` (the contract under test), drop the marker, and confirm
+    both stash invocations leave it untouched.
     """
     import shutil
     import subprocess
@@ -635,8 +637,11 @@ def test_bootstrap_marker_not_autostashed_by_update(tmp_path):
     marker = tmp_path / ".hermes-bootstrap-complete"
     marker.write_text("")
 
-    # Exact flags used by hermes update (hermes_cli/main.py).
-    git("stash", "push", "--include-untracked", "-m", "hermes-update-autostash")
+    # The updater's real step: tracked-only stash (hermes_cli/update_cmd_stash.py).
+    git("stash", "push", "-m", "hermes-update-autostash")
+    # Defensive: the path-scoped collision stash runs with -u and must skip the
+    # marker via .gitignore as well.
+    git("stash", "push", "--include-untracked", "-m", "hermes-update-autostash-untracked")
 
     assert marker.exists(), (
         ".hermes-bootstrap-complete was swept into the update autostash — it must "
@@ -1386,3 +1391,110 @@ def test_keep_stash_park_records_parked_step_in_receipt(capsys):
     assert len(disposition) == 1
     assert disposition[0]["ok"] is False
     assert "parked" in disposition[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Untracked files colliding with incoming paths (#120179 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _make_collision_checkout(tmp_path, *, detach=False):
+    """origin/main = c1; c2 adds ``gateway/butler_bridge/server.py``. The local clone
+    carries the user's own untracked file at that path (the automated review repro)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+    origin, root = tmp_path / "origin", tmp_path / "checkout"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    git(origin, "config", "user.email", "t@example.com")
+    git(origin, "config", "user.name", "t")
+    (origin / "base.txt").write_text("base\n")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-qm", "c1")
+    collide = origin / "gateway" / "butler_bridge" / "server.py"
+    collide.parent.mkdir(parents=True, exist_ok=True)
+    collide.write_text("upstream\n")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-qm", "c2")
+    git(tmp_path, "clone", "-q", str(origin), str(root))
+    if detach:
+        git(root, "checkout", "-q", "--detach", "HEAD~1")
+    else:
+        git(root, "reset", "-q", "--hard", "HEAD~1")
+    collider = root / "gateway" / "butler_bridge" / "server.py"
+    collider.parent.mkdir(parents=True, exist_ok=True)
+    collider.write_text("my local draft\n")
+    return git, root
+
+
+def test_untracked_collision_is_parked_and_ff_merge_proceeds(
+    tmp_path, monkeypatch, capsys
+):
+    """#120179 follow-up: an untracked file at a path the incoming update adds used to
+    reach the divergence fallback and be overwritten by reset --hard with no copy left
+    anywhere. The pull must park exactly that path in a stash and still fast-forward."""
+    import subprocess
+
+    from hermes_cli import update_cmd
+
+    git, root = _make_collision_checkout(tmp_path)
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", root)
+    monkeypatch.setattr(
+        update_cmd, "_validate_critical_files_syntax", lambda _root: (True, None, None))
+
+    plan = update_cmd._prepare_checkout_for_update(
+        ["git"], "main", "main", is_fork=False, assume_yes=True, gateway_mode=False,
+        gw_input_fn=None, switch_branch=False, _windows_gateway_resume=None)
+    update_cmd._pull_updates(
+        ["git"], "main", plan.auto_stash_ref, prompt_for_restore=False, gw_input_fn=None,
+        discard_local_changes=False, keep_stash=False)
+
+    out = capsys.readouterr().out
+    assert "diverged" not in out, out
+    # The update landed...
+    assert (
+        git(root, "rev-parse", "HEAD").stdout.strip()
+        == git(root, "rev-parse", "origin/main").stdout.strip()
+    )
+    # ... upstream owns the path now ...
+    assert (root / "gateway" / "butler_bridge" / "server.py").read_text() == "upstream\n"
+    # ... and the user's copy survives in a stash (third parent = untracked snapshot).
+    stash_sha = git(root, "stash", "list", "--format=%H").stdout.strip()
+    assert stash_sha, "colliding untracked file must be parked in a stash"
+    recovered = subprocess.run(
+        ["git", "show", f"{stash_sha}^3:gateway/butler_bridge/server.py"],
+        cwd=root, capture_output=True, text=True)
+    assert recovered.returncode == 0, recovered
+    assert recovered.stdout == "my local draft\n", recovered
+
+
+def test_untracked_collision_does_not_block_branch_switch(
+    tmp_path, monkeypatch, capsys
+):
+    """#120179 follow-up: a checkout refused by an untracked collision used to be
+    reported as \"Branch 'main' does not exist\" and exit 1 — the branch exists. The
+    collision must be parked and the switch must proceed."""
+    from hermes_cli import update_cmd
+
+    git, root = _make_collision_checkout(tmp_path, detach=True)
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", root)
+
+    plan = update_cmd._prepare_checkout_for_update(
+        ["git"], "main", "HEAD", is_fork=False, assume_yes=True, gateway_mode=False,
+        gw_input_fn=None, switch_branch=False, _windows_gateway_resume=None)
+
+    out = capsys.readouterr().out
+    assert "does not exist" not in out, out
+    assert git(root, "branch", "--show-current").stdout.strip() == "main"
+    # main already carried the upstream commit; only the collider blocked the switch.
+    assert plan.commit_count == 0
+    stash_sha = git(root, "stash", "list", "--format=%H").stdout.strip()
+    assert stash_sha, "colliding untracked file must be parked in a stash"
