@@ -55,7 +55,7 @@ modify files, stage changes, or commit unless the user explicitly requested it:
 
 - Report findings and stop. Do not proceed to Step 7 (auto-fix) unless the
   user explicitly asked for fixes.
-- Do not proceed to Step 8 (commit) unless the user explicitly asked for a
+- Do not proceed to Step 8 (commit) unless the user explicitly authorized a
   commit, or the enclosing workflow already establishes that authorization.
 
 ## Step 1 — Get the diff
@@ -155,7 +155,8 @@ Quick scan before dispatching the reviewer:
 **Interactive sessions only.** In a one-shot run (`hermes chat -q`, `--oneshot`, a
 benchmark harness) there is no one to hand the verdict to and a fresh subagent re-pays
 the whole system prompt plus a repo re-read: skip Steps 5 and 7, apply the Step 4
-checklist to the diff yourself, run the tests, and go to Step 8.
+checklist to the diff yourself, run the tests, and go to Step 8 only if the gate
+above is satisfied.
 
 Call `delegate_task` directly — it is NOT available inside execute_code or scripts.
 
@@ -210,11 +211,11 @@ Return ONLY this JSON:
 
 Combine results from Steps 2, 3, and 5.
 
-**All passed:** Report the verdict and stop. Proceed to Step 8 only if the
-authorization gate above is satisfied.
+**All passed:** Report the verdict and stop. Proceed to Step 8 only if the gate
+above is satisfied.
 
-**Any failures:** Report what failed, then proceed to Step 7 only if the
-authorization gate above is satisfied.
+**Any failures:** Report what failed, then proceed to Step 7 only if the gate
+above is satisfied.
 
 ```
 VERIFICATION FAILED
@@ -255,7 +256,7 @@ Fix each issue precisely. Describe what you changed and why.""",
 ```
 
 After the fix agent completes, re-run Steps 1-6 (full verification cycle).
-- Passed: proceed to Step 8
+- Passed: proceed to Step 8 only if the gate above is satisfied
 - Failed and attempts &lt; 2: repeat Step 7
 - Failed after 2 attempts: escalate to user with the remaining issues and
   suggest `git stash` or `git reset` to undo
