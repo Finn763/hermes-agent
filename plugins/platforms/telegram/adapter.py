@@ -1350,7 +1350,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if not text or not domains:
             return False
         for match in cls._LINK_PREVIEW_URL_RE.finditer(text):
-            host = match.group(1).split("@")[-1].split(":")[0].strip().lower().lstrip(".")
+            # Cut any query/fragment and strip punctuation a sender typed around a bare
+            # host ("https://x.com." / "https://x.com, then" / "https://x.com?utm=1");
+            # otherwise the equality/suffix check misses the listed domain.
+            host = re.split(r"[/?#]", match.group(1), 1)[0]
+            host = host.split("@")[-1].split(":")[0].strip().lower().lstrip(".")
+            host = host.rstrip(".,;:!?'\"")
             if not host:
                 continue
             if any(host == d or host.endswith("." + d) for d in domains):

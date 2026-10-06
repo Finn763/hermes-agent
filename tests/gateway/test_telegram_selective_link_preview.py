@@ -51,6 +51,24 @@ def test_domain_match_disables_calendar_link():
     assert _is_disabled(a._link_preview_kwargs("event: " + CAL))
 
 
+def test_bare_host_with_trailing_punctuation_or_query_still_matches():
+    """A bare host URL is usually typed with punctuation or a query/fragment (#120029 review).
+
+    ``https://calendar.google.com.`` / ``, then`` / ``?x=1`` / ``#anchor`` all
+    leave punctuation glued to the captured host; the comparison must still
+    recognize the listed domain. Non-listed hosts keep their preview.
+    """
+    a = _make_adapter({"link_preview_disabled_domains": ["calendar.google.com"]})
+    for text in (
+        "Event: https://calendar.google.com.",
+        "See https://calendar.google.com, then join.",
+        "https://calendar.google.com?x=1",
+        "https://calendar.google.com#anchor",
+    ):
+        assert _is_disabled(a._link_preview_kwargs(text)), text
+    assert a._link_preview_kwargs("read https://example.com, too") == {}
+
+
 def test_domain_nonmatch_keeps_preview():
     a = _make_adapter({"link_preview_disabled_domains": ["calendar.google.com"]})
     assert a._link_preview_kwargs("read " + OTHER) == {}
