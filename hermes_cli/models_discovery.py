@@ -123,9 +123,16 @@ def discover_models(
     from hermes_cli.models import CANONICAL_PROVIDERS
 
     providers = []
+    errors: list[dict[str, Any]] = []
     for entry in CANONICAL_PROVIDERS:
         ids = _catalog_models(entry.slug)
         if not ids:
+            # Registered but no bundled models: report per slug instead of dropping silently,
+            # so a consumer can tell it apart from "not registered" (schema_version 1 contract).
+            errors.append(_error(
+                _CODE_NO_RESULT,
+                f"no bundled catalog models for provider: {entry.slug}",
+                provider=entry.slug))
             continue
         providers.append({
             "id": entry.slug,
@@ -136,5 +143,5 @@ def discover_models(
             "warnings": [],
         })
     if not providers:
-        return envelope([], [_error(_CODE_NO_RESULT, "no usable result.")], 3)
-    return envelope(providers, [], 0)
+        return envelope([], errors or [_error(_CODE_NO_RESULT, "no usable result.")], 3)
+    return envelope(providers, errors, 0)

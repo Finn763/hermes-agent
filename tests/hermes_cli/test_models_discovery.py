@@ -105,6 +105,24 @@ class TestCatalogResult:
         assert doc["providers"] == []
         assert doc["errors"][0]["code"] == "no_result"
 
+    def test_default_listing_reports_registered_providers_without_models(self):
+        """Residual of the review: the provider-less branch used to `continue` past
+        registered-but-unbundled slugs, so 15 providers (incl. `openrouter`, `custom`
+        and the *-oauth/local runtimes) vanished with no error and no warning."""
+        doc, code = _envelope(provider=None, refresh=False, offline=False)
+        assert code == 0
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        all_slugs = {entry.slug for entry in CANONICAL_PROVIDERS}
+        emitted = {p["id"] for p in doc["providers"]}
+        reported = {e["provider"] for e in doc["errors"] if e.get("code") == "no_result"}
+        # Every registered provider is either listed or explicitly reported — none drops silently.
+        assert emitted | reported == all_slugs
+        assert not (emitted & reported)
+        assert reported  # this catalog slice really does have registered-but-unbundled slugs
+        assert "openrouter" not in emitted and "openrouter" in reported
+        assert all(e.get("message") for e in doc["errors"])
+
 
 class TestRedaction:
     def test_envelope_has_no_secret_surface(self):
