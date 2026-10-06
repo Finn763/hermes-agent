@@ -44,3 +44,30 @@ def test_enabled_provider_block_keeps_the_provider_offered():
     presence of a ``providers:`` entry."""
     assert "openrouter" in _menu_slugs({"providers": {"openrouter": {"enabled": True}}})
     assert "openrouter" in _menu_slugs({"providers": {"openrouter": {}}})
+
+
+def test_custom_endpoint_key_does_not_hide_its_canonical_namesake():
+    """``providers:`` is also the custom-endpoint namespace and its keys are
+    user-chosen (v11 ``custom_providers`` display names migrate in as keys).
+    A private endpoint *named* ``github`` must not take the built-in GitHub
+    Copilot row with it -- the row the drop is about is its own ``custom:``
+    row, which ``is_provider_enabled`` already handles."""
+    cfg = {
+        "providers": {
+            "github": {
+                "name": "GitHub Enterprise",
+                "base_url": "https://ghe.example.com/v1",
+                "enabled": False,
+            }
+        }
+    }
+    slugs = _menu_slugs(cfg)
+    assert "copilot" in slugs
+    assert "anthropic" in slugs
+
+
+def test_alias_key_toggle_still_hides_the_canonical_row():
+    """A bare toggle keeps the slug/alias contract: ``claude`` is an alias of
+    ``anthropic``, so disabling it must hide that row (guard against
+    overcorrecting the custom-endpoint case)."""
+    assert "anthropic" not in _menu_slugs({"providers": {"claude": {"enabled": False}}})

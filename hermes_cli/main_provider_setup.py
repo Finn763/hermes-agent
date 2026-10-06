@@ -895,9 +895,18 @@ def _build_provider_picker_rows(config: dict, active: str, provider_labels: dict
     # provider from `hermes model` was the global model_catalog.excluded_providers list.
     _providers_cfg = config.get("providers")
     if isinstance(_providers_cfg, dict):
+        from hermes_cli.config import _normalize_custom_provider_entry
+        # A block that defines its own endpoint is a CUSTOM provider: its key is a
+        # user-chosen name (v11 ``custom_providers`` display names migrate into
+        # ``providers:`` as keys), so it must not alias-resolve into a canonical row --
+        # a private endpoint named ``github`` is not the ``github`` alias of copilot.
+        # Its own row is already dropped by ``is_provider_enabled`` in
+        # ``providers_dict_to_custom_providers``. Bare toggles keep the slug/alias
+        # contract (``providers: {claude: {enabled: false}}`` hides anthropic).
         _cli_excluded |= {
             str(name).strip().lower() for name, cfg in _providers_cfg.items()
-            if str(name).strip() and not is_provider_enabled(cfg)}
+            if str(name).strip() and not is_provider_enabled(cfg)
+            and _normalize_custom_provider_entry(cfg, provider_key=str(name)) is None}
     if _cli_excluded:
         # A canonical provider is hidden if its slug OR any alias is excluded.
         _names_for: dict[str, set[str]] = {_p.slug: {_p.slug.lower()} for _p in CANONICAL_PROVIDERS}
