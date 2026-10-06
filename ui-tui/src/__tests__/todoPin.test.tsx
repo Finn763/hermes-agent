@@ -173,4 +173,20 @@ describe('pinned Todo panel (#122506)', () => {
 
     expect(paint(props)).not.toContain(WATCHWORD)
   })
+
+  it('keeps the composer on screen with a long todo list on a short terminal', () => {
+    patchTurnState({ todoCollapsed: false, todos: Array.from({ length: 15 }, (_, i) => todo(`TODO-${i}`)) })
+
+    const history = [userMsg('do the thing'), assistantMsg('on it')]
+    const rows = history.map((msg, i) => ({ index: i, key: `row-${i}`, msg }))
+    const props = withTranscript(history, rows, { end: rows.length, start: 0 })
+    props.composer = { ...props.composer, empty: false, input: 'COMPOSER-MARKER-TEXT' }
+
+    const screen = paint(props, 80, 12)
+    // A 15-item plan must not push the input line off the bottom of the screen.
+    expect(screen).toContain('COMPOSER-MARKER-TEXT')
+    // The pinned slot is capped (maxHeight=6), so only a bounded slice of the plan renders.
+    const visibleTodos = new Set(screen.match(/TODO-\d+/g) ?? [])
+    expect(visibleTodos.size).toBeLessThanOrEqual(6)
+  })
 })

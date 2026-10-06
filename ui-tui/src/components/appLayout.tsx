@@ -560,9 +560,9 @@ export const AppLayout = memo(function AppLayout({
               visible above the composer while the transcript scrolls.
               TodoPanel returns null when empty, so this takes zero space
               with no todos. */}
-            {/* ponytail: single pinned slot; add a collapse-height cap here
-              if long todo lists ever crowd the composer. */}
-            <Box flexShrink={0} paddingX={1}>
+            {/* ponytail: single pinned slot with a height cap so a long plan
+              cannot push the composer off screen. */}
+            <Box flexShrink={0} maxHeight={6} overflow="hidden" paddingX={1}>
               <LiveTodoPanel />
             </Box>
 
