@@ -80,3 +80,39 @@ class TestDirectCallScopeEnforcement:
         ))
         assert calls == ["terminal"]
         assert result.get("ok") is True
+
+
+class TestExecuteCodeSandboxScope:
+    """The execute_code sandbox must inherit the session's scope (#121089 review).
+
+    The sandbox dispatches host tools through its own RPC allow-list; if the
+    allow-list falls back to the full set when the session's grant shares
+    nothing with it, a session configured without ``terminal`` can still run
+    shell commands from inside ``execute_code``.
+    """
+
+    def test_empty_intersection_fails_closed(self):
+        from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, _sandbox_tools_for
+
+        assert _sandbox_tools_for(["execute_code"]) == frozenset()
+        assert _sandbox_tools_for([]) == frozenset()
+        assert _sandbox_tools_for(["terminal"]) == frozenset({"terminal"})
+        # No grant list at all keeps the unrestricted legacy behavior.
+        assert _sandbox_tools_for(None) == frozenset(SANDBOX_ALLOWED_TOOLS)
+
+    def test_sandbox_rpc_refuses_terminal_when_grant_has_no_overlap(self):
+        import time as _time
+
+        from tools.code_execution_rpc import _handle_rpc_request
+        from tools.code_execution_tool import _sandbox_tools_for
+
+        allowed = _sandbox_tools_for(["execute_code"])
+        dispatched = []
+        response = _handle_rpc_request(
+            {"tool": "terminal", "args": {"command": "echo pwn"}},
+            allowed_tools=allowed, tool_call_counter=[0], max_tool_calls=5,
+            dispatch=lambda name, args: dispatched.append(name),
+            tool_call_log=[], call_start=_time.monotonic(), where="unit",
+        )
+        assert dispatched == [], "sandbox RPC dispatched a tool outside the session grant"
+        assert "not available in execute_code" in response
