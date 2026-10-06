@@ -292,8 +292,13 @@ def self_repo_block(
 
 
 _UNMANAGED_INPUT_RE = re.compile(r"keybd_event|sendinput", re.IGNORECASE)
+# Verb-before-name (`taskkill /F /IM cua-driver.exe`) AND name-before-verb
+# (`Get-Process cua-driver | Stop-Process -Force`, `wmic ... call terminate`) —
+# both spellings sever the same MCP transport.
 _DRIVER_KILL_RE = re.compile(
-    r"(taskkill|stop-process|pkill|killall)[^\n]*cua-driver", re.IGNORECASE
+    r"(taskkill|stop-process|pkill|killall)[^\n]*cua-driver"
+    r"|cua-driver[^\n]*\b(?:taskkill|stop-process|pkill|killall|terminate|stop|kill)",
+    re.IGNORECASE,
 )
 
 
