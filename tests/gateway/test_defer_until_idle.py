@@ -168,6 +168,80 @@ class TestDeferUntilIdleDrain:
             assert c.kwargs["metadata"] == {"thread": "t"}
 
     @pytest.mark.asyncio
+    async def test_deferred_undo_goes_through_the_destructive_confirm_gate(self):
+        """A deferred /undo must ask before cutting history — same gate as the idle path.
+
+        The raw ``_handle_undo_command`` used to run unconfirmed on the drain path
+        (review on #116290). Resolution now goes through ``_hm_cmd_undo``, so with
+        ``approvals.destructive_slash_confirm`` on the prompt is the only way the
+        command executes.
+        """
+        runner = _make_runner()
+        adapter = MagicMock()
+        adapter.send = AsyncMock()
+        runner._adapter_for_source = lambda _source: adapter
+        runner._thread_metadata_for_source = lambda _source, *a, **k: None
+        runner._handle_undo_command = AsyncMock(return_value="undone")
+        runner._read_user_config = lambda: {"approvals": {"destructive_slash_confirm": True}}
+        confirms = []
+
+        async def _fake_confirm(**kwargs):
+            confirms.append(kwargs)
+            return None  # buttons rendered — the outcome arrives via the confirm callback
+
+        runner._request_slash_confirm = _fake_confirm
+        self._seed(runner, "undo")
+
+        await runner._drain_deferred_commands("sk1")
+
+        runner._handle_undo_command.assert_not_called()
+        assert [c["command"] for c in confirms] == ["undo"]
+        assert "undo" in confirms[0]["title"]
+        # Nothing is echoed when buttons rendered (mirrors the idle path).
+        assert adapter.send.call_args_list == []
+
+    @pytest.mark.asyncio
+    async def test_deferred_undo_delivers_the_text_fallback_prompt(self):
+        """No buttons on the adapter → the prompt text itself is the deferred ack."""
+        runner = _make_runner()
+        adapter = MagicMock()
+        adapter.send = AsyncMock()
+        runner._adapter_for_source = lambda _source: adapter
+        runner._thread_metadata_for_source = lambda _source, *a, **k: None
+        runner._handle_undo_command = AsyncMock(return_value="undone")
+        runner._read_user_config = lambda: {"approvals": {"destructive_slash_confirm": True}}
+
+        async def _fake_confirm(**kwargs):
+            return kwargs["message"]
+
+        runner._request_slash_confirm = _fake_confirm
+        self._seed(runner, "undo")
+
+        await runner._drain_deferred_commands("sk1")
+
+        runner._handle_undo_command.assert_not_called()
+        sent = [c.args[1] for c in adapter.send.call_args_list]
+        assert len(sent) == 1 and "Confirm /undo" in sent[0]
+
+    @pytest.mark.asyncio
+    async def test_deferred_undo_runs_when_confirm_is_opted_out(self):
+        """Confirm off → the deferred undo executes and its result is delivered."""
+        runner = _make_runner()
+        adapter = MagicMock()
+        adapter.send = AsyncMock()
+        runner._adapter_for_source = lambda _source: adapter
+        runner._thread_metadata_for_source = lambda _source, *a, **k: None
+        runner._handle_undo_command = AsyncMock(return_value="undone")
+        runner._read_user_config = lambda: {"approvals": {"destructive_slash_confirm": False}}
+        self._seed(runner, "undo")
+
+        await runner._drain_deferred_commands("sk1")
+
+        runner._handle_undo_command.assert_called_once()
+        sent = [c.args[1] for c in adapter.send.call_args_list]
+        assert sent == ["undone"]
+
+    @pytest.mark.asyncio
     async def test_drain_failure_delivered_honestly_and_continues(self):
         runner = _make_runner()
         adapter = MagicMock()

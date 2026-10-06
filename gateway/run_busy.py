@@ -840,26 +840,35 @@ class GatewayBusySessionMixin:
             await self._run_one_deferred_command(session_key, entry)
 
     async def _run_one_deferred_command(self, session_key: str, entry: dict) -> None:
-        """Execute one deferred command through its idle handler; deliver the result."""
+        """Execute one deferred command through its idle handler; deliver the result.
+
+        Resolution goes through the SAME idle-path dispatcher as a typed command
+        (``_hm_dispatch_canonical_command``): idle/plain tables first, then the bespoke
+        ``_hm_cmd_<name>`` entries. That keeps gates those entries carry covering both
+        paths — notably /undo's destructive confirm, which the raw ``_handle_*`` method
+        skips (review on #116290).
+        """
         name = entry.get("command", "")
         event = entry.get("event")
         source = entry.get("source") or getattr(event, "source", None)
         adapter = self._adapter_for_source(source) if source is not None else None
-        handler = self._gateway_idle_command_handlers().get(name)
-        if handler is None and event is not None:
-            # e.g. /undo has an idle handler but is not in the idle dispatch table.
-            handler = getattr(self, f"_handle_{name.replace('-', '_')}_command", None)
-        if handler is None or event is None:
+        if event is None:
             await self._send_deferred_result(
                 adapter, source,
                 f"⚠️ `/{name}` was scheduled but has no idle handler — please re-run it.")
             return
         try:
-            result = await handler(event)
+            handled, result = await self._hm_dispatch_canonical_command(
+                event, source, session_key, name)
         except Exception as exc:
             logger.warning("Deferred /%s for session %s failed: %s", name, session_key, exc)
             await self._send_deferred_result(
                 adapter, source, f"⚠️ `/{name}` ran after the turn but failed: {exc}")
+            return
+        if not handled:
+            await self._send_deferred_result(
+                adapter, source,
+                f"⚠️ `/{name}` was scheduled but has no idle handler — please re-run it.")
             return
         await self._send_deferred_result(adapter, source, result if isinstance(result, str) else "")
 
