@@ -1236,6 +1236,7 @@ def apply_scratch_tmp_env(env: MutableMapping[str, str]) -> bool:
     msys_default = env.get("MSYSTEM", "").strip() != ""
     for key in SCRATCH_TMP_ENV_VARS:
         value = env.get(key, "").strip()
+        # no-tmp: ok — detects the MSYS shell default, not a write target we choose
         if value and value != ours and not (msys_default and value == "/tmp"):
             return False
     home = env.get("HERMES_HOME", "").strip()
