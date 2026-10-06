@@ -528,17 +528,22 @@ function InlineHtmlFrame({
   }
 
   const height = measured ?? initialHeight ?? DEFAULT_HEIGHT
-  // Left-aligned in the message flow, like an image: the frame is only as
-  // wide as its content (capped at the resolved column cap). Fluid pages
-  // measure the full viewport and stay full-bleed.
-  const width = contentWidth !== null ? Math.min(contentWidth, maxWidth) : undefined
-  // Overflow is scrollable, never silently clipped: content wider than the
-  // cap stays reachable until the cap is raised (criterion 3, issue #120166).
+  // Left-aligned in the message flow, like an image: the window is capped at
+  // the resolved column cap while the content keeps its intrinsic width, so a
+  // widget wider than the window scrolls instead of clipping. Fluid pages
+  // measure the window they were given and stay window-wide.
+  const width = contentWidth ?? undefined
+  // Overflow is scrollable, never silently clipped: the window carries the
+  // RESOLVED cap (inline style — the value is configurable, so a static
+  // utility can't express it) and the inner span is wider whenever the
+  // content exceeds the window, so the scroll affordance is real
+  // (criterion 3, issue #120166).
   const clipped = contentWidth !== null && contentWidth > maxWidth
 
   return (
     <span
-      className="my-2 block w-full max-w-160 overflow-x-auto"
+      className="my-2 block w-full overflow-x-auto"
+      style={{ maxWidth }}
       title={clipped ? `Preview content is ${contentWidth}px wide, shown at ${maxWidth}px - scroll sideways or raise max-width.` : undefined}
     >
       {framedDoc === null ? (
@@ -548,7 +553,7 @@ function InlineHtmlFrame({
         />
       ) : (
         <span
-          className="relative block max-w-full transition-[height] duration-200"
+          className="relative block transition-[height] duration-200"
           style={{ height, width: width ?? '100%' }}
         >
           <iframe
