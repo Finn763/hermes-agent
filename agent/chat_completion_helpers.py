@@ -1470,6 +1470,7 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         context_length=ctx_len.context_length if ctx_len else None,
         base_url=getattr(agent, "_anthropic_base_url", None),
         fast_mode=request_overrides.get("speed") == "fast",
+        tool_choice=request_overrides.get("tool_choice"),
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
     # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
     # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
@@ -1622,9 +1623,10 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
     # The one place request_overrides are consumed: static /fast values are already pinned
     # in agent.request_overrides; auto/cold windows layer the fast override per request.
     request_overrides = effective_request_overrides(agent)
-    # ponytail: chat_completions only; codex_responses/anthropic wires keep their own choice handling.
+    # ponytail: chat_completions + anthropic_messages (the adapter maps "required" to
+    # {"type": "any"}); codex_responses keeps its own choice handling.
     if (
-        agent.api_mode == "chat_completions"
+        agent.api_mode in ("chat_completions", "anthropic_messages")
         and tools_for_api
         and str(getattr(agent, "_tool_choice", "auto") or "auto").strip().lower() == "required"
         and "tool_choice" not in request_overrides

@@ -81,3 +81,32 @@ def test_config_plumbing():
             skip_memory=True,
         )
     assert a._tool_choice == "required"
+
+
+def _anthropic_agent():
+    a = _agent()
+    a.api_mode = "anthropic_messages"
+    return a
+
+
+def test_required_reaches_the_anthropic_route():
+    """The gate must cover anthropic_messages too: the adapter already maps
+    ``required`` to ``{"type": "any"}``, but the caller never forwarded it, so the
+    config was silently inert on that route."""
+    a = _anthropic_agent()
+    a._tool_choice = "required"
+    assert build_api_kwargs(a, _MSGS, _TOOLS)["tool_choice"] == {"type": "any"}
+
+
+def test_anthropic_default_stays_auto():
+    a = _anthropic_agent()
+    a._tool_choice = "auto"
+    assert build_api_kwargs(a, _MSGS, _TOOLS)["tool_choice"] == {"type": "auto"}
+
+
+def test_anthropic_required_without_tools_sets_nothing():
+    a = _anthropic_agent()
+    a._tool_choice = "required"
+    kwargs = build_api_kwargs(a, _MSGS, [])
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
