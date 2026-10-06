@@ -37,6 +37,7 @@ class _MediaCaptureAdapter(ProgressCaptureAdapter):
         super().__init__(platform=platform)
         self.documents = []
         self.image_batches = []
+        self.voice_notes = []
 
     async def send_document(
         self,
@@ -60,6 +61,16 @@ class _MediaCaptureAdapter(ProgressCaptureAdapter):
     ) -> SendResult:
         self.image_batches.append({"chat_id": chat_id, "images": images})
         return SendResult(success=True, message_id="imgs")
+
+    async def send_voice(
+        self, chat_id, audio_path=None, caption=None, reply_to=None, metadata=None, **kwargs
+    ) -> SendResult:
+        # ``is_voice`` is the voice-bubble flag the delivery seam passes through;
+        # the mixed-marker regression is exactly this flag flipping to True.
+        self.voice_notes.append(
+            {"path": audio_path, "is_voice": bool(kwargs.get("is_voice", False))}
+        )
+        return SendResult(success=True, message_id="voice-1")
 
 
 def _allowed_media_path(tmp_path, monkeypatch, name):
@@ -252,3 +263,79 @@ async def test_path_echoed_in_interim_and_final_uploads_once(monkeypatch, tmp_pa
     assert adapter.documents == [str(media_file)]
     uploaded = [unquote(str(p)) for p in adapter.documents]
     assert uploaded.count(str(media_file)) == 1
+
+
+@pytest.mark.asyncio
+async def test_interim_voice_marker_does_not_promote_final_plain_audio(
+    monkeypatch, tmp_path
+):
+    """Review on #99409: the hoisted [[audio_as_voice]] marker is message-global at
+    delivery, so an interim voice request must not retroactively turn the final
+    phase's plain audio attachment into a voice note."""
+    voice = _allowed_media_path(tmp_path, monkeypatch, "voice.mp3")
+    notify = _allowed_media_path(tmp_path, monkeypatch, "notify.mp3")
+    agent_cls = _agent_with_interim(
+        f"Voice note attached\nMEDIA:{voice}\n[[audio_as_voice]]",
+        final=f"All done.\nMEDIA:{notify}",
+    )
+
+    adapter, result = await _run_turn(
+        monkeypatch, tmp_path, agent_cls, "sess-interim-mixed-audio"
+    )
+
+    merged = result["final_response"]
+    # Both attachments survive the merge; the ambiguous marker does not.
+    assert f"MEDIA:{voice}" in merged and f"MEDIA:{notify}" in merged
+    assert "[[audio_as_voice]]" not in merged
+
+    result["already_sent"] = True
+    delivered = await _completion_seam(adapter, result, merged)
+
+    assert delivered is None
+    # Mixed intents in one message deliver plain attachments — never a promoted
+    # voice note for notify.mp3.
+    assert {str(p) for p in (c["path"] for c in adapter.voice_notes)} == {
+        str(voice),
+        str(notify),
+    }
+    assert [c["is_voice"] for c in adapter.voice_notes] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_interim_voice_directive_alone_still_delivers_a_voice_note(
+    monkeypatch, tmp_path
+):
+    """The PR's own case must keep working: an interim-only voice directive (no
+    final-phase audio to conflict with) is still hoisted and delivered as voice."""
+    voice = _allowed_media_path(tmp_path, monkeypatch, "voice.mp3")
+    agent_cls = _agent_with_interim(
+        f"Voice note attached\nMEDIA:{voice}\n[[audio_as_voice]]"
+    )
+
+    adapter, result = await _run_turn(
+        monkeypatch, tmp_path, agent_cls, "sess-interim-voice-only"
+    )
+
+    assert "[[audio_as_voice]]" in result["final_response"]
+
+    result["already_sent"] = True
+    await _completion_seam(adapter, result, result["final_response"])
+
+    assert [(c["path"], c["is_voice"]) for c in adapter.voice_notes] == [
+        (str(voice), True)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interim_plain_audio_is_not_promoted_to_voice(monkeypatch, tmp_path):
+    """An interim plain audio attachment has no marker of its own — the merge must
+    not invent one."""
+    plain = _allowed_media_path(tmp_path, monkeypatch, "plain.mp3")
+    agent_cls = _agent_with_interim(f"File attached\nMEDIA:{plain}")
+
+    adapter, result = await _run_turn(
+        monkeypatch, tmp_path, agent_cls, "sess-interim-plain-audio"
+    )
+
+    assert f"MEDIA:{plain}" in result["final_response"]
+    assert "[[audio_as_voice]]" not in result["final_response"]

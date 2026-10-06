@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -23,7 +24,7 @@ from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
-from gateway.platforms.base import BasePlatformAdapter
+from gateway.platforms.base import BasePlatformAdapter, _AUDIO_EXTS
 from gateway.turn_context import TurnContext
 from hermes_cli.config import cfg_get
 from utils import is_truthy_value
@@ -60,6 +61,19 @@ def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
 # Rendered on a native clarify card whose wait ended without a click (mirrors the notice the
 # Slack click handler shows on a dead entry).
 _CLARIFY_EXPIRED_NOTICE = "⏳ This prompt expired — please send a new request."
+
+
+def _media_voice_intent(path: str, is_voice: bool) -> Optional[bool]:
+    """A MEDIA tag's voice intent, as written in its own message.
+
+    ``True`` = asked to be a voice note (extract_media's flag, marker present and
+    audio); ``False`` = an audio attachment that asked to be a plain file (no marker
+    in its message); ``None`` = not audio, so the message-global marker cannot flip
+    it. Needed because the marker is message-global at delivery: hoisting one into a
+    merged response would silently re-flag every audio file already in it."""
+    if is_voice:
+        return True
+    return False if os.path.splitext(path)[1].lower() in _AUDIO_EXTS else None
 
 
 class _ExecApprovalDeclined(RuntimeError):
@@ -2493,10 +2507,20 @@ class TurnRunner:
 
         Display cleaning strips the directive from the visible commentary before send, so the raw
         payload is the only carrier left. Merge it here — the choke point every delivery rail
-        (post-stream rescan, normal send, queued lane) reads — mirroring _append_auto_media_tags:
-        only after a successfully completed turn (failed/interrupted turns must not publish interim
-        attachments). Repeated paths dedupe inside extract_media at delivery (first occurrence
-        wins), so a path echoed in interim + final phases uploads exactly once."""
+        (post-stream rescan, normal send, queued lane) reads — mirroring _append_auto_media_tags.
+        Attachments are held back when a failure/interrupt flag is set (failed / interrupted /
+        completed is False); a turn that merely truncated or stopped early still published a final
+        response and keeps publishing what it attached. Repeated paths dedupe inside extract_media
+        at delivery (first occurrence wins), so a path echoed in interim + final phases uploads
+        exactly once.
+
+        The [[audio_as_voice]] marker is message-global at delivery (base.extract_media), so a
+        single hoisted marker would retroactively voice-flag EVERY audio tag in the merged
+        response — including plain files the final phase attached. The marker is therefore hoisted
+        only when every audio attachment in the merged message asked for voice; with mixed intents
+        the merged message delivers plain attachments (never promotes). Splitting phases into
+        separate delivery units would preserve both intents but is a delivery-seam change, not a
+        merge-local one (review on #99409)."""
         if not payloads:
             return final_response
         if (
@@ -2506,16 +2530,25 @@ class TurnRunner:
         ):
             return final_response
         tags = []
-        has_voice_directive = False
+        voice_intents: List[bool] = []
         for payload in payloads:
             media_files, _cleaned = BasePlatformAdapter.extract_media(str(payload))
-            has_voice_directive = has_voice_directive or any(
-                is_voice for _path, is_voice in media_files
-            )
-            tags.extend(f"MEDIA:{path}" for path, _is_voice in media_files)
+            for path, is_voice in media_files:
+                tags.append(f"MEDIA:{path}")
+                intent = _media_voice_intent(path, is_voice)
+                if intent is not None:
+                    voice_intents.append(intent)
         if not tags:
             return final_response
-        unique_tags = (["[[audio_as_voice]]"] if has_voice_directive else []) + list(
+        # Tags the final response already carries take the same message-global flag: a
+        # plain audio file there must veto the hoist, or it would ship as a voice note.
+        final_media, _cleaned = BasePlatformAdapter.extract_media(final_response)
+        for path, is_voice in final_media:
+            intent = _media_voice_intent(path, is_voice)
+            if intent is not None:
+                voice_intents.append(intent)
+        hoist_voice = bool(voice_intents) and all(voice_intents)
+        unique_tags = (["[[audio_as_voice]]"] if hoist_voice else []) + list(
             dict.fromkeys(tags)
         )
         return final_response + "\n" + "\n".join(unique_tags)
