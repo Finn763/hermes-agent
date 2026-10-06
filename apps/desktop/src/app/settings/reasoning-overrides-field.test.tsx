@@ -40,6 +40,18 @@ describe('ReasoningOverridesField', () => {
     expect(onChange.mock.calls.at(-1)?.[0]).toEqual({ 'glm-5': 'medium' })
   })
 
+  it('refuses a colliding rename instead of silently dropping a row', async () => {
+    const onChange = await renderField({ 'deepseek-v4-flash': 'medium', 'claude-opus': 'high' })
+
+    fireEvent.change(screen.getByLabelText('Model 1'), { target: { value: 'claude-opus' } })
+
+    // Map semantics: two rows cannot share a model id, so a colliding rename
+    // would drop one row's edit on the next commit. The rename is refused at
+    // entry and nothing is emitted.
+    expect(onChange).not.toHaveBeenCalled()
+    expect((screen.getByLabelText('Model 1') as HTMLInputElement).value).toBe('deepseek-v4-flash')
+  })
+
   it('removing a row drops its override from the emitted map', async () => {
     const onChange = await renderField({ 'deepseek-v4-flash': 'medium', 'claude-opus': 'high' })
 

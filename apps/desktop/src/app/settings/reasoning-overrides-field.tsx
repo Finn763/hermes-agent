@@ -27,7 +27,9 @@ function normalize(value: unknown): OverrideRow[] {
 }
 
 function rowsEqual(a: OverrideRow[], b: OverrideRow[]): boolean {
-  return a.length === b.length && a.every((row, index) => row.model === b[index].model && row.effort === b[index].effort)
+  return (
+    a.length === b.length && a.every((row, index) => row.model === b[index].model && row.effort === b[index].effort)
+  )
 }
 
 /**
@@ -80,8 +82,20 @@ export function ReasoningOverridesField({
     onChange(emitted)
   }
 
-  const updateRow = (index: number, patch: Partial<OverrideRow>) =>
-    commit(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  const updateRow = (index: number, patch: Partial<OverrideRow>) => {
+    const next = rows.map((row, i) => (i === index ? { ...row, ...patch } : row))
+    const renamed = next[index].model.trim()
+
+    // The persisted shape is a `{model: effort}` map, so two rows cannot share
+    // a model id: a colliding rename would be absorbed by map assignment and
+    // silently drop one row's edit. Refuse the rename at entry instead — the
+    // row keeps its previous id and both entries stay in the emitted map.
+    if (patch.model !== undefined && renamed && next.some((row, i) => i !== index && row.model.trim() === renamed)) {
+      return
+    }
+
+    commit(next)
+  }
 
   const effortLabel = (effort: string) => t.shell.modelOptions[effort as keyof typeof t.shell.modelOptions] ?? effort
 

@@ -1,4 +1,4 @@
-﻿import { useStore } from '@nanostores/react'
+import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 
@@ -59,7 +59,7 @@ function entriesEqual(a: FallbackEntry[], b: FallbackEntry[]): boolean {
 }
 
 /**
- * Structured editor for the top-level `fallback_providers` config list 鈥?a
+ * Structured editor for the top-level `fallback_providers` config list — a
  * chain of `{provider, model}` pairs tried in order when the default model
  * fails. Replaces the generic comma-string `list` input, which stringified the
  * objects to "[object Object], [object Object]".
