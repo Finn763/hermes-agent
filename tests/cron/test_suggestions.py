@@ -180,6 +180,40 @@ class TestStore:
         assert len(created) == 1
         assert store.list_pending() == []
 
+    def test_concurrent_write_during_accept_is_not_clobbered(self, store):
+        """The accepted transition must re-read the store inside the critical
+        section: the durable create is a network round trip, and anything
+        another process persists meanwhile (here: a dismissal) must survive
+        instead of being rewritten from the pre-create snapshot (#84490)."""
+        import json as _json
+
+        first = _add(store, key="accept-me", title="Accept me")
+        second = _add(store, key="dismissed-elsewhere", title="Dismissed")
+        suggestions_file = store._current_suggestions_file()
+
+        def fake_create(**kwargs):
+            # Another process dismisses the sibling while this accept is in
+            # flight (deterministic ordering: this runs before the transition).
+            data = _json.loads(suggestions_file.read_text(encoding="utf-8"))
+            for record in data["suggestions"]:
+                if record["id"] == second["id"]:
+                    record["status"] = "dismissed"
+            suggestions_file.write_text(_json.dumps(data), encoding="utf-8")
+            return {"id": "job-1", **kwargs}
+
+        with patch(
+            "cron.scheduler.create_job_with_scheduler_registration",
+            side_effect=fake_create,
+        ):
+            job = store.accept_suggestion(first["id"])
+
+        assert job is not None
+        by_id = {s["id"]: s for s in store.load_suggestions()}
+        assert by_id[first["id"]]["status"] == "accepted"
+        assert by_id[second["id"]]["status"] == "dismissed", (
+            "the concurrent dismissal was overwritten by the accept"
+        )
+
     def test_registration_failure_marks_suggestion_accepted(self, store):
         """Retrying an acceptance must not create a duplicate durable job."""
         from cron.scheduler import CronSchedulerRegistrationError

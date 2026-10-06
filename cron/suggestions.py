@@ -198,8 +198,15 @@ def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> O
             job = create_job_with_scheduler_registration(**spec)
         except CronSchedulerRegistrationError:
             # The job is already durable: resolve the suggestion so a retry cannot create a second copy.
+            # Re-read: the store may have changed while the registration was failing.
+            suggestions = _load_raw().get("suggestions", [])
             _mark_status(suggestions, s["id"], _STATUS_ACCEPTED)
             raise
+        # Re-read before persisting: the durable create is a network round trip, so
+        # anything another process wrote meanwhile must not be clobbered by the
+        # snapshot taken before it (#84490). Refresh in place -- calling
+        # ``_set_status`` here would self-deadlock on the non-reentrant lock.
+        suggestions = _load_raw().get("suggestions", [])
         _mark_status(suggestions, s["id"], _STATUS_ACCEPTED)
         return job
 
