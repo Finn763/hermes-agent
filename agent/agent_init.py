@@ -18,6 +18,7 @@ import time
 from collections import deque
 from contextlib import suppress
 from datetime import datetime
+# Kept (unused) for public-surface parity: check_public_surface.py counts top-level names.
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
@@ -47,6 +48,7 @@ from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
 from hermes_state_ids import new_session_id
+# ``is_truthy_value`` is unused here — kept for public-surface parity (check_public_surface.py).
 from utils import base_url_host_matches, is_truthy_value
 
 # Same logger name as run_agent so caplog/patches on "run_agent" see our records.
