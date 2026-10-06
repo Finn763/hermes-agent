@@ -1224,7 +1224,7 @@ def run_compress_context_with_progress_timeout(
         if telemetry_agent is not None:
             _emit_compression_attempt_telemetry(
                 telemetry_agent, started_at=time.monotonic(), commit_status="aborted", split_status="aborted",
-                failure_class="pool_saturated",
+                failure_class="pool_saturated", include_last_telemetry=False,
             )
         return messages, _resolve_fallback_prompt()
 
@@ -1467,12 +1467,15 @@ def _session_was_rotated_by_compression(session_db: Any, session_id: str) -> boo
 
 def _emit_compression_attempt_telemetry(
     agent: Any, *, started_at: float, commit_status: str, split_status: str, failure_class: str | None = None,
-    commit_started_at: float | None = None,
+    commit_started_at: float | None = None, include_last_telemetry: bool = True,
 ) -> None:
-    """Emit one content-free JSON log line for a compression attempt."""
+    """Emit one content-free JSON log line for a compression attempt.
+
+    ``include_last_telemetry=False`` is for emits that fire without an attempt having begun
+    (pool-saturation refusals): they must not hydrate from the previous attempt's numbers."""
     with _swallow('failed to emit compression attempt telemetry: %s'):
         compressor = agent.context_compressor
-        telemetry = getattr(compressor, "_last_compression_telemetry", None)
+        telemetry = getattr(compressor, "_last_compression_telemetry", None) if include_last_telemetry else None
         if not isinstance(telemetry, dict):
             telemetry = {}
         payload = dict(telemetry)
@@ -4020,6 +4023,13 @@ def _begin_compression_attempt(
     ``conversation_history_after_compression()``."""
     snapshot = _snapshot_compressor_attempt_state(agent.context_compressor)
     generation = _claim_compressor_attempt(agent.context_compressor)
+    # A previous attempt's telemetry must not ride into this one (#118580 follow-up): the
+    # commit-time hold keeps the trio for THIS attempt's own emit, but the next attempt (and
+    # every emit before it re-seeds) must start clean. AFTER the snapshot so a late-unwind
+    # restore still round-trips the full pre-attempt state.
+    for _name in ("_last_compression_telemetry", "_active_compression_telemetry", "_compression_telemetry_seed"):
+        with contextlib.suppress(Exception):
+            setattr(agent.context_compressor, _name, None)
     if defer_notification and callable(getattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None)):
         raise RuntimeError("a compression notification is already pending")
     agent._last_compression_attempt_recorded = True
