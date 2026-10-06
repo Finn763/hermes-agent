@@ -726,14 +726,17 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
 
     raw = script.strip()
     scripts_dir = get_hermes_home() / "scripts"
+    # User-facing text uses the module's display form (same as the schema string
+    # below); the concrete path in the not-found message stays resolved.
+    scripts_dir_display = f"{display_hermes_home()}/scripts"
 
     # Reject absolute paths and ~ expansion at the API boundary.
     # Only relative paths within the profile's scripts dir are allowed.
     if raw.startswith(("/", "~")) or (len(raw) >= 2 and raw[1] == ":"):
         return (
-            f"Script path must be relative to {scripts_dir}/. "
+            f"Script path must be relative to {scripts_dir_display}/. "
             f"Got absolute or home-relative path: {raw!r}. "
-            f"Place scripts in {scripts_dir}/ and use just the filename."
+            f"Place scripts in {scripts_dir_display}/ and use just the filename."
         )
 
     # Validate containment after resolution
@@ -750,11 +753,18 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     # resolves <profile>/scripts/ and drops failed once-only jobs from
     # jobs.json, so a typo'd/misplaced script would silently miss its event.
     # (TOCTOU is fine — the scheduler re-checks existence at fire time.)
-    resolved_script = (scripts_dir / raw).resolve()
+    candidate = scripts_dir / raw
+    resolved_script = candidate.resolve()
     if not resolved_script.is_file():
+        # Distinguish the two failures the scheduler keeps apart
+        # (cron/scheduler.py:4255-4257): a missing entry gets the create hint,
+        # while a path that exists as something else (directory, broken
+        # symlink) must not tell the user to create what is already there.
+        if candidate.exists() or candidate.is_symlink():
+            return f"Script path is not a file: {resolved_script}"
         return (
             f"Script file not found: {resolved_script}. "
-            f"Create it in {scripts_dir}/ first."
+            f"Create it in {scripts_dir_display}/ first."
         )
 
     return None

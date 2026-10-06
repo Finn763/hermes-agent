@@ -628,7 +628,11 @@ class TestCronjobToolScriptValidation:
         assert "not found" in result["error"].lower()
 
     def test_absolute_path_error_names_profile_scripts_dir(self, cron_env, monkeypatch):
-        """#105760: the error must name the resolved profile dir, not ~/.hermes/scripts/."""
+        """#105760: the error must name the profile's scripts dir — and use the
+        module's display form (display_hermes_home, as the schema string at :1888
+        does) rather than a hardcoded ~/.hermes/scripts/."""
+        from hermes_constants import display_hermes_home
+
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
@@ -640,7 +644,84 @@ class TestCronjobToolScriptValidation:
         ))
         assert result["success"] is False
         assert "~/.hermes/scripts/" not in result["error"]
-        assert str(cron_env / "scripts") in result["error"]
+        assert f"{display_hermes_home()}/scripts" in result["error"]
+
+    def test_create_with_directory_script_names_not_a_file(self, cron_env, monkeypatch):
+        """#105760 follow-up: a directory named like a script must get the
+        'not a file' wording (same distinction the scheduler keeps at
+        cron/scheduler.py:4255-4257), not the 'create it' not-found hint for
+        something that already exists."""
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        (cron_env / "scripts" / "thing.py").mkdir()
+
+        result = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="thing.py",
+        ))
+        assert result["success"] is False
+        assert "not a file" in result["error"].lower()
+        assert "not found" not in result["error"].lower()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Symlink creation requires elevated privileges on Windows",
+    )
+    def test_create_with_broken_symlink_script_names_not_a_file(self, cron_env, monkeypatch):
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        (cron_env / "scripts" / "broken.py").symlink_to(
+            cron_env / "scripts" / "missing_target.py"
+        )
+
+        result = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="broken.py",
+        ))
+        assert result["success"] is False
+        assert "not a file" in result["error"].lower()
+
+    def test_create_with_missing_monitor_script_rejected(self, cron_env, monkeypatch):
+        """The shared guard also covers create × monitor_script (the PR body
+        claims it; only script was exercised)."""
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        result = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            monitor_script="missing_monitor.py",
+        ))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_update_with_missing_monitor_script_rejected(self, cron_env, monkeypatch):
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        from tools.cronjob_tools import cronjob
+
+        (cron_env / "scripts" / "real.py").write_text('print("hi")\n')
+        created = json.loads(cronjob(
+            action="create",
+            schedule="every 1h",
+            prompt="Monitor things",
+            script="real.py",
+        ))
+        assert created["success"] is True
+
+        result = json.loads(cronjob(
+            action="update",
+            job_id=created["job_id"],
+            monitor_script="gone_monitor.py",
+        ))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
 
 class TestRunJobEnvVarCleanup:
