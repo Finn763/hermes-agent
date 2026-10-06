@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react'
 import { Component, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { MessageRenderBoundary } from './message-render-boundary'
+import { MessageRenderBoundary, RETRY_DELAY_MS } from './message-render-boundary'
 
 afterEach(() => {
   cleanup()
@@ -206,26 +206,22 @@ describe('MessageRenderBoundary', () => {
       </MessageRenderBoundary>
     )
 
-    // React dev mode replays a failed render once per attempt, and an error
-    // during the initial mount gets an extra sync retry from the root, so
-    // measure the per-attempt cost from the first retry instead of guessing.
-    const mountAttempts = attempts
+    // Walk retries until the boundary stops arming timers — observed
+    // exhaustion, not a hand-counted step budget (a fixed budget stayed green
+    // for a cap raised just past the schedule). Timer callbacks batch their
+    // setState inside act(), so each advance spends exactly one retry.
+    let spentRetries = 0
 
-    act(() => {
-      vi.advanceTimersByTime(0)
-    })
-
-    const perRetry = attempts - mountAttempts
-
-    // The remaining retries are spread over the backoff schedule. Timer
-    // callbacks batch their setState inside act(), so each advance spends
-    // exactly one retry; step past the whole schedule.
-    for (let step = 0; step < 6; step += 1) {
+    while (spentRetries < 50 && vi.getTimerCount() > 0) {
       act(() => {
         vi.advanceTimersByTime(1000)
       })
+      spentRetries += 1
     }
 
+    // The observed count IS the cap: pins MAX_TRANSIENT_RETRIES to the
+    // schedule length instead of accepting any cap >= 5.
+    expect(spentRetries).toBe(RETRY_DELAY_MS.length)
     // The boundary gave up: it stays null and arms no further timer.
     expect(vi.getTimerCount()).toBe(0)
     expect(container.innerHTML).toBe('')
