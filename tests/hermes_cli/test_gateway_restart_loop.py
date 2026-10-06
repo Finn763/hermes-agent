@@ -1044,6 +1044,21 @@ class TestLifecycleGuardModule:
             is True
         )
 
+    def test_comment_ending_in_backslash_does_not_hide_the_next_line(self):
+        """bash ends a `#` comment at the newline even when it ends in a
+        backslash -- the backslash is inert inside the comment and the next
+        line RUNS -- so the command it carries must stay blocked
+        (#106723 follow-up)."""
+        from cron.lifecycle_guard import (
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        assert (
+            contains_gateway_lifecycle_command_or_referenced_script(
+                "# c \\\nhermes gateway restart"
+            )
+            is True
+        )
+
     def test_prompt_with_command_raises(self):
         from cron.lifecycle_guard import GatewayLifecycleBlocked, check_gateway_lifecycle
         with pytest.raises(GatewayLifecycleBlocked) as exc:

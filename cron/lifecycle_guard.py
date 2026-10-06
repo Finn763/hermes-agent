@@ -779,7 +779,11 @@ def _lifecycle_command_scan_with_data_exemption(text: str) -> bool:
     """
     if not contains_gateway_lifecycle_command(text):
         return False
-    normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
+    # Strip comments BEFORE re-joining continuations: a comment line can end
+    # in a backslash, which is inert inside the comment -- bash ends the
+    # comment at the newline and RUNS the next line, so joining raw text
+    # first folds that command into the comment and misses it (#106723).
+    normalized = _SHELL_LINE_CONTINUATION.sub(" ", _strip_shell_comments(text))
     return contains_gateway_lifecycle_command(_mask_data_sink_arguments(normalized))
 
 
