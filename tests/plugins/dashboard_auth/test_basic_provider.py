@@ -230,6 +230,9 @@ class TestRegister:
         monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "admin")
         monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "hunter2")
         monkeypatch.delenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", raising=False)
+        # The fallback key is module-global; reset it (monkeypatch restores the previous
+        # value on teardown) so this test can't couple to other tests' fallback keys.
+        monkeypatch.setattr(basic, "_PROCESS_SECRET", None)
 
         ctx1 = MagicMock()
         basic.register(ctx1)

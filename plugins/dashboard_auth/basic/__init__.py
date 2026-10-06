@@ -201,7 +201,11 @@ def _resolve_secret(cfg_section: dict) -> bytes:
     the re-registration would stop verifying, which is exactly the "login returns 200, every
     API call 401s" symptom (#117314). One key per process keeps a re-registration
     transparent; it still does NOT survive a restart, which is what the INFO log warns
-    about."""
+    about.
+
+    Two logical tenants in one process without explicit secrets therefore share this one
+    fallback key (intended); give each tenant its own secret if their sessions must not be
+    interchangeable."""
     raw = resolve_env_or_cfg("HERMES_DASHBOARD_BASIC_AUTH_SECRET", cfg_section.get("secret"))
     if not raw:
         logger.info(
