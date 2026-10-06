@@ -357,3 +357,14 @@ class TestBackwardCompatibility:
         assert _get_nested(cfg, "a.b.c") == 1
         _set_nested(cfg, "a.b.c", 2)
         assert cfg == {"a": {"b": {"c": 2}}}
+
+
+def test_facade_reexports_the_same_missing_sentinel():
+    """``hermes_cli.config`` must re-export the leaf module's ``_MISSING`` object itself.
+
+    Callers compare results with ``is _MISSING``; a future edit re-creating a parallel sentinel
+    in ``config.py`` would silently break every one of those checks.
+    """
+    import hermes_cli.config_keypaths as config_keypaths
+
+    assert _MISSING is config_keypaths._MISSING
