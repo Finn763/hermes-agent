@@ -84,6 +84,48 @@ def test_stale_queued_ticket_adopted_after_lease_turnover(tmp_path):
         db.close()
 
 
+def test_live_peer_pin_is_not_adopted_by_the_canonical_tip_owner(tmp_path):
+    """Adoption only rescues stranded leases: a queued ticket pinned to a lease
+    that is still live stays with that peer. A Desktop window on the
+    pre-compression session survives the compression while a one-shot holds the
+    tip — the tip owner must not adopt and execute the Desktop's ticket."""
+    from hermes_cli.active_sessions import try_acquire_active_session
+    from tools import bot_live_delivery as mailbox
+
+    db = _bot_chat_home(tmp_path)
+    desktop, refusal = try_acquire_active_session(
+        session_id="chat", surface="desktop", config={}, registry_home=tmp_path,
+        metadata={"live_session_id": "desk-live", "bot_live_delivery_consumer": True})
+    assert refusal is None and desktop is not None
+    one_shot = None
+    try:
+        desktop_owner = mailbox.find_canonical_live_owner(tmp_path)
+        assert desktop_owner is not None and desktop_owner["lease_id"] == desktop.lease_id
+        queued = mailbox.deliver_to_live_owner(tmp_path, desktop_owner, "still owned")
+        # The Bot Chat session is compressed under the still-live Desktop window;
+        # a headless one-shot turn then claims the new tip.
+        assert db.try_acquire_compression_lock("chat", "w", ttl_seconds=60)
+        db.publish_compression_child(
+            parent_session_id="chat", child_session_id="tip", source="test",
+            messages=[{"role": "user", "content": "summary"}], compression_lock_holder="w")
+        one_shot, refusal = try_acquire_active_session(
+            session_id="tip", surface="cli", config={}, registry_home=tmp_path,
+            metadata={"live_session_id": "oneshot-live", "bot_live_delivery_consumer": "oneshot"})
+        assert refusal is None and one_shot is not None
+        current = mailbox.find_canonical_live_owner(tmp_path)
+        assert current is not None and current["lease_id"] == one_shot.lease_id
+        # The pinned Desktop lease is live: its queued ticket is not the tip owner's to adopt.
+        assert mailbox.claim_pending_delivery(tmp_path, current) is None
+        # ...and it is still served by the lease that owns it.
+        served = mailbox.claim_pending_delivery(tmp_path, desktop_owner)
+        assert served is not None and served["delivery_id"] == queued["delivery_id"]
+    finally:
+        if one_shot is not None:
+            one_shot.release()
+        desktop.release()
+        db.close()
+
+
 def test_claimed_or_live_pinned_tickets_are_never_adopted(tmp_path):
     """Adoption is queued-only and stale-only: a claimed ticket of a dead owner
     stays an unknown outcome (never re-executed), and a live owner's pin cannot

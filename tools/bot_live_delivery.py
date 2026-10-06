@@ -257,12 +257,25 @@ def _lineage_matches(home: Path | str, record: dict, owner: dict) -> bool:
         db.close()
 
 
-def _adoptable(home: Path | str, record: dict, canonical: dict) -> bool:
+def _live_lease_ids(profile_home: Path | str) -> set[str]:
+    """Lease ids the active-session registry reports as live for this profile."""
+    from hermes_cli.active_sessions import active_session_registry_snapshot
+
+    return {
+        entry.get("lease_id", "")
+        for entry in active_session_registry_snapshot(registry_home=Path(profile_home).resolve())
+    }
+
+
+def _adoptable(home: Path | str, record: dict, canonical: dict, live_lease_ids: set[str]) -> bool:
     """Whether the live canonical owner may take over a ticket pinned elsewhere.
 
-    Only ``queued`` tickets (never executed) whose pinned lease is no longer the
-    canonical owner's: the one-shot that queued them exited, crashed, or capped its
-    drain. The canonical ticket's lineage must still resolve to the canonical session.
+    Only ``queued`` tickets (never executed) whose pinned lease is gone from the
+    live registry: the one-shot that queued them exited, crashed, or capped its
+    drain. A lease that merely differs from the canonical owner's is not enough —
+    a live peer (e.g. a Desktop window on the pre-compression session) keeps its
+    own queued tickets. The canonical ticket's lineage must still resolve to the
+    canonical session.
     """
     pinned = record.get("owner") or {}
     if record.get("status") != "queued":
@@ -270,6 +283,8 @@ def _adoptable(home: Path | str, record: dict, canonical: dict) -> bool:
     if pinned.get("profile_home") != canonical.get("profile_home"):
         return False
     if pinned.get("lease_id") == canonical.get("lease_id"):
+        return False
+    if pinned.get("lease_id") in live_lease_ids:
         return False
     return _lineage_matches(home, record, canonical)
 
@@ -307,8 +322,9 @@ def claim_pending_delivery(
     stored session's compression chain. A live pin cannot be stolen by another lease.
     Caller must hold its normal turn-admission guard before invoking this.
 
-    Stale adoption (#122370): a ``queued`` ticket whose pinned lease is gone is adopted
-    by the current canonical owner — its one-shot exited, crashed, or capped its drain.
+    Stale adoption (#122370): a ``queued`` ticket whose pinned lease is gone from the
+    live registry is adopted by the current canonical owner — its one-shot exited,
+    crashed, or capped its drain. A live peer's pin is not adopted.
     ``claimed`` tickets are never adopted: a crashed consumer leaves an inspectable
     unknown outcome, not permission to execute the same input again.
     """
@@ -326,7 +342,10 @@ def claim_pending_delivery(
     canonical = find_canonical_owner(profile_home)
     if canonical is None or canonical.get("lease_id") != current["lease_id"]:
         return None  # caller is not the live canonical owner: fail closed
-    if not any(_adoptable(profile_home, record, canonical) for record in stale):
+    # Liveness snapshot from the registry, taken outside the mailbox lock; the
+    # re-check inside the lock reuses it and may only fail closed for one claim cycle.
+    live = _live_lease_ids(profile_home)
+    if not any(_adoptable(profile_home, record, canonical, live) for record in stale):
         return None
     with _locked(profile_home) as root:
         pending, stale = _scan_claimable(profile_home, root, current)
@@ -336,7 +355,7 @@ def claim_pending_delivery(
             fresh = _scan_read(root / f"{record['delivery_id']}.json")
             if (fresh is not None and fresh["status"] == "queued"
                     and fresh["owner"] == record["owner"]
-                    and _adoptable(profile_home, fresh, canonical)):
+                    and _adoptable(profile_home, fresh, canonical, live)):
                 return _claim_oldest(root, [fresh])
     return None
 
