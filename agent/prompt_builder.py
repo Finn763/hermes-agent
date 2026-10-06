@@ -1196,11 +1196,13 @@ def _snapshot_entry_skill_md_exists(skills_dir: Path, entry: dict) -> bool:
     category = str(entry.get("category") or "general").strip()
     org_id = entry.get("org_id")
     base = (skills_dir / ORG_MIRROR_DIR_NAME / str(org_id)) if org_id else skills_dir
+    # The builder records a top-level skill's own name as its category (parts[0] of a
+    # two-part path), so `category == skill_name` is the default layout, not a nested one:
+    # accept either the top-level or the category-qualified path (#8845 review).
+    candidates = [base / skill_name / "SKILL.md"]
     if category and category != "general":
-        skill_md = base / category / skill_name / "SKILL.md"
-    else:
-        skill_md = base / skill_name / "SKILL.md"
-    return skill_md.is_file()
+        candidates.append(base / category / skill_name / "SKILL.md")
+    return any(candidate.is_file() for candidate in candidates)
 
 
 def _requires_apps_list(frontmatter: dict) -> list[str]:

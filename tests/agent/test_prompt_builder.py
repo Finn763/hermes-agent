@@ -427,16 +427,17 @@ class TestBuildSkillsSystemPrompt:
         nested category, org mirror) (#8845)."""
         from agent.prompt_builder import _snapshot_entry_skill_md_exists
 
-        # general category: skills_dir/<name>/SKILL.md
-        d = tmp_path / "general-skill"
+        # top-level skill: the builder records the skill's own name as its category
+        # (parts[0] of skills/<name>/SKILL.md), file at skills_dir/<name>/SKILL.md.
+        d = tmp_path / "top-level-skill"
         d.mkdir()
-        (d / "SKILL.md").write_text("---\nname: general-skill\n---\n")
+        (d / "SKILL.md").write_text("---\nname: top-level-skill\n---\n")
         assert _snapshot_entry_skill_md_exists(tmp_path, {
-            "skill_name": "general-skill", "category": "general",
+            "skill_name": "top-level-skill", "category": "top-level-skill",
         }) is True
-        # Missing skill file → False.
+        # Missing skill file → False (same builder shape).
         assert _snapshot_entry_skill_md_exists(tmp_path, {
-            "skill_name": "never-existed", "category": "general",
+            "skill_name": "never-existed", "category": "never-existed",
         }) is False
 
         # nested category: skills_dir/<cat>/<name>/SKILL.md
@@ -452,10 +453,10 @@ class TestBuildSkillsSystemPrompt:
         o.mkdir(parents=True)
         (o / "SKILL.md").write_text("---\nname: org-skill\n---\n")
         assert _snapshot_entry_skill_md_exists(tmp_path, {
-            "skill_name": "org-skill", "category": "general", "org_id": "my-team",
+            "skill_name": "org-skill", "category": "org-skill", "org_id": "my-team",
         }) is True
         assert _snapshot_entry_skill_md_exists(tmp_path, {
-            "skill_name": "org-skill", "category": "general", "org_id": "other-team",
+            "skill_name": "org-skill", "category": "org-skill", "org_id": "other-team",
         }) is False
 
         # Non-dict and empty-name entries short-circuit to False.
@@ -511,7 +512,7 @@ class TestBuildSkillsSystemPrompt:
             "version": _SKILLS_SNAPSHOT_VERSION,
             "manifest": _build_skills_manifest(tmp_path / "skills"),
             "skills": [
-                {"skill_name": "keep-me", "category": "general",
+                {"skill_name": "keep-me", "category": "keep-me",
                  "frontmatter_name": "keep-me", "description": "Stay",
                  "platforms": [], "conditions": {}, "requires_apps": []},
                 {"skill_name": "phantom", "category": "openclaw-imports",
