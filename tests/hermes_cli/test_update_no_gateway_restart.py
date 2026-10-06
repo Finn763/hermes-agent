@@ -73,3 +73,37 @@ def test_defer_without_supervised_gateways_stays_quiet(capsys):
     # The pre-existing skip entry is the only one recorded.
     assert mock_skip.call_count == 1
 
+
+def test_supervised_gateway_found_when_argv_unreadable(monkeypatch):
+    """The argv probe must not be the only source of truth (#118643 review).
+
+    `_capture_gateway_argv` returns None when psutil is missing, the process is denied, or it
+    races away; detection must then fall back to the predicate `hermes gateway restart` trusts —
+    control-socket supervisor identity / the argv stamped into gateway_state.json.
+    """
+    import gateway.control_socket as control_socket
+    import hermes_cli.gateway as gw
+
+    monkeypatch.setattr(gw, "find_gateway_pids", lambda all_profiles=False: [4321])
+    monkeypatch.setattr(gw, "_capture_gateway_argv", lambda pid: None)
+    monkeypatch.setattr(control_socket, "identify_gateway",
+                        lambda home: {"pid": 4321, "supervisor": "systemd"})
+
+    found = fleet._externally_supervised_live_gateways()
+
+    assert [pid for pid, _ in found] == [4321]
+    assert "unreadable" in found[0][1]
+
+
+def test_undeclared_gateway_with_unreadable_argv_stays_quiet(monkeypatch):
+    import gateway.control_socket as control_socket
+    import gateway.status as status
+    import hermes_cli.gateway as gw
+
+    monkeypatch.setattr(gw, "find_gateway_pids", lambda all_profiles=False: [4321])
+    monkeypatch.setattr(gw, "_capture_gateway_argv", lambda pid: None)
+    monkeypatch.setattr(control_socket, "identify_gateway", lambda home: None)
+    monkeypatch.setattr(status, "read_runtime_status", lambda path: {"pid": 1, "argv": ["python"]})
+
+    assert fleet._externally_supervised_live_gateways() == []
+

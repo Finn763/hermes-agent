@@ -754,21 +754,41 @@ def _run_pending_fleet_restart() -> bool:
 
 
 def _externally_supervised_live_gateways() -> list[tuple[int, str]]:
-    """Live gateway pids whose captured argv carries ``--external-supervisor`` (#118643).
+    """Live gateway pids a deferred fleet restart never reaches (#118643).
 
-    A deferred fleet restart (``--no-gateway-restart``) never reaches these: their supervisor
-    (launchd/systemd) keeps the old process running against the post-update checkout, so newly
-    imported symbols land on stale ``sys.modules`` and sessions die with ImportError until an
-    operator kicks the unit."""
+    A deferred fleet restart (``--no-gateway-restart``) never reaches externally supervised
+    gateways: their supervisor (launchd/systemd) keeps the old process running against the
+    post-update checkout, so newly imported symbols land on stale ``sys.modules`` and sessions
+    die with ImportError until an operator kicks the unit.
+
+    Detection reuses ``gateway_declares_external_supervisor`` (the predicate
+    ``hermes gateway restart`` trusts): the live ``--external-supervisor`` argv marker when
+    readable, else the gateway's own declaration — control-socket supervisor identity, or the
+    argv stamped into ``gateway_state.json`` — so an unreadable argv does not silently hide the
+    gateways this warning exists for.
+    """
     found: list[tuple[int, str]] = []
     try:
         from hermes_cli.gateway import _capture_gateway_argv, find_gateway_pids
+        from hermes_cli.gateway_supervised_restart import gateway_declares_external_supervisor
+
         for pid in list(find_gateway_pids(all_profiles=True)):
             argv = None
             with suppress(Exception):
                 argv = _capture_gateway_argv(pid)
             if argv and "--external-supervisor" in argv:
                 found.append((int(pid), " ".join(str(part) for part in list(argv)[:6])))
+                continue
+            declared = False
+            with suppress(Exception):
+                declared = gateway_declares_external_supervisor(int(pid))
+            if declared:
+                found.append((
+                    int(pid),
+                    " ".join(str(part) for part in list(argv)[:6])
+                    if argv
+                    else "argv unreadable; externally supervised per control socket/state",
+                ))
     except Exception:
         return found
     return found
