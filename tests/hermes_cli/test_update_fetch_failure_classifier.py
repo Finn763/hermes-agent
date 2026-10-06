@@ -7,6 +7,10 @@ classifier must call out rate limiting / outages explicitly, and the raw
 stderr line must always be printed alongside the diagnosis.
 """
 
+from pathlib import Path
+
+import pytest
+
 from hermes_cli import update_cmd
 
 
@@ -118,8 +122,44 @@ class TestPrintFetchFailureContext:
         update_cmd._print_fetch_failure(self.BUG_STDERR, ["git"], tmp_path)
         out = capsys.readouterr().out
         assert "BUG:" in out  # raw first line still shown
-        assert str(tmp_path) in out  # repo the fetch ran in
+        # Home shortened so the OS username stays out of pasted bug reports.
+        assert str(tmp_path).replace(str(Path.home()), "~") in out
         assert "git" in out  # binary the fetch ran with
+
+    def test_check_call_site_forwards_git_and_repo(self, monkeypatch, tmp_path, capsys):
+        """`hermes update --check` must hand its own git argv + repo to the printer.
+
+        Direct-printer tests stay green if the call site reverts to the one-arg
+        form (git_cmd=None just skips the context line), so a failing fetch must
+        be driven through the real call site.
+        """
+        import subprocess
+
+        root = tmp_path / "hermes-agent"
+        (root / ".git").mkdir(parents=True)
+        monkeypatch.setattr(update_cmd._m(), "PROJECT_ROOT", root)
+        monkeypatch.setattr(
+            "hermes_cli.update_contract.evaluate_update_admission", lambda root: None
+        )
+        monkeypatch.setattr(update_cmd._check, "clear_git_debris", lambda root: None)
+        monkeypatch.setattr(update_cmd._check, "is_shallow_repository", lambda git_cmd, root: False)
+        failed = subprocess.CompletedProcess(["git", "fetch"], 1, "", self.BUG_STDERR)
+        seen = {}
+
+        def fake_fetch(git_cmd, repo, branch, depth_args):
+            seen["git_cmd"], seen["repo"] = git_cmd, repo
+            return failed, "origin/main"
+
+        monkeypatch.setattr(update_cmd._check, "fetch_compare_branch", fake_fetch)
+
+        with pytest.raises(SystemExit):
+            update_cmd._cmd_update_check("main", branch_explicit=True)
+
+        out = capsys.readouterr().out
+        assert f"(git: {seen['git_cmd'][0]}" in out  # the argv the fetch ran with
+        # ... and the repo printed is the one the fetch ran in, home shortened.
+        assert str(root).replace(str(Path.home()), "~") in out
+        assert seen["repo"] == root
 
     def test_no_context_line_without_git_cmd(self, capsys):
         update_cmd._print_fetch_failure("")

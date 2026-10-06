@@ -7,7 +7,6 @@ test patches on ``update_cmd`` stay effective).
 
 import logging
 from contextlib import suppress
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -420,7 +419,8 @@ def _print_fetch_failure(stderr: str, git_cmd=None, cwd=None) -> None:
 
     When the caller passes the argv it ran (*git_cmd*) and the repo (*cwd*),
     also print which git binary and repo were used, so a local-git failure
-    (BUG:, index-pack) stays separable from "network down" (#125138).
+    (BUG:, index-pack) stays separable from "network down" (#125138). The
+    repo path is home-shortened so the OS username stays out of bug reports.
     """
     stderr = (stderr or "").strip()
     print(_classify_fetch_failure(stderr))
@@ -428,13 +428,16 @@ def _print_fetch_failure(stderr: str, git_cmd=None, cwd=None) -> None:
         print(f"  {stderr.splitlines()[0]}")
     if git_cmd:
         # ponytail: context line only, no `git --version` probe (an extra
-        # subprocess that can itself hang); the caller passes its own argv.
+        # subprocess that can itself hang); the caller passes its own argv,
+        # printed verbatim — a `shutil.which` here resolved against THIS
+        # process's PATH (not the env the fetch used) and left absolute
+        # portable-git paths unchanged, so it was a no-op either way.
         binary = git_cmd[0] if isinstance(git_cmd, (list, tuple)) else str(git_cmd)
-        with suppress(Exception):
-            resolved = shutil.which(binary) if isinstance(binary, str) else None
-            if resolved:
-                binary = resolved
-        print(f"  (git: {binary} in {cwd})" if cwd is not None else f"  (git: {binary})")
+        if cwd is not None:
+            cwd = str(cwd).replace(str(Path.home()), "~")
+            print(f"  (git: {binary} in {cwd})")
+        else:
+            print(f"  (git: {binary})")
 
 
 def _probe_fork_bomb(argv: list) -> Optional[bool]:
