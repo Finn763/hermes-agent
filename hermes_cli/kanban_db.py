@@ -2934,6 +2934,7 @@ def block_task(
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            already_parked=_row_get(cur_row, "status") in ("blocked", "todo"),
         )
         if kind == "dependency":
             source_statuses = ("running", "ready")
@@ -2971,23 +2972,32 @@ def block_task(
 
 def _route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
+    prev_kind: Optional[str], prev_recurrences: int, already_parked: bool = False,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 
     ``dependency`` never enters the human ``blocked`` bucket: it waits in
     ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
     as something to "unblock". Every other kind counts unblock-loop
-    recurrences: block_task only fires from running/ready (AFTER an unblock
-    returned the task to the pool), so a stored ``block_kind`` equal to the
-    incoming one means blocked -> unblocked -> re-block for the same cause
-    (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+    recurrences: the counter only advances when the block arrives from the
+    pool (running/ready, AFTER an unblock returned the task to the pool), so a
+    stored ``block_kind`` equal to the incoming one means blocked -> unblocked
+    -> re-block for the same cause (un-typed None compares equal to a prior
+    un-typed block). Re-asserting a block on an already-parked card
+    (``already_parked``: ``blocked``/``todo``) refreshes the gate without
+    counting -- nothing returned the card to the pool between the two calls,
+    so it is not a recurrence. At ``BLOCK_RECURRENCE_LIMIT`` the task routes
+    to ``triage`` for a human.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    if already_parked and prev_kind == kind:
+        # A re-block of an already-parked card is not an unblock loop: hold the
+        # stored count so repeat operator re-blocks cannot trip the limit and
+        # demote the gate to triage.
+        recurrences = prev_recurrences
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
     if recurrences >= BLOCK_RECURRENCE_LIMIT:

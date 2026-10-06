@@ -112,6 +112,30 @@ def test_post_hoc_explicit_block_pins_a_dispatcher_parked_card(kanban_home: Path
         assert kinds[-1] == "blocked"
 
 
+def test_repeat_post_hoc_block_does_not_inflate_the_loop_breaker(kanban_home: Path) -> None:
+    """#102545 follow-up: re-asserting the same gate on an already-parked card
+    must not count toward BLOCK_RECURRENCE_LIMIT. The counter is defined as the
+    unblock-loop breaker (blocked -> unblocked -> re-block); a parked card never
+    returned to the pool between the two blocks, so counting the re-assertion
+    routed the second call to ``triage`` and demoted the operator's gate."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="repeat gate")
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', consecutive_failures = 0 "
+            "WHERE id = ?", (tid,),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'gave_up', NULL, ?)", (tid, int(time.time())),
+        )
+        conn.commit()
+
+        assert kb.block_task(conn, tid, reason="hold", kind="capability")
+        assert kb.block_task(conn, tid, reason="hold again", kind="capability")
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == 1
 
 
 # ---------------------------------------------------------------------------
