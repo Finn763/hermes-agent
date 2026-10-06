@@ -255,19 +255,24 @@ def _persist_branch(db, new_key: str, parent_key: str, title: str, history: list
         if title_source == "user":
             db.set_session_title(new_key, title)
         else:
-            try:
-                db.set_auto_title(new_key, title, source=title_source)
-            except ValueError:
-                # Taken lineage title (concurrent fan-out children compute the same next name):
-                # fall back to the next free name instead of failing the seed — the compensation
-                # below would roll the row (transcript included) back into a permanently untitled
-                # lazy row (#121062). Mirrors agent/title_generator._persist_session_title (#50537).
-                # An explicit user name still raises so the caller reports the conflict.
-                deduped = (db.get_next_title_in_lineage(title)
-                           if hasattr(db, "get_next_title_in_lineage") else None)
-                if not deduped or deduped == title:
-                    raise
-                db.set_auto_title(new_key, deduped, source=title_source)
+            # Taken lineage title (concurrent fan-out children compute the same next name):
+            # retry until a free name lands — a single retry still loses the *second* write
+            # under a fan-out wider than two, and the compensation below would then roll the
+            # row (transcript included) back into a permanently untitled lazy row (#121062).
+            # get_next_title_in_lineage recomputes from live state, so each pass advances; a
+            # validation failure that cannot advance re-raises. Unlike
+            # agent/title_generator._persist_session_title (#50537), which retries once, this
+            # site deliberately loops; an explicit user name still raises above.
+            while True:
+                try:
+                    db.set_auto_title(new_key, title, source=title_source)
+                    break
+                except ValueError:
+                    deduped = (db.get_next_title_in_lineage(title)
+                               if hasattr(db, "get_next_title_in_lineage") else None)
+                    if not deduped or deduped == title:
+                        raise
+                    title = deduped
     except Exception as exc:
         from hermes_state_errors import is_disk_full_error
         if compensate and not is_disk_full_error(exc):

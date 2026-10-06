@@ -118,6 +118,79 @@ def test_branch_children_of_same_parent_get_unique_titles(tmp_path):
             assert len(db.get_messages(c)) == 1
 
 
+def test_second_write_collision_retries_until_title_lands(tmp_path):
+    """Review follow-up: under fan-out wider than two the retry write collides again.
+
+    The single-retry fallback re-raised that second ``ValueError`` and the
+    compensation guard deleted the row + transcript — #121062 survived for any
+    fan-out of 3+. Simulated deterministically: a peer lands ``Work #3`` inside
+    the check-then-write window of the second attempt.
+    """
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session("parent-key", source="desktop", model="m")
+        db.set_session_title("parent-key", "Work")
+        db.create_session("squatter", source="desktop", model="m")
+        db.set_session_title("squatter", "Work #2")  # the first write collides
+
+        class _InterleavingDB:
+            """Peer fan-out child takes 'Work #3' before the retry write lands."""
+
+            def set_auto_title(self, session_id, title, *, source):
+                if session_id == "child-a" and title == "Work #3":
+                    db.create_session("peer", source="desktop", model="m")
+                    db.set_session_title("peer", "Work #3")
+                return db.set_auto_title(session_id, title, source=source)
+
+            def __getattr__(self, name):
+                return getattr(db, name)
+
+        server._persist_branch(_InterleavingDB(), "child-a", "parent-key", "Work #2",
+                               [{"role": "user", "content": "task a"}],
+                               source="desktop", cwd=str(tmp_path), profile_name="default",
+                               model="m", compensate=True, title_source="derived")
+        assert db.get_session_title("child-a") == "Work #4"
+        assert db.get_session_title_source("child-a") == "derived"
+        assert len(db.get_messages("child-a")) == 1
+
+
+def test_concurrent_fanout_children_all_end_titled(tmp_path):
+    """Six barrier-released children over one parent: all titled, all unique (#121062 review)."""
+    import threading
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session("parent-key", source="desktop", model="m")
+        db.set_session_title("parent-key", "Work")
+        barrier = threading.Barrier(6)
+        failures: list = []
+
+        def child(i: int) -> None:
+            title = server._branch_title(db, "parent-key")
+            barrier.wait()
+            try:
+                server._persist_branch(db, f"c{i}", "parent-key", title,
+                                       [{"role": "user", "content": f"task {i}"}],
+                                       source="desktop", cwd=str(tmp_path), profile_name="default",
+                                       model="m", compensate=True, title_source="derived")
+            except Exception as exc:  # recorded for the assertion below
+                failures.append((i, repr(exc)))
+
+        threads = [threading.Thread(target=child, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert failures == []
+        titles = [db.get_session_title(f"c{i}") for i in range(6)]
+        assert all(titles), titles
+        assert len(set(titles)) == 6
+
+
 def test_lazy_branch_child_gets_instant_title_on_first_turn(monkeypatch, tmp_path):
     """Parented but unseeded child (lazy row) is titled by the turn titler."""
     from hermes_state import SessionDB
