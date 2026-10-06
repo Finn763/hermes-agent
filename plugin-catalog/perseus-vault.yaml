@@ -13,8 +13,8 @@ capabilities:
     - perseus_recall
     - perseus_remember
     - perseus_forget
-  provides_hooks:
+  provides_hooks: []
+  provides_middleware:
     - tool_execution
-  provides_middleware: []
   requires_env:
     - PERSEUS_VAULT_MCP_TOKEN
