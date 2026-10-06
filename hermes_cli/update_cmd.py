@@ -16,6 +16,7 @@ import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patched via update_cmd)
 from hermes_cli import update_handoff as _update_handoff
 from hermes_cli.update_cmd_common import _best_effort
@@ -187,7 +188,6 @@ def _record_pre_update_backup_outcome(args, snapshot_id) -> None:
 def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):
     """Run git capturing utf-8 text (default cwd: checkout); ``network=True`` disables the
     terminal prompt so an HTTP 401 fails fast instead of hanging, and bounds the wait."""
-    from hermes_cli._subprocess_compat import windows_hide_flags
     try:
         return subprocess.run(
             git_cmd + args, cwd=_m().PROJECT_ROOT if cwd is None else cwd, capture_output=True,

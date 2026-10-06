@@ -254,10 +254,16 @@ def test_update_cmd_git_run_hides_git_window_on_network_path(monkeypatch):
 
 
 def test_update_cmd_git_text_kw_carries_hidden_window_flag():
-    """The shared kwargs dict must hide the console for every site that splats it."""
+    """The shared kwargs dict must hide the console for every site that splats it.
+
+    ``_GIT_TEXT_KW`` snapshots the helper's value at import time, so compare against the helper's
+    live value (``0`` off Windows) rather than the Windows-only constant — that keeps the pin
+    meaningful on every lane, and a dropped ``creationflags`` still reds it.
+    """
+    from hermes_cli._subprocess_compat import windows_hide_flags
     from hermes_cli.update_cmd_git import _GIT_TEXT_KW
 
-    assert _GIT_TEXT_KW["creationflags"] == _CREATE_NO_WINDOW
+    assert _GIT_TEXT_KW["creationflags"] == windows_hide_flags()
 
 
 def test_update_cmd_git_rev_parse_hides_git_window(monkeypatch, tmp_path):
