@@ -104,6 +104,35 @@ class TestCronCommandLifecycle:
         out = capsys.readouterr().out
         assert "Updated job" in out
 
+    def test_edit_no_catch_up_opts_out_of_stale_fires(self, tmp_cron_dir, capsys):
+        job = create_job(prompt="Daily report", schedule="every 1h")
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        args = parser.parse_args(["cron", "edit", job["id"], "--no-catch-up"])
+        cron_command(args)
+        updated = get_job(job["id"])
+        assert updated["catch_up"] is False
+        assert "Updated job" in capsys.readouterr().out
+
+        args = parser.parse_args(["cron", "edit", job["id"], "--catch-up"])
+        cron_command(args)
+        assert get_job(job["id"])["catch_up"] is True
+
+    def test_create_no_catch_up_reaches_the_job(self, tmp_cron_dir, capsys):
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        args = parser.parse_args(
+            ["cron", "create", "every 1h", "ping", "--no-catch-up"])
+        cron_command(args)
+
+        jobs = load_jobs()
+        assert len(jobs) == 1
+        assert jobs[0]["catch_up"] is False
+
     def test_create_with_multiple_skills(self, tmp_cron_dir, capsys):
         cron_command(
             Namespace(

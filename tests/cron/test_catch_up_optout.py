@@ -117,6 +117,39 @@ class TestCatchUpOptOut:
         assert [d["id"] for d in get_due_jobs()] == []
 
 
+class TestCatchUpNormalization:
+    """The flag must mean one thing on both doors: the create registry used to drop a
+    string ``"false"`` (silently leaving catch-up on) and the update registry inverted
+    it via ``bool("false") == True``."""
+
+    def test_create_parses_string_forms_and_stores_only_opt_out(self, cron_store):
+        from cron.jobs import create_job
+
+        opted_out = create_job(prompt="p", schedule="every 1h", catch_up="false")
+        assert opted_out["catch_up"] is False
+        assert load_jobs()[0]["catch_up"] is False
+
+        opted_in = create_job(prompt="q", schedule="every 1h", catch_up="true")
+        assert "catch_up" not in opted_in
+        default = create_job(prompt="r", schedule="every 1h")
+        assert "catch_up" not in default
+
+    def test_update_parses_string_false_and_reaches_the_skip_guard(self, cron_store):
+        from cron.jobs import update_job
+
+        save_jobs([_friday_job("friday")])
+        updated = update_job("friday", {"catch_up": "false"})
+        assert updated["catch_up"] is False
+        assert [d["id"] for d in get_due_jobs()] == []
+
+    def test_update_rejects_non_boolean_values(self, cron_store):
+        from cron.jobs import update_job
+
+        save_jobs([_friday_job("friday")])
+        with pytest.raises(ValueError):
+            update_job("friday", {"catch_up": "maybe"})
+
+
 class TestMisfireSweepHonoursOptOut:
     def test_sweep_skips_opted_out_stale_job(self, cron_store):
         import threading

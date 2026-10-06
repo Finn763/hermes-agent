@@ -80,6 +80,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "into its prompt, so it can dedupe against what was already "
             "reported and continue where the last run left off (scouts, "
             "monitors, incremental digests). First run is unchanged.")
+    cron_create.add_argument(
+        "--no-catch-up", dest="catch_up", action="store_const", const=False, default=None,
+        help="Skip stale fires after the host was asleep/off (#111212): a missed "
+            "occurrence past the grace window is skipped instead of firing late.")
 
     cron_edit = cron_subparsers.add_parser("edit", help="Edit an existing scheduled job")
     cron_edit.add_argument("job_id", help="Job ID to edit")
@@ -114,6 +118,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "previous output (dedupe, continue where it left off).")
     cron_edit.add_argument("--no-continuity", dest="continuity", action="store_const", const=False,
         help=("Turn off run-to-run continuity (other context_from job refs are preserved)."))
+    cron_edit.add_argument("--no-catch-up", dest="catch_up", action="store_const", const=False,
+        default=None, help="Skip stale fires after host sleep (per-job catch-up opt-out, #111212).")
+    cron_edit.add_argument("--catch-up", dest="catch_up", action="store_const", const=True,
+        help="Catch up again on a missed fire (default behavior).")
     cron_edit.add_argument("--monitor-script", dest="monitor_script",
         help="Set/replace the monitor source script (see `hermes cron create "
             "--monitor-script`). Pass empty string to clear.")

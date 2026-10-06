@@ -1573,6 +1573,26 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+def _normalize_catch_up(value: Any) -> Optional[bool]:
+    """Strict tri-state for the per-job catch-up opt-out: None stays absent (absent means catch
+    up), booleans pass, and the common string/int spellings parse. ``bool("false")`` would silently
+    INVERT the opt-out while a dropped string on the create path left catch-up on, so strings are
+    parsed explicitly and anything else raises BEFORE storing."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "on"}:
+            return True
+        if text in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(f"Invalid catch_up {value!r}: expected a boolean.")
+
+
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
 _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
@@ -1587,13 +1607,14 @@ _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "no_agent": bool,
     "context_from": _normalize_context_from,
     "failure_deliver": _normalize_failure_deliver,
+    "catch_up": _normalize_catch_up,
 }
 _UPDATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "workdir": lambda v: None if v in {None, "", False} else _normalize_workdir(v),
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
-    "catch_up": bool,
+    "catch_up": _normalize_catch_up,
 }
 
 
@@ -1799,7 +1820,7 @@ def create_job(
         if value is not None:
             job[key] = value
     # Absent key = catch up (pre-feature behavior); only a False opt-out is stored.
-    if catch_up is False:
+    if f["catch_up"] is False:
         job["catch_up"] = False
 
     with _jobs_lock():
