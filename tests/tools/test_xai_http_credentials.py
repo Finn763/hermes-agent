@@ -236,3 +236,72 @@ def test_prefer_api_key_honors_profile_scope_only_key(tmp_path, monkeypatch):
         secret_scope.reset_secret_scope(token)
         secret_scope.set_multiplex_active(previous_multiplex)
         invalidate_env_cache()
+
+
+def test_xai_streamer_credential_reads_prefer_api_key(monkeypatch):
+    """Sibling sites of #87045: both XAIStreamer credential reads must prefer an
+    explicit XAI_API_KEY like _generate_xai_tts / _xai_requirements — a
+    subscription OAuth bearer authorizes chat but 403s on the metered /v1/tts.
+    Asserting on pool calls and on the bearer the WS dial would use keeps this
+    honest about the real defect (truthiness was already True)."""
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+
+    from tools.tts_streaming import XAIStreamer
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "tools.xai_http.get_env_value",
+        lambda name, default=None: {"XAI_API_KEY": "paid-key-x1"}.get(name, default),
+    )
+    calls = {"pool_select": 0, "pool_refresh": 0}
+
+    def _recording_load_pool(provider_id):
+        class _RecordingPool:
+            def select(self):
+                calls["pool_select"] += 1
+                return SimpleNamespace(
+                    access_token="oauth-token-x1",
+                    runtime_api_key=None,
+                    runtime_base_url=None,
+                    base_url="https://api.x.ai/v1",
+                )
+
+            def try_refresh_matching(self, _hint):
+                calls["pool_refresh"] += 1
+                return None
+
+        if provider_id == "xai-oauth":
+            return _RecordingPool()
+        raise KeyError(provider_id)
+
+    monkeypatch.setattr("agent.credential_pool.load_pool", _recording_load_pool)
+
+    seen = {}
+
+    def _fake_connect(url, extra_headers=None, **kwargs):
+        seen["auth"] = (extra_headers or {}).get("Authorization")
+        seen["url"] = url
+        raise RuntimeError("STOP_BEFORE_NETWORK")
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=_fake_connect))
+
+    assert XAIStreamer.available() is True
+    assert calls["pool_select"] == 0, (
+        "availability probe consulted the OAuth pool despite a configured API key"
+    )
+
+    streamer = XAIStreamer({}, {})
+
+    async def _drive():
+        try:
+            async for _ in streamer._async_frames("hello"):
+                pass
+        except RuntimeError:
+            pass
+
+    asyncio.run(_drive())
+    assert seen["url"] == "wss://api.x.ai/v1/tts"
+    assert seen["auth"] == "Bearer paid-key-x1", f"WS dial used {seen['auth']!r}"
+    assert calls["pool_select"] == 0 and calls["pool_refresh"] == 0, calls

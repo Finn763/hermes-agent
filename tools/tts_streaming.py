@@ -278,9 +278,10 @@ class GeminiStreamer(StreamingTTSProvider):
 @register("xai")
 class XAIStreamer(StreamingTTSProvider):
     """xAI WebSocket TTS (``wss://api.x.ai/v1/tts``) → binary PCM frames (24 kHz mono int16).
-    Credentials route through ``resolve_xai_http_credentials`` (OAuth or XAI_API_KEY), same as the
-    sync path. ``_collect_async`` bridges the async WS loop to the sync iterator contract (test
-    seam).
+    Credentials route through ``resolve_xai_http_credentials(prefer_api_key=True)`` — an explicit
+    XAI_API_KEY wins over subscription OAuth, same as the sync path, because the OAuth bearer
+    403s on the metered endpoint. ``_collect_async`` bridges the async WS loop to the sync
+    iterator contract (test seam).
 
     Salvaged from PR #47588 (@Cdddo): xAI's chunked TTS API is WebSocket-only (``wss://api.x.ai/v1/tts``).
     """
@@ -289,7 +290,9 @@ class XAIStreamer(StreamingTTSProvider):
     def available() -> bool:
         try:
             from tools.xai_http import resolve_xai_http_credentials
-            return bool(str(resolve_xai_http_credentials().get("api_key") or "").strip())
+            # prefer_api_key: subscription OAuth authorizes chat but 403s on the
+            # metered /v1/tts, so the explicit key wins here like the sync path.
+            return bool(str(resolve_xai_http_credentials(prefer_api_key=True).get("api_key") or "").strip())
         except Exception:
             return False
 
@@ -308,7 +311,9 @@ class XAIStreamer(StreamingTTSProvider):
         import websockets
         from tools.tts_tool_providers import DEFAULT_XAI_VOICE_ID
         from tools.xai_http import resolve_xai_http_credentials
-        api_key = str(resolve_xai_http_credentials().get("api_key") or "").strip()
+        # Same ordering as the sync path: an explicit XAI_API_KEY beats the OAuth
+        # bearer, which 403s on /v1/tts even when it authorizes chat.
+        api_key = str(resolve_xai_http_credentials(prefer_api_key=True).get("api_key") or "").strip()
         if not api_key:
             raise RuntimeError("No xAI credentials for streaming TTS")
         voice = str(self.section.get("voice_id", DEFAULT_XAI_VOICE_ID)).strip() or DEFAULT_XAI_VOICE_ID
