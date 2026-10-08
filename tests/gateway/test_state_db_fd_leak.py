@@ -25,6 +25,8 @@ These tests are the fd-count regression guard the issue asks for:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -365,3 +367,151 @@ def test_live_connection_count_and_growth_guard(monkeypatch, tmp_path):
     monkeypatch.setattr("gateway.run._fd_guard_warn_ceiling", lambda: -1)
     _housekeeping_state_db_fd_guard()
     assert _fd_guard_warn_ceiling() > 0  # the real ceiling is a positive int
+
+
+# ── Multiplex: every served profile's state.db, process-wide ────────────────
+#
+# Review case on #96152: a multiplex gateway holds one tracked writer per
+# served profile, so 257 profile databases can exhaust the process descriptor
+# limit while every individual database stays below the per-path ceiling. The
+# guard must report that aggregate/process-level pressure, not stay silent
+# because the launch profile is quiet.
+
+MULTIPLEX_PROFILE_COUNT = 257
+
+
+@contextlib.contextmanager
+def _tracked_connections(paths, per_path=1):
+    """Simulate ``per_path`` live connections on each path via the registry."""
+    from hermes_cli import sqlite_safe_read as ssr
+
+    for path in paths:
+        for _ in range(per_path):
+            ssr.track_connection(path)
+    try:
+        yield
+    finally:
+        for path in paths:
+            for _ in range(per_path):
+                ssr.untrack_connection(path)
+
+
+def _force_fd_readings(monkeypatch, *, soft, open_fds):
+    """Pin the read-pool fd-headroom readings (the owner of the policy)."""
+    monkeypatch.setattr("hermes_state_readpool._fd_soft_limit", lambda: soft)
+    monkeypatch.setattr("hermes_state_readpool._open_fd_count", lambda: open_fds)
+    monkeypatch.setattr("hermes_state_readpool._fd_usage_cache", (0.0, None))
+
+
+def _guard_warning_messages(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "gateway.run"
+    ]
+
+
+def test_multiplexed_profiles_below_per_path_ceiling_trip_process_guard(
+    monkeypatch, tmp_path, caplog
+):
+    """257 profiles, each healthy per-path, must still warn process-wide.
+
+    Red before the multiplex fix: the guard observed only the launch
+    profile's state.db, so a quiet launch profile hid 257 leaked per-profile
+    stores until EMFILE.
+    """
+    from gateway.run import _fd_guard_last, _housekeeping_state_db_fd_guard
+    from hermes_cli import sqlite_safe_read as ssr
+
+    # 256-descriptor soft limit with 250 open: the last-resort fd-headroom
+    # class the read pool itself gates read-opens on.
+    _force_fd_readings(monkeypatch, soft=256, open_fds=250)
+    _fd_guard_last.clear()
+
+    profiles = [
+        tmp_path / f"profile-{i}" / "state.db"
+        for i in range(MULTIPLEX_PROFILE_COUNT)
+    ]
+    with _tracked_connections(profiles, per_path=2):  # SessionStore + AsyncSessionDB
+        with caplog.at_level(logging.WARNING, logger="gateway.run"):
+            _housekeeping_state_db_fd_guard()
+
+        # Every served profile was observed, each far below the per-path ceiling.
+        for path in profiles:
+            assert _fd_guard_last[ssr._key(path)] == 2
+        assert _fd_guard_last[ssr._key(profiles[0])] <= 22
+
+        # The aggregate crossed both the process budget (256 - 64 reserve)
+        # and the measured fd headroom -> the guard must have said so.
+        counts = ssr.live_connection_counts()
+        assert sum(counts.values()) >= 2 * MULTIPLEX_PROFILE_COUNT
+        expected = f"total {sum(counts.values())} across {len(counts)} database path(s)"
+        messages = _guard_warning_messages(caplog)
+        assert any(expected in message for message in messages), messages
+        assert any("multiplexed gateway" in message for message in messages), messages
+
+
+def test_multiplexed_profiles_trip_guard_without_fd_probe(
+    monkeypatch, tmp_path, caplog
+):
+    """The aggregate check must not depend on a measurable fd table.
+
+    With descriptor counting unavailable (fail-open platforms like Windows),
+    tracked connections alone reaching the process budget is still evidence
+    of the #96027 multiplex failure mode.
+    """
+    from gateway.run import _fd_guard_last, _housekeeping_state_db_fd_guard
+    from hermes_cli import sqlite_safe_read as ssr
+
+    _force_fd_readings(monkeypatch, soft=256, open_fds=None)
+    _fd_guard_last.clear()
+
+    profiles = [
+        tmp_path / f"profile-{i}" / "state.db" for i in range(50)
+    ]
+    with _tracked_connections(profiles, per_path=4):  # 200 >= 256 - 64
+        with caplog.at_level(logging.WARNING, logger="gateway.run"):
+            _housekeeping_state_db_fd_guard()
+
+        for path in profiles:
+            assert _fd_guard_last[ssr._key(path)] == 4
+        counts = ssr.live_connection_counts()
+        expected = f"total {sum(counts.values())} across {len(counts)} database path(s)"
+        messages = _guard_warning_messages(caplog)
+        assert any(expected in m for m in messages), messages
+        assert any("multiplexed gateway" in m for m in messages), messages
+
+
+def test_multiplexed_profile_path_ceiling_still_warns(monkeypatch, tmp_path, caplog):
+    """Per-path ceilings keep firing for non-launch profiles too."""
+    from gateway.run import _fd_guard_last, _housekeeping_state_db_fd_guard
+    from hermes_cli import sqlite_safe_read as ssr
+
+    _force_fd_readings(monkeypatch, soft=1024, open_fds=200)  # plenty of headroom
+    _fd_guard_last.clear()
+
+    noisy = tmp_path / "profile-7" / "state.db"
+    with _tracked_connections([noisy], per_path=23):  # ceiling is 2*(1+8)+4 = 22
+        with caplog.at_level(logging.WARNING, logger="gateway.run"):
+            _housekeeping_state_db_fd_guard()
+
+        messages = _guard_warning_messages(caplog)
+        assert any(
+            ssr._key(noisy) in message and "exceed the healthy ceiling" in message
+            for message in messages
+        ), messages
+
+
+def test_healthy_multiplex_is_silent(monkeypatch, tmp_path, caplog):
+    """A small, roomy multiplex must not produce process-level warnings."""
+    from gateway.run import _fd_guard_last, _housekeeping_state_db_fd_guard
+
+    _force_fd_readings(monkeypatch, soft=1024, open_fds=200)
+    _fd_guard_last.clear()
+
+    profiles = [tmp_path / f"profile-{i}" / "state.db" for i in range(4)]
+    with _tracked_connections(profiles, per_path=2):
+        with caplog.at_level(logging.WARNING, logger="gateway.run"):
+            _housekeeping_state_db_fd_guard()
+
+        assert not _guard_warning_messages(caplog)

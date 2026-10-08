@@ -4554,12 +4554,13 @@ def _run_planned_stop_watcher(
 # housekeeping thread, so no locking is needed.
 _fd_guard_last: Dict[str, int] = {}
 
-# Healthy ceiling for live connections to one state.db in a single-profile
-# gateway: 2 long-lived SessionDBs (SessionStore + AsyncSessionDB), each
-# holding 1 writer + up to _READ_POOL_MAX pooled readers. Anything above this
-# is an unclosed-handle leak, not configuration. _READ_POOL_MAX is resolved
-# lazily inside the guard so a future pool change cannot silently drift the
-# ceiling away from what a healthy gateway actually holds.
+# Healthy ceiling for live connections to one state.db: 2 long-lived
+# SessionDBs (SessionStore + AsyncSessionDB), each holding 1 writer + up to
+# _READ_POOL_MAX pooled readers. Anything above this is an unclosed-handle
+# leak, not configuration — and it applies per PATH: a multiplex gateway
+# keeps one such pair per served profile. _READ_POOL_MAX is resolved lazily
+# inside the guard so a future pool change cannot silently drift the ceiling
+# away from what a healthy gateway actually holds.
 def _fd_guard_warn_ceiling() -> int:
     from hermes_state_readpool import _READ_POOL_MAX
 
@@ -4569,35 +4570,78 @@ def _fd_guard_warn_ceiling() -> int:
 def _housekeeping_state_db_fd_guard() -> None:
     """Log live state.db connection growth for the #96027 fd-leak guard.
 
-    Counts this process's tracked sqlite3 connections to the active state.db
-    and compares against the last tick. INFO on any growth (the issue's
-    ``~2 connections/day`` signature shows up within hours), WARNING once the
-    count passes the healthy ceiling (the EMFILE cliff is still weeks away).
+    Runs two checks over the process's tracked sqlite3 connections:
+
+    - per PATH (every tracked database, not just the launch profile's):
+      INFO on any growth (the issue's ``~2 connections/day`` signature shows
+      up within hours), WARNING once a path passes the healthy ceiling;
+    - process-wide: WARNING when the aggregate across all paths crosses the
+      descriptor budget owned by ``hermes_state_readpool`` (its fd-headroom
+      reserve) or when the process is already out of that headroom. This is
+      the form of #96027 a per-path ceiling cannot see (#98573): a multiplex
+      gateway holding one tracked store per served profile can exhaust the
+      process descriptor limit while every individual database stays healthy.
+
     Pure read of the tracking registry — opens no descriptors, so the check
     itself can never leak. Idempotent; call once per hour.
     """
-    from hermes_cli.sqlite_safe_read import live_connection_count
+    from hermes_cli.sqlite_safe_read import live_connection_counts
     from hermes_state import _default_db_path
+    from hermes_state_readpool import (
+        _FD_HEADROOM_RESERVE,
+        _fd_headroom_ok,
+        _fd_soft_limit,
+        _open_fd_count,
+    )
 
-    db_path = str(Path(_default_db_path()).resolve())
-    current = live_connection_count(db_path)
-    previous = _fd_guard_last.get(db_path)
+    counts = live_connection_counts()
+    launch_key = str(Path(_default_db_path()).resolve())
     ceiling = _fd_guard_warn_ceiling()
-    if previous is not None and current > previous:
-        logger.info(
-            "state.db live SQLite connections grew %d -> %d (fd-leak guard, #96027)",
-            previous,
-            current,
-        )
-    if current > ceiling:
+    for db_path in set(counts) | set(_fd_guard_last) | {launch_key}:
+        current = counts.get(db_path, 0)
+        previous = _fd_guard_last.get(db_path)
+        if previous is not None and current > previous:
+            logger.info(
+                "state.db live SQLite connections grew %d -> %d on %s (fd-leak guard, #96027)",
+                previous,
+                current,
+                db_path,
+            )
+        if current > ceiling:
+            logger.warning(
+                "state.db live SQLite connections at %d exceed the healthy "
+                "ceiling (%d) on %s — connections are leaking; check for "
+                "unclosed SessionDB handles (#96027)",
+                current,
+                ceiling,
+                db_path,
+            )
+        _fd_guard_last[db_path] = current
+
+    # Process-wide aggregate: a quiet launch profile must not hide N served
+    # profiles' worth of stores (the fd-headroom reserve and soft limit belong
+    # to hermes_state_readpool, the fd-budget owner).
+    total = sum(counts.values())
+    soft = _fd_soft_limit()
+    open_fds = _open_fd_count()
+    budget = None if soft is None else soft - _FD_HEADROOM_RESERVE
+    if total and ((budget is not None and total >= budget) or not _fd_headroom_ok()):
+        if open_fds is None:
+            fd_desc = f"descriptor usage unmeasurable, soft limit {soft}"
+        elif open_fds < 0:
+            fd_desc = f"descriptor probe starved (EMFILE), soft limit {soft}"
+        else:
+            fd_desc = f"{open_fds} of {soft} descriptors open"
         logger.warning(
-            "state.db live SQLite connections at %d exceed the healthy "
-            "ceiling (%d) — connections are leaking; check for unclosed "
-            "SessionDB handles (#96027)",
-            current,
-            ceiling,
+            "state.db live SQLite connections total %d across %d database path(s) "
+            "(%s, %d reserved for non-SQLite fds) — a multiplexed gateway holds one "
+            "store per served profile, so this is process-level fd pressure; check "
+            "for unclosed SessionDB handles (#96027)",
+            total,
+            len(counts),
+            fd_desc,
+            _FD_HEADROOM_RESERVE,
         )
-    _fd_guard_last[db_path] = current
 
 
 def _housekeeping_chore(label: str, fn, *args, **kwargs) -> None:

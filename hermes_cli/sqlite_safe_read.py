@@ -113,6 +113,18 @@ def live_connection_count(path: Path | str) -> int:
         return _live_connections.get(_key(path), 0)
 
 
+def live_connection_counts() -> dict[str, int]:
+    """Snapshot of the live-connection registry: canonical path -> count.
+
+    A multiplex gateway serves one ``state.db`` per profile from a single
+    process, so the #96027 housekeeping guard watches every path in this
+    snapshot — a count looked up for one path (the launch profile) cannot see
+    257 per-profile stores walking the process into EMFILE (#98573).
+    """
+    with _live_lock:
+        return dict(_live_connections)
+
+
 class _TrackingMixin:
     """Untrack-on-close behaviour, mixable into any Connection subclass.
 
