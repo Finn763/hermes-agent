@@ -41,7 +41,16 @@ function candidateTurn(
   const turnMessages = messages.slice(displayStart + 1)
   const intervals: string[][] = [[]]
 
-  for (const row of rows.slice(start + 1)) {
+  for (const [offset, row] of rows.slice(start + 1).entries()) {
+    // A redirect that cut off streaming narration persists the streamed text as
+    // a text-only assistant row directly before the correction that replaced it.
+    // The pair is turn content, not a tool-less final reply.
+    const next = rows[start + 2 + offset]
+
+    const interrupted =
+      next?.role === 'user' &&
+      userText(String(next.content ?? '')) === userText(corrections[intervals.length - 1] ?? '')
+
     if (row.role === 'user') {
       if (userText(String(row.content ?? '')) !== userText(corrections[intervals.length - 1] ?? '')) {
         return null
@@ -55,7 +64,7 @@ function candidateTurn(
 
       intervals.push([])
     } else if (row.role === 'assistant') {
-      if (!hasTools(row) || typeof row.content !== 'string' || row.display_kind === 'hidden') {
+      if ((!hasTools(row) && !interrupted) || typeof row.content !== 'string' || row.display_kind === 'hidden') {
         return null
       }
 
@@ -101,11 +110,25 @@ function locateTurn(
 ): PersistedTurn | null {
   let candidate: PersistedTurn | null = null
 
+  // A text-only row the redirect interrupted is not a settled final-reply
+  // boundary: its correction follows it directly, so the scan can keep going
+  // back to the opener of the still-running turn.
+  const correctionTexts = new Set((inflight.corrections ?? []).map(correction => userText(correction)))
+
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index]
 
     // A final reply is an actual boundary; durable tool commentary is not.
-    if (row.role === 'assistant' && !hasTools(row) && typeof row.content === 'string' && row.content.trim()) {
+    const next = rows[index + 1]
+    const interrupted = next?.role === 'user' && correctionTexts.has(userText(String(next.content ?? '')))
+
+    if (
+      row.role === 'assistant' &&
+      !hasTools(row) &&
+      typeof row.content === 'string' &&
+      row.content.trim() &&
+      !interrupted
+    ) {
       break
     }
 
