@@ -112,6 +112,11 @@ def transition(tmp_path):
                  package / "update_lock.py")
     shutil.copy2(Path(update_completion.__file__).with_name("_subprocess_compat.py"),
                  package / "_subprocess_compat.py")
+    # The Windows join path (update_lock._pid_alive -> _early_recovery._pid_is_running) runs in
+    # the -I -S prepared child, where psutil is unavailable; without this the joiner counts the
+    # live owner as exited and refuses its own update tree's tail.
+    shutil.copy2(Path(update_completion.__file__).with_name("_early_recovery.py"),
+                 package / "_early_recovery.py")
     (package / "gitlock.py").write_text(
         "from hermes_cli.probe import event\n"
         "convert_treeless_checkout_first = lambda root: event('convert')\n"
@@ -671,6 +676,105 @@ def test_interactive_configuration_keeps_terminal_input(transition):
             proc.send_signal(signal.SIGINT)
             proc.wait(timeout=5)
         os.close(master)
+
+
+@pytest.mark.platforms("windows")
+def test_windows_completion_child_gets_a_non_interactive_stdin(transition):
+    """#125437: `hermes update` from a terminal runs the completion tail in a CREATE_NO_WINDOW
+    child whose own windowless console supplies the stdin an inherited one points at -- isatty()
+    there reports a TTY while no keystroke can ever arrive, so a tail prompt (memory-provider
+    dependency consent, config migration) is displayed but never answerable and the update
+    wedges with its lock held. The tail child must get a non-interactive stdin so every prompt
+    takes its documented non-interactive path."""
+    from hermes_cli import update_completion
+
+    root, git, old, new, request = transition
+    shutil.copy2(update_completion.__file__, root / "hermes_cli/update_completion.py")
+    # The maintenance step stands in for the tail's prompt sites (the memory-provider consent
+    # and the config-migration ask share the sys.stdin/sys.stdout isatty() gate). It records
+    # what such a prompt would see and whether a read resolves -- bounded, so that a wedge
+    # fails this test instead of hanging it: the watchdog reports the block and exits.
+    (root / "hermes_cli/update_cmd_maint.py").write_text(
+        "import os, sys, threading\n"
+        "from hermes_cli.probe import event\n"
+        "\n"
+        "def _run_post_update_maintenance(**kwargs):\n"
+        "    stdin_isatty = bool(sys.stdin is not None and sys.stdin.isatty())\n"
+        "    interactive = stdin_isatty and sys.stdout.isatty()\n"
+        "    got = []\n"
+        "    def report(value):\n"
+        "        event('maintenance', stdin_isatty=stdin_isatty,\n"
+        "              interactive=interactive, input=value, **kwargs)\n"
+        "    def watchdog():\n"
+        "        if not got:\n"
+        "            report('blocked')\n"
+        "            os._exit(0)  # a console read that never returns cannot be unwound\n"
+        "    timer = threading.Timer(5.0, watchdog)\n"
+        "    timer.daemon = True\n"
+        "    timer.start()\n"
+        "    try:\n"
+        "        got.append('line:' + input())\n"
+        "    except BaseException as exc:\n"
+        "        got.append('exc:' + type(exc).__name__)\n"
+        "    finally:\n"
+        "        timer.cancel()\n"
+        "    report(got[0])\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    request_path = root / "completion-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    exit_file = root / "driver-exit.txt"
+    driver = (
+        "import json, runpy, sys\n"
+        "try:\n"
+        "    transport = runpy.run_path(sys.argv[1])\n"
+        "    request = json.loads(open(sys.argv[2], encoding='utf-8').read())\n"
+        "    code = transport['run_completion'](request)['exit_code']\n"
+        "except BaseException as exc:\n"
+        "    code = f'{type(exc).__name__}: {exc}'\n"
+        "with open(sys.argv[3], 'w', encoding='utf-8') as fh:\n"
+        "    fh.write(str(code))\n"
+    )
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0  # SW_HIDE: a real console, standing in for the user's terminal
+    try:
+        # No stdio redirection: with all three streams left to their defaults the driver adopts
+        # the new console's, like the terminal that ran `hermes update`.
+        driver_proc = subprocess.Popen(
+            [sys.executable, "-c", driver, str(Path(update_completion.__file__).resolve()),
+             str(request_path), str(exit_file)],
+            cwd=root, env={**os.environ, "PYTHONPATH": str(root), "HERMES_HOME": request["home"]},
+            creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=startup,
+        )
+    except OSError as exc:
+        pytest.skip(f"this host cannot create a console for the update driver: {exc}")
+    try:
+        driver_proc.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the completion driver did not finish within 120s")
+    finally:
+        if driver_proc.poll() is None:
+            driver_proc.kill()
+            driver_proc.wait(timeout=10)
+    events_path = root / "events.jsonl"
+    driver_result = exit_file.read_text(encoding="utf-8") if exit_file.is_file() else "driver died"
+    assert events_path.is_file(), driver_result
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    maintenance = [event for event in events if event["name"] == "maintenance"]
+    assert maintenance, (driver_result, events)
+    maintenance = maintenance[0]
+    assert maintenance["stdin_isatty"] is False, (
+        "the Windows completion child's stdin claims a TTY: a tail prompt would be displayed "
+        f"and never answerable (#125437): {maintenance}"
+    )
+    assert maintenance["interactive"] is False, maintenance
+    assert maintenance["input"].startswith("exc:"), (
+        f"a read at the tail's prompt must resolve, not block: {maintenance}"
+    )
+    assert driver_result == "0", f"the tail must complete on its own: {driver_result}"
+    assert not (Path(request["home"]) / "completion-pending").exists()
 
 
 @pytest.mark.platforms("posix")

@@ -89,10 +89,22 @@ def run_completion(request: dict) -> dict:
         # The child joins the update tree's checkout lock: it inherits the locked fd (POSIX)
         # or dies with us (Windows job: created suspended, bound, then resumed, so nothing it
         # starts runs outside the job), so the lock is never free while it runs.
+        # Windows: CREATE_NO_WINDOW gives this child its own windowless console, and THAT
+        # console supplies the stdin it inherits -- isatty() reports a TTY while no keystroke
+        # can ever arrive (the user's console stays the parent's), so a tail prompt
+        # (memory-provider dependency consent, config migration) was displayed and never
+        # answerable, wedging the update with its lock held (#125437). A pipe closed before the
+        # child runs reads as an honest non-interactive stdin (not NUL: CPython reports Windows
+        # char devices as TTYs), so every prompt takes its documented non-interactive path.
+        # POSIX keeps stdin inherited for interactive prompts
+        # (test_interactive_configuration_keeps_terminal_input).
         proc = subprocess.Popen(
             command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE if os.name == "nt" else None,
             **({"start_new_session": True, "pass_fds": checkout_lock_fds(root)} if os.name == "posix" else
                {"creationflags": subprocess.CREATE_NO_WINDOW | CREATE_SUSPENDED}))
+        if os.name == "nt":
+            proc.stdin.close()  # immediate EOF, never a wait no writer can end
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
             # A failure here unwinds through the cleanup below, never orphans the child.

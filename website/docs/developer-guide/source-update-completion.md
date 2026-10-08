@@ -13,9 +13,12 @@ application module is evicted or reloaded in the command process.
 The request carries canonical source/home, desktop product selection, interactive
 and gateway mode, pre-update version, active and sibling snapshot identifiers,
 serialized runtime plan, open receipt identity/data and paused-Windows token. It
-contains data, never callables or pickles. stdin stays inherited for interactive
-configuration prompts; gateway mode retains its non-interactive behavior. Child
-output stays visible and is mirrored by the parent's update output stream.
+contains data, never callables or pickles. stdin stays inherited on POSIX for
+interactive configuration prompts; on Windows the child runs on its own windowless
+console, where no answer can ever arrive, so it is given a closed stdin pipe and
+every prompt takes its documented non-interactive path. Gateway mode retains its
+non-interactive behavior. Child output stays visible and is mirrored by the
+parent's update output stream.
 
 ## New-code owner
 
