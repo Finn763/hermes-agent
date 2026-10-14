@@ -556,7 +556,7 @@ class MemoryStore:
                 return _error(message, failure_class)
             patched = entries[:idx] + [after] + entries[idx + 1:]
             new_total = len(ENTRY_DELIMITER.join(patched))
-            if new_total > limit:
+            if limit is not None and new_total > limit:
                 return self._failure_with_entries(target, (
                     f"Patch would put memory at {new_total:,}/{limit:,} chars. Shorten the new "
                     f"text, or 'remove' other stale or less important entries to make room "
